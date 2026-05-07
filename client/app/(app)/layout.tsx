@@ -1,10 +1,13 @@
 "use client";
 
 import { useRouter, usePathname } from "next/navigation";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { MessageSquare, FolderOpen, LogOut, PanelLeftClose, PanelLeft, Database, UserCircle, ScrollText } from "lucide-react";
 import { NavLink, MobileNavLink } from "@/components/nav-link";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
+import { useIdleTimeout } from "@/hooks/use-idle-timeout";
+
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 interface NavItem {
   href: string;
@@ -19,6 +22,14 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const noNavRoutes = ["/onboarding"];
   const hideNav=noNavRoutes.includes(pathname);
+
+  const handleIdle = useCallback(() => {
+    logout();
+    router.replace("/login");
+  }, [logout, router]);
+
+  useIdleTimeout({ timeoutMs: IDLE_TIMEOUT_MS, onTimeout: handleIdle });
+
   useEffect(() => {
     if (loading) return;
     if (!user) {

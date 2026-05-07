@@ -39,7 +39,6 @@ export default function AuthCallbackPage() {
       <Suspense fallback={<p className="text-muted-foreground text-sm">Signing you in…</p>}>
         <CallbackHandler />
       </Suspense>
-      <p className="text-muted-foreground text-sm">Signing you in…</p>
     </div>
   );
 }
