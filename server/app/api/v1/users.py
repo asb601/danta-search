@@ -81,6 +81,7 @@ async def list_users(
             name=u.name,
             picture=u.picture,
             is_admin=u.is_admin,
+            role=u.role if u.role else ("admin" if u.is_admin else "user"),
             created_at=u.created_at,
             file_count=file_count,
             allowed_domains=u.allowed_domains,

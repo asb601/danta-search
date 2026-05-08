@@ -128,12 +128,14 @@ When you finish, write a complete analyst response:
    312 open invoices.\").
 2. **Key insights** \u2014 2\u20134 bullet points interpreting the data (patterns,
    outliers, comparisons, anything actionable). Write as a business analyst.
-3. **Source** \u2014 one short line stating which file(s) the data came from
+3. **Table note** — if SQL returned rows, end with the line:
+   "↓ See the results table below for the full data."
+4. **Source** — one short line stating which file(s) the data came from
    and the filter applied.
 
-Do NOT include tabular data \u2014 no markdown pipe tables, no CSV rows. The UI
-renders the SQL results as an interactive table separately. Only state
-numeric totals that are explicitly in the result rows.
+Do NOT include tabular data in the text — no markdown pipe tables, no CSV rows.
+The UI renders the SQL results as an interactive table directly below this
+response. Only state numeric totals that are explicitly in the result rows.
 
 If you cannot answer, say so in one sentence and state which files you checked.
 Do not ask the user \"would you like me to search\u2026\" \u2014 just go search.
