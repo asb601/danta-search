@@ -15,7 +15,7 @@ import tiktoken
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.llm import get_llm
+from app.agent.llm import get_llm_mini
 from app.core.logger import chat_logger
 from app.models.conversation import Conversation, Message
 
@@ -78,6 +78,36 @@ def _trim_history_message(content: str, role: str) -> str:
 
 
 # ── Context building ──
+
+
+async def get_recent_files_used(
+    conv_id: str,
+    db: AsyncSession,
+    lookback: int = 3,
+) -> list[str]:
+    """Return blob_paths of files used in the last `lookback` assistant turns.
+
+    These are injected into the retrieval shortlist so follow-up queries about
+    the same data don't drift to unrelated files.
+    """
+    q = (
+        select(Message.payload)
+        .where(Message.conversation_id == conv_id)
+        .where(Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .limit(lookback)
+    )
+    rows = (await db.execute(q)).scalars().all()
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for payload in rows:
+        if not payload:
+            continue
+        for blob in payload.get("files_used", []):
+            if blob and blob not in seen_set:
+                seen.append(blob)
+                seen_set.add(blob)
+    return seen
 
 
 async def build_conversation_context(
@@ -197,7 +227,7 @@ async def maybe_regenerate_summary(
     prompt += f"Messages to incorporate:\n{conversation_text}"
 
     try:
-        llm = get_llm()
+        llm = get_llm_mini()
         response = await _call_llm_simple(llm, prompt, SUMMARY_MODEL_MAX_TOKENS)
         conv.summary = response.strip()
         conv.token_count = sum(m.token_count for m in all_msgs)
@@ -245,7 +275,7 @@ async def maybe_generate_title(
     )
 
     try:
-        llm = get_llm()
+        llm = get_llm_mini()
         title = await _call_llm_simple(llm, prompt, TITLE_MODEL_MAX_TOKENS)
         title = title.strip().strip('"').strip("'")[:200]
         if title:

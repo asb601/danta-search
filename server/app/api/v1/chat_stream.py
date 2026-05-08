@@ -20,7 +20,7 @@ from app.core.database import async_session
 from app.dependencies import get_db, get_current_user
 from app.models.conversation import Conversation, Message
 from app.models.user import User
-from app.services.context_service import build_conversation_context, count_tokens
+from app.services.context_service import build_conversation_context, count_tokens, get_recent_files_used
 
 router = APIRouter()
 
@@ -76,11 +76,7 @@ async def chat_message_stream(
         conv = new_conv
 
     conversation_context = await build_conversation_context(conv, db)
-
-    user_token_count = count_tokens(query)
-    db.add(Message(
-        conversation_id=conv.id,
-        role="user",
+    prior_files = await get_recent_files_used(conv.id, db)
         content=query,
         token_count=user_token_count,
     ))
@@ -103,6 +99,7 @@ async def chat_message_stream(
                 is_admin=getattr(user, "is_admin", False),
                 allowed_domains=None if getattr(user, "is_admin", False) else (getattr(user, "allowed_domains", None) or []),
                 container_id=body.container_id,
+                prior_files=prior_files,
             ):
                 evt_type = evt["type"]
 

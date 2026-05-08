@@ -20,7 +20,7 @@ from app.core.logger import chat_logger
 from app.dependencies import get_db, get_current_user
 from app.models.conversation import Conversation, Message
 from app.models.user import User
-from app.services.context_service import build_conversation_context, count_tokens
+from app.services.context_service import build_conversation_context, count_tokens, get_recent_files_used
 
 router = APIRouter()
 
@@ -78,9 +78,7 @@ async def chat_message(
         conv = new_conv
 
     conversation_context = await build_conversation_context(conv, db)
-
-    user_token_count = count_tokens(query)
-    user_msg = Message(
+    prior_files = await get_recent_files_used(conv.id, db)
         conversation_id=conv.id,
         role="user",
         content=query,
@@ -101,6 +99,7 @@ async def chat_message(
             user_id=user.id,
             is_admin=getattr(user, "is_admin", False),
             container_id=body.container_id,
+            prior_files=prior_files,
         )
 
         full_data = result.get("data", [])

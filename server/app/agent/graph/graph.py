@@ -80,6 +80,7 @@ async def _build_agent_context(
     is_admin: bool = True,
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
+    prior_files: list[str] | None = None,
 ) -> dict | None:
     """
     Shared setup for both streaming and non-streaming entry points.
@@ -156,6 +157,21 @@ async def _build_agent_context(
     if retrieved_with_scores:
         retrieved_ids = {meta.file_id for meta, _ in retrieved_with_scores}
         catalog = [e for e in full_catalog if e.get("file_id") in retrieved_ids]
+
+        # ── Pin files from the previous turn ─────────────────────────────────
+        # If the user is asking a follow-up ("give me 20 rows", "filter by X"),
+        # retrieval may rank unrelated files higher. Force any blob_path that
+        # was actually queried in the last 3 assistant turns to stay in the
+        # shortlist, avoiding context drift between turns.
+        if prior_files:
+            already_in_ids = {e.get("file_id") for e in catalog}
+            for blob in prior_files:
+                pinned = next((e for e in full_catalog if e.get("blob_path") == blob and e.get("file_id") not in already_in_ids), None)
+                if pinned:
+                    catalog.append(pinned)
+                    already_in_ids.add(pinned.get("file_id"))
+            pipeline_logger.info("prior_files_pinned", pinned=prior_files)
+
         # ── Reserve slots for master / lookup files ───────────────────────────
         # Retrieval ranks by token relevance, which under-weights name-lookup
         # tables for queries about metrics ("show X for entity Y"). Make sure
@@ -197,6 +213,16 @@ async def _build_agent_context(
             if _is_lookup_file(e) and e.get("blob_path") not in primary_blobs
         ]
         catalog = primary + lookup_pool[:_LOOKUP_RESERVED_SLOTS]
+
+        # Pin prior files in the fallback path too
+        if prior_files:
+            already_blobs = {e.get("blob_path") for e in catalog}
+            for blob in prior_files:
+                pinned = next((e for e in full_catalog if e.get("blob_path") == blob and blob not in already_blobs), None)
+                if pinned:
+                    catalog.append(pinned)
+                    already_blobs.add(blob)
+
         parquet_paths_all = {
             k: v for k, v in all_parquet_paths.items()
             if k in {e.get("blob_path") for e in catalog}
@@ -319,6 +345,7 @@ async def run_agent_query(
     is_admin: bool = True,
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
+    prior_files: list[str] | None = None,
 ) -> dict:
     """
     Main entry point for the agentic query pipeline.
@@ -327,7 +354,7 @@ async def run_agent_query(
     pipeline_start = time.perf_counter()
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
         return {
@@ -421,6 +448,7 @@ async def run_agent_query_stream(
     is_admin: bool = True,
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
+    prior_files: list[str] | None = None,
 ) -> AsyncIterator[dict]:
     """
     Streaming variant of run_agent_query.
@@ -434,7 +462,7 @@ async def run_agent_query_stream(
     pipeline_start = time.perf_counter()
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
         yield {
