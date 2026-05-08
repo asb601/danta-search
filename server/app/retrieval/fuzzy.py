@@ -70,6 +70,7 @@ async def fuzzy_search(
     limit: int = 50,
     threshold: float = _DEFAULT_THRESHOLD,
     allowed_domains: list[str] | None = None,
+    container_id: str | None = None,
 ) -> list[tuple[FileMetadata, float]]:
     """
     Run trigram (pg_trgm) fuzzy similarity search against file_metadata.search_text.
@@ -98,6 +99,7 @@ async def fuzzy_search(
         date_from=date_from,
         date_to=date_to,
         allowed_domains=allowed_domains,
+        container_id=container_id,
     )
 
     q = (

@@ -18,6 +18,12 @@ class User(Base):
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     picture: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Role label exposed to the client so the UI can adapt.
+    # Allowed values: "user" | "developer" | "admin".
+    # `is_admin` remains the source of truth for backend permission checks;
+    # `role` is mostly informational (e.g. to label external API consumers
+    # as "developer" so the UI hides admin pages).
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
     # Domain access control (PHASE 15):
     # NULL / empty list → unrestricted (user sees all domains, like an admin)
     # Non-empty list → user may only access files in folders tagged with these domains

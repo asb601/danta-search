@@ -63,12 +63,16 @@ async def retrieve_with_scores(
     is_admin: bool,
     db: AsyncSession,
     top_k: int = 20,
+    container_id: str | None = None,
 ) -> list[tuple[FileMetadata, float]]:
     """
     Full 9-stage retrieval pipeline.
 
     Returns list of (FileMetadata, rrf_score) sorted descending.
     Returns [] if no results or on error.
+
+    container_id: when set, retrieval is restricted to files in that
+    container. Used by the chat container picker.
     """
     if not query or not query.strip():
         return []
@@ -96,18 +100,21 @@ async def retrieve_with_scores(
             date_from=date_from, date_to=date_to,
             limit=_STAGE_LIMIT,
             allowed_domains=allowed_domains,
+            container_id=container_id,
         )
         fuzzy_results = await fuzzy_search(
             query, user_id, is_admin, db,
             date_from=date_from, date_to=date_to,
             limit=_STAGE_LIMIT,
             allowed_domains=allowed_domains,
+            container_id=container_id,
         )
         vector_results = await vector_search(
             query, user_id, is_admin, db,
             date_from=date_from, date_to=date_to,
             limit=_STAGE_LIMIT,
             allowed_domains=allowed_domains,
+            container_id=container_id,
         )
     except Exception as exc:
         chat_logger.warning("retrieval_parallel_error", error=str(exc)[:200])
@@ -139,6 +146,7 @@ async def retrieve(
     is_admin: bool,
     db: AsyncSession,
     top_k: int = 20,
+    container_id: str | None = None,
 ) -> list[FileMetadata]:
     """
     Full 9-stage retrieval pipeline — returns FileMetadata rows only.
@@ -146,5 +154,5 @@ async def retrieve(
     Convenience wrapper over retrieve_with_scores() that strips the scores.
     Use retrieve_with_scores() when you need scores for the AI Pipeline tab.
     """
-    results = await retrieve_with_scores(query, user_id, is_admin, db, top_k=top_k)
+    results = await retrieve_with_scores(query, user_id, is_admin, db, top_k=top_k, container_id=container_id)
     return [meta for meta, _ in results]

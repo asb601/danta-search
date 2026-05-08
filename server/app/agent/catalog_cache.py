@@ -92,6 +92,7 @@ def _extract_column_names(columns_info: list | None) -> list[str]:
 async def load_catalog(
     db: AsyncSession,
     allowed_domains: list[str] | None = None,
+    container_id: str | None = None,
 ) -> dict | None:
     """
     Load the lean catalog from Postgres, with 5-minute in-memory caching.
@@ -99,6 +100,10 @@ async def load_catalog(
     allowed_domains: if set, catalog entries whose folder has a domain_tag NOT
     in the list are excluded from the returned catalog (and from
     parquet_paths_all). None / empty list = no filtering (admin or unset).
+
+    container_id: if set, only catalog entries whose file belongs to this
+    container are returned. Used by the chat container picker so the LLM
+    only sees one container's files at a time.
 
     Returns dict with keys:
       catalog              - lean per-file records (no heavy fields)
@@ -136,7 +141,24 @@ async def load_catalog(
             for e in cached["catalog"]
             if e["domain_tag"] is None or e["domain_tag"] in allowed_domains
         }
-        return {
+        cached = {
+            **cached,
+            "catalog": [
+                e for e in cached["catalog"] if e["blob_path"] in visible_blobs
+            ],
+            "parquet_paths_all": {
+                k: v for k, v in cached["parquet_paths_all"].items() if k in visible_blobs
+            },
+        }
+
+    # Apply per-request container filter on top of the shared cache.
+    if container_id:
+        visible_blobs = {
+            e["blob_path"]
+            for e in cached["catalog"]
+            if e.get("container_id") == container_id
+        }
+        cached = {
             **cached,
             "catalog": [
                 e for e in cached["catalog"] if e["blob_path"] in visible_blobs

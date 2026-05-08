@@ -8,6 +8,7 @@ class UserOut(BaseModel):
     name: str | None
     picture: str | None
     is_admin: bool
+    role: str = "user"
     created_at: datetime
     file_count: int = 0
     allowed_domains: list[str] | None = None

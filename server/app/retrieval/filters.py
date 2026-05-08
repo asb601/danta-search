@@ -180,6 +180,7 @@ def build_base_query(
     date_from: date | None = None,
     date_to: date | None = None,
     allowed_domains: list[str] | None = None,
+    container_id: str | None = None,
 ) -> "Select":
     """
     Return a SELECT on FileMetadata that:
@@ -187,6 +188,7 @@ def build_base_query(
       2. Applies permission filter (stage 2)
       3. Applies date overlap filter (stage 3) if date_from/date_to given
       4. Applies domain filter (stage 4) if allowed_domains given
+      5. Applies container filter (chat picker) if container_id given
 
     Callers add their own WHERE / ORDER BY / LIMIT on top.
     """
@@ -203,5 +205,8 @@ def build_base_query(
     dom_filter = domain_clause(allowed_domains)
     if dom_filter is not None:
         q = q.where(dom_filter)
+
+    if container_id:
+        q = q.where(FileMetadata.container_id == container_id)
 
     return q

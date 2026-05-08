@@ -6,6 +6,7 @@ export interface User {
   name: string | null;
   picture: string | null;
   is_admin: boolean;
+  role: string;
   allowed_domains: string[] | null;
 }
 

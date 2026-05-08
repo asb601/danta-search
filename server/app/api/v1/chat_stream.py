@@ -102,6 +102,7 @@ async def chat_message_stream(
                 user_id=user.id,
                 is_admin=getattr(user, "is_admin", False),
                 allowed_domains=None if getattr(user, "is_admin", False) else (getattr(user, "allowed_domains", None) or []),
+                container_id=body.container_id,
             ):
                 evt_type = evt["type"]
 

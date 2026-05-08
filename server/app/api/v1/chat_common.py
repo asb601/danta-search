@@ -15,6 +15,10 @@ MAX_STORED_DATA_ROWS = 50         # cap SQL result rows persisted in JSONB
 class ChatMessageRequest(BaseModel):
     query: str
     conversation_id: str | None = None  # omit to start a new conversation
+    # When set, retrieval is restricted to files belonging to this container.
+    # Mirrors the behaviour of GitHub Copilot's model picker — the user
+    # explicitly chooses which container to chat with.
+    container_id: str | None = None
 
 
 class IngestRequest(BaseModel):

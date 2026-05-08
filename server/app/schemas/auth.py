@@ -8,6 +8,7 @@ class UserOut(BaseModel):
     name: str | None
     picture: str | None
     is_admin: bool
+    role: str = "user"
     allowed_domains: list[str] | None = None
 
     model_config = {"from_attributes": True}

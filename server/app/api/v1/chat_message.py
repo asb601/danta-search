@@ -100,6 +100,7 @@ async def chat_message(
             conversation_context=conversation_context,
             user_id=user.id,
             is_admin=getattr(user, "is_admin", False),
+            container_id=body.container_id,
         )
 
         full_data = result.get("data", [])

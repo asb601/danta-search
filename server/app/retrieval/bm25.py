@@ -85,6 +85,7 @@ async def bm25_search(
     date_to: date | None = None,
     limit: int = 50,
     allowed_domains: list[str] | None = None,
+    container_id: str | None = None,
 ) -> list[tuple[FileMetadata, float]]:
     """
     Run BM25 full-text search against file_metadata.search_tsv.
@@ -114,6 +115,7 @@ async def bm25_search(
         date_from=date_from,
         date_to=date_to,
         allowed_domains=allowed_domains,
+        container_id=container_id,
     )
 
     # Add rank, tsquery filter, and order

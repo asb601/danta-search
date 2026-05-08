@@ -5,6 +5,7 @@ parquet paths, and conversation context.
 from __future__ import annotations
 
 import re
+from datetime import date, timedelta
 
 from app.agent.state import MAX_TOOL_CALLS
 from app.core.logger import chat_logger
@@ -38,6 +39,16 @@ def _neutralize_description(desc: str) -> str:
 
 
 SYSTEM_PROMPT_TEMPLATE = """You are a data analyst with DuckDB SQL access to files in Azure Blob Storage.
+
+Today's date: {today_iso} ({today_human}).
+Resolve every relative time expression in the user's question against THIS date,
+not against your training cutoff. Examples (assuming today is {today_iso}):
+  - "last month"     → the full previous calendar month ({last_month_start} to {last_month_end})
+  - "this month"     → {this_month_start} to {today_iso}
+  - "YTD" / "this year" → {year_start} to {today_iso}
+  - "last year"      → {last_year_start} to {last_year_end}
+  - "last 30 days"   → {last_30_start} to {today_iso}
+Never invent a date range from a year you remember from training data.
 
 Container: {container_name}
 {shortlist_header}
@@ -256,6 +267,17 @@ def build_system_prompt(
     else:
         shortlist_header = f"All {full_count} ingested files are shown below."
 
+    today = date.today()
+    # Last calendar month bounds
+    first_of_this_month = today.replace(day=1)
+    last_month_end = first_of_this_month - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+    # Last calendar year bounds
+    last_year_start = date(today.year - 1, 1, 1)
+    last_year_end = date(today.year - 1, 12, 31)
+    # Last 30 days
+    last_30_start = today - timedelta(days=30)
+
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         container_name=container_name,
         max_calls=MAX_TOOL_CALLS,
@@ -264,6 +286,15 @@ def build_system_prompt(
         shortlist_header=shortlist_header,
         shortlist_count=shortlist_count,
         total_file_count=full_count,
+        today_iso=today.isoformat(),
+        today_human=today.strftime("%A, %d %B %Y"),
+        this_month_start=first_of_this_month.isoformat(),
+        last_month_start=last_month_start.isoformat(),
+        last_month_end=last_month_end.isoformat(),
+        year_start=date(today.year, 1, 1).isoformat(),
+        last_year_start=last_year_start.isoformat(),
+        last_year_end=last_year_end.isoformat(),
+        last_30_start=last_30_start.isoformat(),
     )
 
     if conversation_context:

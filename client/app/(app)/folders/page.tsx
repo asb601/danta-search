@@ -67,8 +67,12 @@ function mapFile(f: {
 }
 
 const contentsFetcher = async (key: string): Promise<FileItem[]> => {
-  const folderId = key.replace("contents:", "");
-  const url = `/api/folders/${folderId}/contents`;
+  // key format: contents:<folderId>:<containerId|all>
+  const parts = key.split(":");
+  const folderId = parts[1] ?? "root";
+  const containerScope = parts[2] ?? "all";
+  const qs = containerScope !== "all" ? `?container_id=${encodeURIComponent(containerScope)}` : "";
+  const url = `/api/folders/${folderId}/contents${qs}`;
   const res = await apiFetch(url);
   if (!res.ok) return [];
   const data = await res.json();
@@ -96,15 +100,15 @@ export default function FoldersPage() {
     folderStack.length > 0 ? folderStack[folderStack.length - 1].id : null;
   const folderName =
     folderStack.length > 0 ? folderStack[folderStack.length - 1].name : undefined;
-  const swrKey = `contents:${currentFolderId ?? "root"}`;
+  const swrKey = `contents:${currentFolderId ?? "root"}:${selectedContainerId || "all"}`;
 
   const { data: items, isLoading, mutate } = useSWR(swrKey, contentsFetcher, {
     revalidateOnFocus: false,
   });
 
-  // Fetch containers for the picker (admin only)
+  // Fetch containers for the picker (available to all authenticated users)
   const { data: containers } = useSWR(
-    isAdmin ? "containers-list" : null,
+    "containers-list",
     containersFetcher,
     { revalidateOnFocus: false }
   );
@@ -120,9 +124,9 @@ export default function FoldersPage() {
   );
 
   const handleFolderHover = useCallback((id: string) => {
-    const prefetchKey = `contents:${id}`;
+    const prefetchKey = `contents:${id}:${selectedContainerId || "all"}`;
     globalMutate(prefetchKey, contentsFetcher(prefetchKey), false);
-  }, []);
+  }, [selectedContainerId]);
 
   const handleBack = useCallback(() => {
     setFolderStack((prev) => prev.slice(0, -1));
@@ -306,7 +310,7 @@ export default function FoldersPage() {
       loading={isLoading}
       readOnly={!isAdmin}
       uploadProgress={uploadProgress}
-      containers={isAdmin ? containers ?? [] : []}
+      containers={containers ?? []}
       selectedContainerId={selectedContainerId}
       onContainerChange={setSelectedContainerId}
       onUpload={handleUpload}

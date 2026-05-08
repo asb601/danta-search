@@ -79,6 +79,7 @@ async def _build_agent_context(
     user_id: str = "",
     is_admin: bool = True,
     allowed_domains: list[str] | None = None,
+    container_id: str | None = None,
 ) -> dict | None:
     """
     Shared setup for both streaming and non-streaming entry points.
@@ -92,7 +93,7 @@ async def _build_agent_context(
         conversation_context_preview=(conversation_context[:300] if conversation_context else ""),
     )
 
-    cached = await load_catalog(db, allowed_domains=None if is_admin else allowed_domains)
+    cached = await load_catalog(db, allowed_domains=None if is_admin else allowed_domains, container_id=container_id)
     if not cached:
         pipeline_logger.warning("catalog_empty", query=query, reason="no files ingested yet")
         return None
@@ -123,7 +124,8 @@ async def _build_agent_context(
     if user_id:
         try:
             retrieved_with_scores = await retrieve_with_scores(
-                query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K
+                query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K,
+                container_id=container_id,
             )
         except Exception as exc:
             retrieval_error = str(exc)[:200]
@@ -316,6 +318,7 @@ async def run_agent_query(
     user_id: str = "",
     is_admin: bool = True,
     allowed_domains: list[str] | None = None,
+    container_id: str | None = None,
 ) -> dict:
     """
     Main entry point for the agentic query pipeline.
@@ -324,7 +327,7 @@ async def run_agent_query(
     pipeline_start = time.perf_counter()
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
         return {
@@ -417,6 +420,7 @@ async def run_agent_query_stream(
     user_id: str = "",
     is_admin: bool = True,
     allowed_domains: list[str] | None = None,
+    container_id: str | None = None,
 ) -> AsyncIterator[dict]:
     """
     Streaming variant of run_agent_query.
@@ -430,7 +434,7 @@ async def run_agent_query_stream(
     pipeline_start = time.perf_counter()
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
         yield {

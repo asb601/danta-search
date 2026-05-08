@@ -1,6 +1,6 @@
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,12 +19,16 @@ router = APIRouter(prefix="/folders", tags=["folders"])
 @router.get("/{folder_id}/contents")
 async def get_folder_contents(
     folder_id: str,
+    container_id: str | None = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get direct children (subfolders + files) of a folder. Use folder_id='root' for root."""
+    """Get direct children (subfolders + files) of a folder. Use folder_id='root' for root.
+
+    Optional container_id query param scopes results to a single container.
+    """
     start = time.perf_counter()
-    folder_logger.info("contents_requested", folder_id=folder_id)
+    folder_logger.info("contents_requested", folder_id=folder_id, container_id=container_id)
 
     is_root = folder_id == "root"
 
@@ -34,6 +38,8 @@ async def get_folder_contents(
         folder_stmt = folder_stmt.where(Folder.parent_id.is_(None))
     else:
         folder_stmt = folder_stmt.where(Folder.parent_id == folder_id)
+    if container_id:
+        folder_stmt = folder_stmt.where(Folder.container_id == container_id)
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_subfolders", folder_id=folder_id)
@@ -48,6 +54,8 @@ async def get_folder_contents(
         file_stmt = file_stmt.where(File.folder_id.is_(None))
     else:
         file_stmt = file_stmt.where(File.folder_id == folder_id)
+    if container_id:
+        file_stmt = file_stmt.where(File.container_id == container_id)
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_files", folder_id=folder_id)
