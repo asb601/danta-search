@@ -16,35 +16,6 @@ from app.schemas.folder import FolderContents, FolderCreate, FolderOut, FolderUp
 router = APIRouter(prefix="/folders", tags=["folders"])
 
 
-def _folders_with_container_files(container_id: str):
-    """Return a CTE producing every folder id that (recursively) contains
-    at least one file with the given container_id.
-
-    A folder is "in container X" if either its own container_id == X or any
-    descendant file has container_id == X. We compute this by:
-      1. Selecting folder_ids of files with container_id == X.
-      2. Walking up the parent chain via a recursive CTE.
-      3. Union with folders whose own container_id == X.
-    """
-    # Anchor: parent ids of files belonging to this container (non-null only)
-    anchor = (
-        select(Folder.id.label("id"), Folder.parent_id.label("parent_id"))
-        .join(File, File.folder_id == Folder.id)
-        .where(File.container_id == container_id)
-    )
-    # Also include folders whose own container_id matches
-    anchor_self = (
-        select(Folder.id.label("id"), Folder.parent_id.label("parent_id"))
-        .where(Folder.container_id == container_id)
-    )
-    cte = anchor.union(anchor_self).cte("matching_folders", recursive=True)
-    parent = (
-        select(Folder.id, Folder.parent_id)
-        .join(cte, Folder.id == cte.c.parent_id)
-    )
-    return cte.union_all(parent)
-
-
 @router.get("/{folder_id}/contents")
 async def get_folder_contents(
     folder_id: str,
@@ -70,8 +41,8 @@ async def get_folder_contents(
     else:
         folder_stmt = folder_stmt.where(Folder.parent_id == folder_id)
     if container_id:
-        cte = _folders_with_container_files(container_id)
-        folder_stmt = folder_stmt.where(Folder.id.in_(select(cte.c.id)))
+        # Sync tags every folder it creates with container_id, so direct match works.
+        folder_stmt = folder_stmt.where(Folder.container_id == container_id)
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_subfolders", folder_id=folder_id)
@@ -82,12 +53,17 @@ async def get_folder_contents(
     # Files — org-wide, eager load uploaded_by user
     from sqlalchemy.orm import selectinload
     file_stmt = select(File).options(selectinload(File.uploaded_by)).order_by(File.name)
-    if is_root:
-        file_stmt = file_stmt.where(File.folder_id.is_(None))
-    else:
-        file_stmt = file_stmt.where(File.folder_id == folder_id)
     if container_id:
+        # When filtering by container, ignore folder hierarchy at root and show
+        # all files in the container. For non-root folders, still scope to the folder.
         file_stmt = file_stmt.where(File.container_id == container_id)
+        if not is_root:
+            file_stmt = file_stmt.where(File.folder_id == folder_id)
+    else:
+        if is_root:
+            file_stmt = file_stmt.where(File.folder_id.is_(None))
+        else:
+            file_stmt = file_stmt.where(File.folder_id == folder_id)
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_files", folder_id=folder_id)
