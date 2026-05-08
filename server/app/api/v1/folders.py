@@ -16,6 +16,35 @@ from app.schemas.folder import FolderContents, FolderCreate, FolderOut, FolderUp
 router = APIRouter(prefix="/folders", tags=["folders"])
 
 
+def _folders_with_container_files(container_id: str):
+    """Return a CTE producing every folder id that (recursively) contains
+    at least one file with the given container_id.
+
+    A folder is "in container X" if either its own container_id == X or any
+    descendant file has container_id == X. We compute this by:
+      1. Selecting folder_ids of files with container_id == X.
+      2. Walking up the parent chain via a recursive CTE.
+      3. Union with folders whose own container_id == X.
+    """
+    # Anchor: parent ids of files belonging to this container (non-null only)
+    anchor = (
+        select(Folder.id.label("id"), Folder.parent_id.label("parent_id"))
+        .join(File, File.folder_id == Folder.id)
+        .where(File.container_id == container_id)
+    )
+    # Also include folders whose own container_id matches
+    anchor_self = (
+        select(Folder.id.label("id"), Folder.parent_id.label("parent_id"))
+        .where(Folder.container_id == container_id)
+    )
+    cte = anchor.union(anchor_self).cte("matching_folders", recursive=True)
+    parent = (
+        select(Folder.id, Folder.parent_id)
+        .join(cte, Folder.id == cte.c.parent_id)
+    )
+    return cte.union_all(parent)
+
+
 @router.get("/{folder_id}/contents")
 async def get_folder_contents(
     folder_id: str,
@@ -26,6 +55,8 @@ async def get_folder_contents(
     """Get direct children (subfolders + files) of a folder. Use folder_id='root' for root.
 
     Optional container_id query param scopes results to a single container.
+    A folder is shown when it (or any descendant) contains at least one file
+    in that container, so legacy folders without container_id still appear.
     """
     start = time.perf_counter()
     folder_logger.info("contents_requested", folder_id=folder_id, container_id=container_id)
@@ -39,7 +70,8 @@ async def get_folder_contents(
     else:
         folder_stmt = folder_stmt.where(Folder.parent_id == folder_id)
     if container_id:
-        folder_stmt = folder_stmt.where(Folder.container_id == container_id)
+        cte = _folders_with_container_files(container_id)
+        folder_stmt = folder_stmt.where(Folder.id.in_(select(cte.c.id)))
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_subfolders", folder_id=folder_id)

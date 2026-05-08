@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import useSWR from "swr";
 import { UserCircle, Users, Shield, ShieldOff, Loader2, Database, RefreshCw, CheckCircle2, AlertTriangle, Tag, X, Plus, Sparkles, FolderOpen, FileText, ChevronDown, ChevronRight, Trash2, Clock, UserCheck, UserX, Mail } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
@@ -15,6 +15,7 @@ interface UserItem {
   name: string | null;
   picture: string | null;
   is_admin: boolean;
+  role: string;
   created_at: string;
   file_count: number;
   allowed_domains: string[] | null;
@@ -177,7 +178,7 @@ function ProfileTab() {
       <div className="space-y-3">
         <Field label="Name" value={user.name || "—"} />
         <Field label="Email" value={user.email} />
-        <Field label="Role" value={user.is_admin ? "Admin" : "Member"} />
+        <Field label="Role" value={user.is_admin ? "Admin" : user.role === "developer" ? "Developer" : "Member"} />
       </div>
 
       {/* Departments section (non-admin users) */}
@@ -321,6 +322,86 @@ function Field({ label, value }: { label: string; value: string }) {
   );
 }
 
+/* ── Role dropdown component ─────────────────────────────────────────────── */
+
+const ROLES: { value: string; label: string; color: string }[] = [
+  { value: "admin",     label: "Admin",     color: "text-primary" },
+  { value: "developer", label: "Developer", color: "text-violet-400" },
+  { value: "user",      label: "Member",    color: "text-muted-foreground" },
+];
+
+function RoleDropdown({
+  currentRole,
+  disabled,
+  onChange,
+}: {
+  currentRole: string;
+  disabled: boolean;
+  onChange: (role: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const current = ROLES.find((r) => r.value === currentRole) ?? ROLES[2];
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((p) => !p)}
+        className={cn(
+          "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] font-medium rounded border transition-colors",
+          currentRole === "admin"     ? "bg-primary/15 border-primary/30 text-primary" :
+          currentRole === "developer" ? "bg-violet-500/15 border-violet-500/30 text-violet-400" :
+          "bg-surface-raised border-border text-muted-foreground",
+          disabled && "opacity-50 cursor-not-allowed"
+        )}
+      >
+        {disabled ? (
+          <Loader2 className="w-3 h-3 animate-spin" />
+        ) : (
+          currentRole === "admin" && <Shield className="w-3 h-3" />
+        )}
+        {current.label}
+        {!disabled && <ChevronDown className="w-2.5 h-2.5 ml-0.5" />}
+      </button>
+
+      {open && (
+        <div className="absolute z-30 mt-1 right-0 w-36 rounded-md border border-border bg-surface shadow-lg overflow-hidden">
+          {ROLES.map((r) => (
+            <button
+              key={r.value}
+              type="button"
+              onClick={() => {
+                onChange(r.value);
+                setOpen(false);
+              }}
+              className={cn(
+                "w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-surface-raised transition-colors",
+                r.color,
+                r.value === currentRole && "font-semibold"
+              )}
+            >
+              <span>{r.label}</span>
+              {r.value === currentRole && <CheckCircle2 className="w-3 h-3" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Users tab (admin only) ──────────────────────────────────────────────── */
 
 function UsersTab({ currentUserId }: { currentUserId: string }) {
@@ -332,26 +413,35 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
     accessRequestsFetcher,
     { revalidateOnFocus: true, refreshInterval: 30000 },
   );
-  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [changingRoleId, setChangingRoleId] = useState<string | null>(null);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  const handleToggleAdmin = useCallback(
-    async (userId: string) => {
-      setTogglingId(userId);
+  const handleSetRole = useCallback(
+    async (userId: string, role: string) => {
+      setChangingRoleId(userId);
       try {
-        const res = await apiFetch(`/api/users/${userId}/toggle-admin`, {
+        const res = await apiFetch(`/api/users/${userId}/role`, {
           method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role }),
         });
-        if (res.ok) {
-          mutate();
-        }
+        if (res.ok) mutate();
       } finally {
-        setTogglingId(null);
+        setChangingRoleId(null);
       }
     },
     [mutate]
+  );
+
+  /** Keep toggle-admin working for old code paths (unused in new UI, but safe to keep) */
+  const handleToggleAdmin = useCallback(
+    async (userId: string, currentRole: string) => {
+      const next = currentRole === "admin" ? "user" : "admin";
+      await handleSetRole(userId, next);
+    },
+    [handleSetRole]
   );
 
   const handleReview = useCallback(
@@ -480,7 +570,8 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
         )}
       {users.map((u) => {
         const isCurrent = u.id === currentUserId;
-        const toggling = togglingId === u.id;
+        const changing = changingRoleId === u.id;
+        const roleLabel = u.role === "admin" ? "Admin" : u.role === "developer" ? "Developer" : "Member";
 
         return (
           <div
@@ -513,37 +604,23 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
                 {u.file_count} file{u.file_count !== 1 && "s"}
               </span>
 
-              {u.is_admin ? (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded bg-primary/15 text-primary">
-                  <Shield className="w-3 h-3" />
-                  Admin
+              {/* Role badge / dropdown */}
+              {isCurrent ? (
+                <span className={cn(
+                  "inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded",
+                  u.role === "admin" ? "bg-primary/15 text-primary" :
+                  u.role === "developer" ? "bg-violet-500/15 text-violet-400" :
+                  "bg-surface-raised text-muted-foreground"
+                )}>
+                  {u.role === "admin" && <Shield className="w-3 h-3" />}
+                  {roleLabel}
                 </span>
               ) : (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded bg-surface-raised text-muted-foreground">
-                  Member
-                </span>
-              )}
-
-              {!isCurrent && (
-                <button
-                  onClick={() => handleToggleAdmin(u.id)}
-                  disabled={toggling}
-                  title={u.is_admin ? "Remove admin" : "Make admin"}
-                  className={cn(
-                    "p-1.5 rounded transition-colors",
-                    toggling
-                      ? "text-muted-foreground cursor-not-allowed"
-                      : "text-muted-foreground hover:text-foreground hover:bg-surface-raised"
-                  )}
-                >
-                  {toggling ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : u.is_admin ? (
-                    <ShieldOff className="w-4 h-4" />
-                  ) : (
-                    <Shield className="w-4 h-4" />
-                  )}
-                </button>
+                <RoleDropdown
+                  currentRole={u.role || (u.is_admin ? "admin" : "user")}
+                  disabled={changing}
+                  onChange={(role) => handleSetRole(u.id, role)}
+                />
               )}
 
               {!isCurrent && (

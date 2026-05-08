@@ -15,9 +15,15 @@ from app.schemas.user import UserOut
 
 router = APIRouter(prefix="/users", tags=["users"])
 
+_VALID_ROLES = {"admin", "developer", "user"}
+
 
 class _MeDomainsBody(BaseModel):
     allowed_domains: list[str] | None  # None or [] = clear restriction
+
+
+class _RoleBody(BaseModel):
+    role: str  # "admin" | "developer" | "user"
 
 
 @router.get("/domains")
@@ -103,6 +109,32 @@ async def toggle_admin(
 
     auth_logger.info("admin_toggled", user_id=user_id, is_admin=user.is_admin)
     return {"id": user.id, "is_admin": user.is_admin}
+
+
+@router.patch("/{user_id}/role")
+async def set_user_role(
+    user_id: str,
+    body: _RoleBody,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a user's role (admin / developer / user). Syncs is_admin flag."""
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot change your own role")
+
+    if body.role not in _VALID_ROLES:
+        raise HTTPException(status_code=422, detail=f"role must be one of {sorted(_VALID_ROLES)}")
+
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.role = body.role
+    user.is_admin = body.role == "admin"
+    await db.commit()
+
+    auth_logger.info("role_changed", user_id=user_id, role=body.role, is_admin=user.is_admin)
+    return {"id": user.id, "role": user.role, "is_admin": user.is_admin}
 
 
 @router.delete("/{user_id}")
