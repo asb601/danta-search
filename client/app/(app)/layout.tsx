@@ -64,11 +64,11 @@ if (hideNav) {
   const navItems: NavItem[] = [
     { href: "/chat", icon: MessageSquare, label: "Chat" },
     { href: "/folders", icon: FolderOpen, label: "Folders" },
+    ...(user.is_admin || user.role === "developer"
+      ? [{ href: "/admin/containers", icon: Database, label: "Containers" }]
+      : []),
     ...(user.is_admin
-      ? [
-          { href: "/admin/containers", icon: Database, label: "Containers" },
-          { href: "/admin/logs", icon: ScrollText, label: "Logs" },
-        ]
+      ? [{ href: "/admin/logs", icon: ScrollText, label: "Logs" }]
       : []),
     { href: "/profile", icon: UserCircle, label: "Profile" },
   ];
@@ -98,6 +98,11 @@ if (hideNav) {
             {user.is_admin && (
               <span className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-primary/15 text-primary">
                 Admin
+              </span>
+            )}
+            {!user.is_admin && user.role === "developer" && (
+              <span className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-violet-500/15 text-violet-400">
+                Developer
               </span>
             )}
           </div>

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.chat_common import IngestRequest
 from app.core.database import async_session, get_db
 from app.core.logger import ingest_logger
-from app.dependencies import get_current_user, require_admin
+from app.dependencies import get_current_user, require_admin, require_developer
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.user import User
@@ -36,7 +36,7 @@ async def ingest_files(
     body: IngestRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
 ):
     if not body.file_ids:
         raise HTTPException(status_code=400, detail="No file IDs provided.")

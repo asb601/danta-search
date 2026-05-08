@@ -50,3 +50,10 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+async def require_developer(user: User = Depends(get_current_user)) -> User:
+    """Passes for admin or developer roles. Blocks plain members."""
+    if user.role not in ("admin", "developer") and not user.is_admin:
+        raise HTTPException(status_code=403, detail="Developer or admin access required")
+    return user

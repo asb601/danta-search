@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logger import folder_logger, db_logger
-from app.dependencies import get_current_user, require_admin
+from app.dependencies import get_current_user, require_admin, require_developer
 from app.api.v1.files import _file_to_out
 from app.models.file import File
 from app.models.folder import Folder
@@ -83,7 +83,7 @@ async def get_folder_contents(
 @router.post("", response_model=FolderOut, status_code=status.HTTP_201_CREATED)
 async def create_folder(
     body: FolderCreate,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     start = time.perf_counter()
@@ -102,7 +102,7 @@ async def create_folder(
 async def update_folder(
     folder_id: str,
     body: FolderUpdate,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     start = time.perf_counter()
@@ -128,7 +128,7 @@ async def update_folder(
 @router.delete("/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_folder(
     folder_id: str,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     start = time.perf_counter()

@@ -8,6 +8,6 @@ Imports from: core.database, core.security
 """
 
 from app.core.database import get_db  # noqa: F401
-from app.core.security import get_current_user, require_admin  # noqa: F401
+from app.core.security import get_current_user, require_admin, require_developer  # noqa: F401
 
-__all__ = ["get_db", "get_current_user", "require_admin"]
+__all__ = ["get_db", "get_current_user", "require_admin", "require_developer"]

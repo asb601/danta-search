@@ -92,6 +92,7 @@ interface FolderBreadcrumb {
 export default function FoldersPage() {
   const { user } = useAuth();
   const isAdmin = user?.is_admin ?? false;
+  const canWrite = isAdmin || user?.role === "developer";
 
   const [folderStack, setFolderStack] = useState<FolderBreadcrumb[]>([]);
   const [selectedContainerId, setSelectedContainerId] = useState<string>("");
@@ -308,7 +309,7 @@ export default function FoldersPage() {
       files={items ?? []}
       folderName={folderName}
       loading={isLoading}
-      readOnly={!isAdmin}
+      readOnly={!canWrite}
       uploadProgress={uploadProgress}
       containers={containers ?? []}
       selectedContainerId={selectedContainerId}
@@ -324,7 +325,7 @@ export default function FoldersPage() {
       onBack={folderStack.length > 0 ? handleBack : undefined}
       onCancelUpload={handleCancelUpload}
       onCancelAllUploads={handleCancelAll}
-      onReingestAll={isAdmin ? handleReingestAll : undefined}
+      onReingestAll={canWrite ? handleReingestAll : undefined}
       reingestLoading={reingestLoading}
     />
   );

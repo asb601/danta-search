@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session, get_db
 from app.core.logger import container_logger, blob_logger, db_logger, ingest_logger
-from app.dependencies import require_admin, get_current_user
+from app.dependencies import require_admin, require_developer, get_current_user
 from app.services.ingestion_service import ingest_file
 from app.models.background_job import BackgroundJob
 from app.models.container import ContainerConfig
@@ -280,7 +280,7 @@ async def list_containers(
 @router.get("/{container_id}", response_model=ContainerOut)
 async def get_container(
     container_id: str,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -309,7 +309,7 @@ async def get_container(
 @router.post("", response_model=ContainerOut, status_code=status.HTTP_201_CREATED)
 async def create_container(
     body: ContainerCreate,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     start = time.perf_counter()
@@ -362,7 +362,7 @@ async def create_container(
 @router.post("/{container_id}/sync", response_model=ContainerSyncResponse)
 async def trigger_sync(
     container_id: str,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -379,7 +379,7 @@ async def trigger_sync(
 @router.delete("/{container_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_container(
     container_id: str,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     start = time.perf_counter()

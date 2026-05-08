@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session, get_db
 from app.core.logger import upload_logger, blob_logger, db_logger, ingest_logger
-from app.dependencies import get_current_user, require_admin
+from app.dependencies import get_current_user, require_admin, require_developer
 from app.services.ingestion_service import ingest_file
 from app.models.background_job import BackgroundJob
 from app.models.container import ContainerConfig
@@ -88,7 +88,7 @@ class ConfirmUploadRequest(BaseModel):
 @router.post("/upload-url", response_model=UploadUrlResponse)
 async def get_upload_url(
     body: UploadUrlRequest,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     """Generate a SAS URL for direct browser-to-Azure upload. Supports files of any size."""
@@ -123,7 +123,7 @@ async def get_upload_url(
 @router.post("/confirm-upload", response_model=FileOut)
 async def confirm_upload(
     body: ConfirmUploadRequest,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     """Called after browser finishes direct Azure upload. Saves file metadata to DB."""
@@ -228,7 +228,7 @@ async def get_signed_url(
 async def rename_file(
     file_id: str,
     body: FileRenameRequest,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     start = time.perf_counter()
@@ -250,7 +250,7 @@ async def rename_file(
 async def move_file(
     file_id: str,
     body: FileMoveRequest,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     """Move a file to a different folder (or root if folder_id is null)."""
@@ -278,7 +278,7 @@ async def move_file(
 @router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_file(
     file_id: str,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
     start = time.perf_counter()
