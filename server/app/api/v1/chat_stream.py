@@ -77,6 +77,9 @@ async def chat_message_stream(
 
     conversation_context = await build_conversation_context(conv, db)
     prior_files = await get_recent_files_used(conv.id, db)
+    db.add(Message(
+        conversation_id=conv.id,
+        role="user",
         content=query,
         token_count=user_token_count,
     ))
