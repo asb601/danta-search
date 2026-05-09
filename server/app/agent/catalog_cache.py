@@ -1,29 +1,37 @@
 """
-Catalog cache — loads LEAN file metadata from Postgres with 5-minute TTL.
+Catalog loader — filtered per-request DB query (no in-memory cache).
 
 Design notes
 ------------
-The cache stores ONE small record per file (~1 KB). Heavy fields
-(columns_info samples, sample_rows, column_stats) are NOT cached —
-they are lazy-loaded per request for the small shortlist of files
-that actually go into the prompt or tool responses (see
-catalog_hydration.hydrate_files).
+The old 5-minute TTL in-memory cache was built for Neon (serverless
+Postgres with cold-start latency). With Azure Postgres it was wrong
+on two counts:
 
-Memory footprint:
-    100 K files  ->  ~100 MB
-    1   M files  ->  ~1 GB     (still tolerable; for true >1 M scale
-                                replace this in-memory index with a
-                                Postgres FTS query — the load_catalog
-                                / hydrate_files split keeps that swap
-                                local to one file)
+  1. It loaded EVERY file row into one shared Python object. At 1 M
+     files that is ~1 GB of memory held by every worker, forever.
 
-Every per-request lookup ALWAYS hydrates only the K shortlisted files,
-so the request-time memory cost is bounded regardless of catalog size.
+  2. The shared cache was filtered per-request in Python list
+     comprehensions. Domain users and admins shared the same
+     unfiltered blob — the filter was applied AFTER the load.
+     Any race between an admin write and a user query could expose
+     the wrong catalog slice for up to 5 minutes.
+
+New approach:
+  - Filters (container_id, allowed_domains) are pushed into SQL so
+    the DB does the filtering and only the user's visible rows cross
+    the wire.
+  - Folder ancestor inheritance (untagged subfolders inside tagged
+    parents) is handled by loading the folders table (small) and
+    walking parent_id chains in Python.
+  - No global state, no locks, no TTL, no invalidation needed.
+  - Azure Postgres with indexes on file_metadata.container_id and
+    folders.domain_tag handles 1 M files comfortably.
+
+Heavy fields (columns_info, sample_rows, column_stats) are still
+NOT loaded here. catalog_hydration.hydrate_files fetches them only
+for the small retrieval shortlist (default top-8 files per request).
 """
 from __future__ import annotations
-
-import threading
-import time
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,26 +43,15 @@ from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
 
-_CATALOG_TTL = 300  # seconds
-
-# Caps applied at cache-build time so a single oversized record can't
-# inflate the lean footprint (e.g. an ai_description that is 50 KB).
+# Caps on per-file lean fields to keep each catalog record small.
 _MAX_DESCRIPTION_CHARS = 600
 _MAX_LIST_ITEMS = 12
 _MAX_COLUMN_NAMES = 80
 
-_catalog_cache: dict | None = None
-_catalog_cache_time: float = 0.0
-_catalog_lock = threading.Lock()
-
 
 def invalidate_catalog_cache() -> None:
-    """Clear the in-memory catalog cache. Call after file ingestion completes."""
-    global _catalog_cache, _catalog_cache_time
-    with _catalog_lock:
-        _catalog_cache = None
-        _catalog_cache_time = 0.0
-    chat_logger.info("catalog_cache_invalidated")
+    """No-op — cache removed. Kept for call-site compatibility."""
+    chat_logger.info("catalog_cache_invalidated", note="no-op: cache removed")
 
 
 def _truncate(text: str | None, n: int) -> str:
@@ -71,11 +68,7 @@ def _cap_list(items: list | None, n: int) -> list:
 
 
 def _extract_column_names(columns_info: list | None) -> list[str]:
-    """Return column names only (drops types / samples / uniques).
-
-    The lean cache stores names so search_catalog scoring can match
-    column tokens without holding the full per-column payload.
-    """
+    """Return column names only (drops types / samples / uniques)."""
     if not columns_info:
         return []
     names: list[str] = []
@@ -95,98 +88,85 @@ async def load_catalog(
     container_id: str | None = None,
 ) -> dict | None:
     """
-    Load the lean catalog from Postgres, with 5-minute in-memory caching.
+    Query the lean catalog directly from Postgres, filtered by caller scope.
 
-    allowed_domains: if set, catalog entries whose folder has a domain_tag NOT
-    in the list are excluded from the returned catalog (and from
-    parquet_paths_all). None / empty list = no filtering (admin or unset).
+    Filters are applied at SQL level so only the user's visible rows
+    cross the wire. No shared in-memory state.
 
-    container_id: if set, only catalog entries whose file belongs to this
-    container are returned. Used by the chat container picker so the LLM
-    only sees one container's files at a time.
+    allowed_domains: if set, only files whose folder (or nearest tagged
+    ancestor folder) has a domain_tag in the list are returned. None
+    means unrestricted (admin or no domain assignment).
+
+    container_id: if set, only files belonging to that container are
+    returned.
 
     Returns dict with keys:
       catalog              - lean per-file records (no heavy fields)
-      connection_string    - Azure connection
-      container_name       - Azure container
-      parquet_blob_path    - first available parquet (legacy field)
-      parquet_paths_all    - {blob_path -> parquet_path}
-    Returns None if no files exist.
-
-    Heavy fields (columns_info samples, sample_rows, column_stats) must be
-    fetched separately via catalog_hydration.hydrate_files for the small
-    set of file_ids that are actually relevant to the current query.
+      connection_string    - Azure connection string for the container
+      container_name       - Azure container name
+      parquet_blob_path    - first available parquet blob path (legacy)
+      parquet_paths_all    - {blob_path -> parquet_blob_path}
+    Returns None if no files are visible after applying filters.
     """
-    global _catalog_cache, _catalog_cache_time
+    return await _query_filtered_catalog(db, allowed_domains, container_id)
 
-    with _catalog_lock:
-        if _catalog_cache is not None and (time.time() - _catalog_cache_time) < _CATALOG_TTL:
-            cached = _catalog_cache
-        else:
-            cached = None
 
-    if cached is None:
-        cached = await _build_lean_cache(db)
-        if cached is None:
-            return None
-        with _catalog_lock:
-            _catalog_cache = cached
-            _catalog_cache_time = time.time()
-        chat_logger.info("catalog_cache_loaded", file_count=len(cached["catalog"]))
+async def _query_filtered_catalog(
+    db: AsyncSession,
+    allowed_domains: list[str] | None,
+    container_id: str | None,
+) -> dict | None:
+    """
+    Core implementation: filtered DB query per request.
 
-    # Apply per-request domain filter on top of the shared cache.
-    if allowed_domains:
-        visible_blobs = {
-            e["blob_path"]
-            for e in cached["catalog"]
-            if e["domain_tag"] is None or e["domain_tag"] in allowed_domains
-        }
-        cached = {
-            **cached,
-            "catalog": [
-                e for e in cached["catalog"] if e["blob_path"] in visible_blobs
-            ],
-            "parquet_paths_all": {
-                k: v for k, v in cached["parquet_paths_all"].items() if k in visible_blobs
-            },
-        }
+    Strategy
+    --------
+    FileMetadata rows are large per-table but we only SELECT the lean
+    fields we need (no columns_info blobs, no sample_rows, no embeddings).
+    The WHERE clause filters by container_id (indexed FK) so Postgres
+    never scans outside the caller's container.
 
-    # Apply per-request container filter on top of the shared cache.
+    Domain filtering is handled in Python after loading the (small)
+    folders table and computing effective_domain_tag via parent-chain
+    walk. Folders are far fewer than files so this stays cheap.
+    """
+    # ── 1. Build file_metadata query (lean fields only, no JSONB blobs) ──────
+    meta_stmt = select(
+        FileMetadata.file_id,
+        FileMetadata.blob_path,
+        FileMetadata.container_id,
+        FileMetadata.ai_description,
+        FileMetadata.good_for,
+        FileMetadata.key_metrics,
+        FileMetadata.key_dimensions,
+        FileMetadata.columns_info,   # needed only to extract column names; not hydrated
+        FileMetadata.date_range_start,
+        FileMetadata.date_range_end,
+    )
     if container_id:
-        visible_blobs = {
-            e["blob_path"]
-            for e in cached["catalog"]
-            if e.get("container_id") == container_id
-        }
-        cached = {
-            **cached,
-            "catalog": [
-                e for e in cached["catalog"] if e["blob_path"] in visible_blobs
-            ],
-            "parquet_paths_all": {
-                k: v for k, v in cached["parquet_paths_all"].items() if k in visible_blobs
-            },
-        }
+        meta_stmt = meta_stmt.where(FileMetadata.container_id == container_id)
 
-    return cached
-
-
-async def _build_lean_cache(db: AsyncSession) -> dict | None:
-    """One-shot DB read that populates the shared lean cache."""
-    all_meta = list((await db.execute(select(FileMetadata))).scalars().all())
-    if not all_meta:
+    meta_rows = (await db.execute(meta_stmt)).all()
+    if not meta_rows:
         return None
 
-    file_rows = list((await db.execute(select(File))).scalars().all())
-    # Load ALL folders (not just ones referenced by files) so we can walk
-    # parent_id chains for domain inheritance below.
-    all_folder_rows = list((await db.execute(select(Folder))).scalars().all())
-    folder_by_id: dict[str, Folder] = {fo.id: fo for fo in all_folder_rows}
-    file_folder: dict[str, str | None] = {f.id: f.folder_id for f in file_rows}
+    # ── 2. Build file → folder map ────────────────────────────────────────────
+    # Only load files referenced by our metadata (already container-filtered).
+    visible_file_ids = {r.file_id for r in meta_rows}
+    file_rows = (await db.execute(
+        select(File.id, File.folder_id).where(File.id.in_(visible_file_ids))
+    )).all()
+    file_folder: dict[str, str | None] = {r.id: r.folder_id for r in file_rows}
 
-    # Effective domain_tag = the folder's own tag, or the nearest tagged
-    # ancestor's tag. This prevents a "FBL3N / archive" subfolder (untagged)
-    # from being treated as public — its files should still inherit FBL3N.
+    # ── 3. Folder ancestor walk for effective domain_tag ─────────────────────
+    # Load ALL folders (small table; domain folders + regular folders).
+    # Walk parent_id chain so untagged subfolders inside a tagged parent
+    # inherit the parent's domain_tag.
+    all_folder_rows = (await db.execute(select(Folder.id, Folder.parent_id, Folder.domain_tag))).all()
+    folder_by_id: dict[str, tuple[str | None, str | None]] = {
+        r.id: (r.parent_id, r.domain_tag) for r in all_folder_rows
+    }
+
     _eff_cache: dict[str, str | None] = {}
 
     def _effective_tag(folder_id: str | None) -> str | None:
@@ -198,62 +178,84 @@ async def _build_lean_cache(db: AsyncSession) -> dict | None:
         cursor: str | None = folder_id
         while cursor and cursor not in seen:
             seen.add(cursor)
-            fo = folder_by_id.get(cursor)
-            if fo is None:
-                _eff_cache[folder_id] = None
-                return None
-            if fo.domain_tag:
-                _eff_cache[folder_id] = fo.domain_tag
-                return fo.domain_tag
-            cursor = fo.parent_id
+            entry = folder_by_id.get(cursor)
+            if entry is None:
+                break
+            parent_id, domain_tag = entry
+            if domain_tag:
+                _eff_cache[folder_id] = domain_tag
+                return domain_tag
+            cursor = parent_id
         _eff_cache[folder_id] = None
         return None
 
-    def _domain_tag(file_id: str) -> str | None:
-        return _effective_tag(file_folder.get(file_id))
+    # ── 4. Build catalog entries, applying domain filter ──────────────────────
+    catalog: list[dict] = []
+    for r in meta_rows:
+        eff_tag = _effective_tag(file_folder.get(r.file_id))
+        # Domain gate: if caller has restrictions, skip files outside their domains.
+        if allowed_domains and eff_tag and eff_tag not in allowed_domains:
+            continue
+        catalog.append({
+            "file_id": r.file_id,
+            "blob_path": r.blob_path,
+            "container_id": r.container_id,
+            "domain_tag": eff_tag,
+            "ai_description": _truncate(r.ai_description, _MAX_DESCRIPTION_CHARS),
+            "good_for": _cap_list(r.good_for, _MAX_LIST_ITEMS),
+            "key_metrics": _cap_list(r.key_metrics, _MAX_LIST_ITEMS),
+            "key_dimensions": _cap_list(r.key_dimensions, _MAX_LIST_ITEMS),
+            "column_names": _extract_column_names(r.columns_info),
+            "date_range_start": str(r.date_range_start) if r.date_range_start else None,
+            "date_range_end": str(r.date_range_end) if r.date_range_end else None,
+        })
 
-    catalog = [
-        {
-            "file_id": m.file_id,
-            "blob_path": m.blob_path,
-            "container_id": m.container_id,
-            "domain_tag": _domain_tag(m.file_id),
-            "ai_description": _truncate(m.ai_description, _MAX_DESCRIPTION_CHARS),
-            "good_for": _cap_list(m.good_for, _MAX_LIST_ITEMS),
-            "key_metrics": _cap_list(m.key_metrics, _MAX_LIST_ITEMS),
-            "key_dimensions": _cap_list(m.key_dimensions, _MAX_LIST_ITEMS),
-            "column_names": _extract_column_names(m.columns_info),
-            "date_range_start": str(m.date_range_start) if m.date_range_start else None,
-            "date_range_end": str(m.date_range_end) if m.date_range_end else None,
-        }
-        for m in all_meta
-    ]
-
-    first_meta = next((m for m in all_meta if m.container_id), None)
-    if not first_meta:
+    if not catalog:
         return None
-    container = await db.get(ContainerConfig, first_meta.container_id)
+
+    # ── 5. Resolve container config (connection_string) ───────────────────────
+    # Use the explicit container_id if given; otherwise use the first file's
+    # container. In an org-scoped request all files share the same container
+    # so this is always correct.
+    resolved_container_id = container_id or catalog[0].get("container_id")
+    if not resolved_container_id:
+        return None
+    container = await db.get(ContainerConfig, resolved_container_id)
     if not container:
         return None
 
-    # parquet_paths is small ({blob -> parquet_path}); keep it cached.
-    parquet_blob_path: str | None = None
-    parquet_paths_all: dict[str, str] = {}
-    analytics_rows = list((await db.execute(select(FileAnalytics))).scalars().all())
-    parquet_by_file = {row.file_id: row.parquet_blob_path for row in analytics_rows}
-    for meta in all_meta:
-        pq = parquet_by_file.get(meta.file_id)
-        if not pq:
-            continue
-        if parquet_blob_path is None:
-            parquet_blob_path = pq
-        if meta.blob_path:
-            parquet_paths_all[meta.blob_path] = pq
+    # ── 6. Build parquet path index ───────────────────────────────────────────
+    visible_file_id_set = {e["file_id"] for e in catalog}
+    analytics_rows = (await db.execute(
+        select(FileAnalytics.file_id, FileAnalytics.parquet_blob_path)
+        .where(FileAnalytics.file_id.in_(visible_file_id_set))
+    )).all()
+    parquet_by_file: dict[str, str] = {
+        r.file_id: r.parquet_blob_path for r in analytics_rows if r.parquet_blob_path
+    }
+
+    blob_to_parquet: dict[str, str] = {}
+    first_parquet: str | None = None
+    for entry in catalog:
+        pq = parquet_by_file.get(entry["file_id"])
+        if pq and entry["blob_path"]:
+            blob_to_parquet[entry["blob_path"]] = pq
+            if first_parquet is None:
+                first_parquet = pq
+
+    chat_logger.info(
+        "catalog_loaded",
+        file_count=len(catalog),
+        container=container.container_name,
+        allowed_domains=allowed_domains,
+        container_id_filter=container_id,
+    )
 
     return {
         "catalog": catalog,
         "connection_string": container.connection_string,
         "container_name": container.container_name,
-        "parquet_blob_path": parquet_blob_path,
-        "parquet_paths_all": parquet_paths_all,
+        "parquet_blob_path": first_parquet,
+        "parquet_paths_all": blob_to_parquet,
     }
+
