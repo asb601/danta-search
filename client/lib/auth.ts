@@ -8,6 +8,7 @@ export interface User {
   is_admin: boolean;
   role: string;
   allowed_domains: string[] | null;
+  organization_id: string | null;
 }
 
 /** Retrieve stored JWT token */

@@ -45,7 +45,8 @@ async def resolve_chat_scope(
       - Org user (is_admin=False, organization_id set): container_id is FORCED
         to the org's container_id. The body.container_id field is IGNORED so a
         client cannot tamper with the JWT-bound scope.
-      - Org-less non-admin: chat is denied — they must be assigned to an org.
+      - Org-less non-admin: falls back to body.container_id (backward-compat for
+        existing users not yet assigned to an org). Domain sub-filter still applies.
     """
     is_admin = bool(getattr(user, "is_admin", False))
 
@@ -58,17 +59,14 @@ async def resolve_chat_scope(
 
     org_id = getattr(user, "organization_id", None)
     if not org_id:
-        raise HTTPException(
-            status_code=403,
-            detail="User is not assigned to an organization. Contact an admin.",
-        )
+        # Not yet assigned to an org — fall back to the requested container_id.
+        # This preserves backward-compatibility for existing users.
+        return requested_container_id, allowed_domains
 
     org = await db.get(Organization, org_id)
     if not org or not org.container_id:
-        raise HTTPException(
-            status_code=403,
-            detail="Your organization has no container configured. Contact an admin.",
-        )
+        # Org exists but has no container — fall back rather than hard-blocking.
+        return requested_container_id, allowed_domains
 
     return org.container_id, allowed_domains
 
