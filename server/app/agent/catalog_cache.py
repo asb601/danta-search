@@ -214,7 +214,9 @@ async def _build_lean_cache(db: AsyncSession) -> dict | None:
         for m in all_meta
     ]
 
-    first_meta = all_meta[0]
+    first_meta = next((m for m in all_meta if m.container_id), None)
+    if not first_meta:
+        return None
     container = await db.get(ContainerConfig, first_meta.container_id)
     if not container:
         return None

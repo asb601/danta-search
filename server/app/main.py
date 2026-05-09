@@ -58,6 +58,15 @@ async def lifespan(app: FastAPI):
         await _add_column_if_missing(conn, "users", "role", "VARCHAR(20) NOT NULL DEFAULT 'user'")
         # Backfill: existing admins get role='admin'
         await conn.execute(text("UPDATE users SET role = 'admin' WHERE is_admin = TRUE AND role = 'user'"))
+        # Backfill: file_metadata.container_id from files.container_id where it is NULL but files has it set
+        await conn.execute(text("""
+            UPDATE file_metadata fm
+            SET container_id = f.container_id
+            FROM files f
+            WHERE fm.file_id = f.id
+              AND fm.container_id IS NULL
+              AND f.container_id IS NOT NULL
+        """))
 
     # Retrieval-engine schema (pgvector + pg_trgm + new file_metadata columns)
     from app.migrations.retrieval_schema_upgrade import migrate as _retrieval_migrate
