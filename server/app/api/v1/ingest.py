@@ -13,6 +13,7 @@ from app.core.logger import ingest_logger
 from app.dependencies import get_current_user, require_admin, require_developer
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
+from app.models.folder import Folder
 from app.models.user import User
 from app.services.ingestion_service import ingest_file
 
@@ -49,6 +50,12 @@ async def ingest_files(
         ext = (file.name or "").rsplit(".", 1)[-1].lower()
         if ext not in ("csv", "txt", "tsv"):
             continue
+        # Domain scope: if developer has domain restrictions, skip files outside their domains
+        if admin.allowed_domains:
+            folder = await db.get(Folder, file.folder_id) if file.folder_id else None
+            folder_domain = folder.domain_tag if folder else None
+            if folder_domain and folder_domain not in admin.allowed_domains:
+                continue  # silently skip — outside this developer's scope
         valid_ids.append(fid)
 
     if not valid_ids:

@@ -18,6 +18,7 @@ from app.api.v1.chat import router as chat_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.logs import router as logs_router
 from app.api.v1.access import router as access_router
+from app.api.v1.organizations import router as organizations_router
 import app.models.file  # ensure File table is created
 import app.models.access_request  # ensure AccessRequest table is created
 import app.models.container  # ensure ContainerConfig table is created
@@ -25,6 +26,7 @@ import app.models.file_metadata  # ensure FileMetadata table is created
 import app.models.file_analytics  # ensure FileAnalytics table is created
 import app.models.background_job  # ensure BackgroundJob table is created
 import app.models.conversation  # ensure Conversation + Message tables are created
+import app.models.organization  # ensure Organization table is created
 
 
 async def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
@@ -56,6 +58,13 @@ async def lifespan(app: FastAPI):
         await _add_column_if_missing(conn, "folders", "container_id", "VARCHAR(36) REFERENCES container_configs(id) ON DELETE CASCADE")
         await _add_column_if_missing(conn, "users", "is_admin", "BOOLEAN NOT NULL DEFAULT FALSE")
         await _add_column_if_missing(conn, "users", "role", "VARCHAR(20) NOT NULL DEFAULT 'user'")
+        # Multi-tenancy: add organization_id FK to users (Phase 16)
+        await _add_column_if_missing(
+            conn,
+            "users",
+            "organization_id",
+            "VARCHAR(36) REFERENCES organizations(id) ON DELETE SET NULL",
+        )
         # Backfill: existing admins get role='admin'
         await conn.execute(text("UPDATE users SET role = 'admin' WHERE is_admin = TRUE AND role = 'user'"))
         # Backfill: file_metadata.container_id from files.container_id where it is NULL but files has it set
@@ -136,6 +145,7 @@ app.include_router(chat_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(logs_router, prefix="/api")
 app.include_router(access_router, prefix="/api")
+app.include_router(organizations_router, prefix="/api")
 
 
 @app.get("/api/health")

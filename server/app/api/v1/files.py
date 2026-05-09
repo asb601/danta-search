@@ -95,6 +95,12 @@ async def get_upload_url(
     start = time.perf_counter()
     upload_logger.info("sas_token_requested", filename=body.filename, container_id=body.container_id)
 
+    # Domain scope: block upload to folders outside developer's allowed domains
+    if body.folder_id and admin.allowed_domains:
+        folder = await db.get(Folder, body.folder_id)
+        if folder and folder.domain_tag and folder.domain_tag not in admin.allowed_domains:
+            raise HTTPException(status_code=403, detail="Not authorized to upload to this domain folder")
+
     config = await _get_container_config(db, body.container_id)
     account_name, account_key = _parse_connection_string(config.connection_string)
     if not account_name or not account_key:
@@ -135,8 +141,12 @@ async def confirm_upload(
         db_logger.info("query_started", query="check_folder_exists", folder_id=body.folder_id)
         result = await db.execute(select(Folder).where(Folder.id == body.folder_id))
         db_logger.info("query_complete", query="check_folder_exists", duration_ms=round((time.perf_counter() - db_start) * 1000, 2))
-        if not result.scalar_one_or_none():
+        folder = result.scalar_one_or_none()
+        if not folder:
             raise HTTPException(status_code=404, detail="Folder not found")
+        # Domain scope: block upload to folders outside developer's allowed domains
+        if folder.domain_tag and admin.allowed_domains and folder.domain_tag not in admin.allowed_domains:
+            raise HTTPException(status_code=403, detail="Not authorized to upload to this domain folder")
 
     mime = mimetypes.guess_type(body.filename)[0] or "application/octet-stream"
 

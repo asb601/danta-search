@@ -15,6 +15,7 @@ from app.api.v1.chat_common import (
     MAX_STORED_DATA_ROWS,
     WARN_MESSAGES_THRESHOLD,
     bg_title_and_summary,
+    resolve_chat_scope,
 )
 from app.core.database import async_session
 from app.dependencies import get_db, get_current_user
@@ -90,29 +91,26 @@ async def chat_message_stream(
 
     conv_id = conv.id
 
+    # Multi-tenancy: resolve scope BEFORE streaming so 403s return as JSON,
+    # not as part of an SSE stream. body.container_id is ignored for non-admins.
+    effective_container_id, user_allowed_domains = await resolve_chat_scope(
+        user, body.container_id, db
+    )
+    user_is_admin = bool(getattr(user, "is_admin", False))
+
     async def event_stream():
         yield f"data: {_json.dumps({'event': 'started', 'conversation_id': conv_id})}\n\n"
 
         try:
             final_payload = None
 
-            # Build domain filter — admins see everything, regular users only
-            # see their allowed domains. None = unrestricted. Empty list [] =
-            # no domain assigned yet, also treat as unrestricted.
-            _user_is_admin = getattr(user, "is_admin", False)
-            _user_domains: list[str] | None = None
-            if not _user_is_admin:
-                _domains = getattr(user, "allowed_domains", None)
-                if _domains:  # non-empty list → restrict
-                    _user_domains = list(_domains)
-
             async for evt in run_agent_query_stream(
                 query, db,
                 conversation_context=conversation_context,
                 user_id=user.id,
-                is_admin=_user_is_admin,
-                allowed_domains=_user_domains,
-                container_id=body.container_id,
+                is_admin=user_is_admin,
+                allowed_domains=user_allowed_domains,
+                container_id=effective_container_id,
                 prior_files=prior_files,
             ):
                 evt_type = evt["type"]

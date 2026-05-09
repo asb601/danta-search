@@ -1,7 +1,7 @@
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -34,6 +34,13 @@ async def get_folder_contents(
 
     is_root = folder_id == "root"
 
+    # Non-root folder access check: if user has domain restrictions, verify they
+    # can access this specific folder before listing its contents
+    if not is_root and user.allowed_domains:
+        current_folder = await db.get(Folder, folder_id)
+        if current_folder and current_folder.domain_tag and current_folder.domain_tag not in user.allowed_domains:
+            raise HTTPException(status_code=403, detail="Access to this folder is restricted")
+
     # Subfolders — org-wide, no owner filter
     folder_stmt = select(Folder).order_by(Folder.name)
     if is_root:
@@ -43,6 +50,11 @@ async def get_folder_contents(
     if container_id:
         # Sync tags every folder it creates with container_id, so direct match works.
         folder_stmt = folder_stmt.where(Folder.container_id == container_id)
+    # Domain scope: only show folders the user is allowed to see
+    if user.allowed_domains:
+        folder_stmt = folder_stmt.where(
+            or_(Folder.domain_tag.is_(None), Folder.domain_tag.in_(user.allowed_domains))
+        )
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_subfolders", folder_id=folder_id)
@@ -64,6 +76,19 @@ async def get_folder_contents(
             file_stmt = file_stmt.where(File.folder_id.is_(None))
         else:
             file_stmt = file_stmt.where(File.folder_id == folder_id)
+    # Domain scope: only show files in folders the user is allowed to access
+    if user.allowed_domains:
+        file_stmt = (
+            file_stmt
+            .outerjoin(Folder, File.folder_id == Folder.id)
+            .where(
+                or_(
+                    File.folder_id.is_(None),          # root-level files — no domain tag
+                    Folder.domain_tag.is_(None),        # untagged folder — visible to all
+                    Folder.domain_tag.in_(user.allowed_domains),
+                )
+            )
+        )
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_files", folder_id=folder_id)

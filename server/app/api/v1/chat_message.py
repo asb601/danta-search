@@ -15,6 +15,7 @@ from app.api.v1.chat_common import (
     MAX_STORED_DATA_ROWS,
     WARN_MESSAGES_THRESHOLD,
     bg_title_and_summary,
+    resolve_chat_scope,
 )
 from app.core.logger import chat_logger
 from app.dependencies import get_db, get_current_user
@@ -94,14 +95,11 @@ async def chat_message(
     chat_logger.info("chain_start", user_id=user.id, conversation_id=conv.id,
                      query=query[:200], has_context=bool(conversation_context))
 
-    # Build domain filter — admins see everything, regular users only see their
-    # allowed domains. None = unrestricted. Empty list [] = no domain assigned
-    # yet so also treat as unrestricted.
-    user_allowed_domains: list[str] | None = None
-    if not getattr(user, "is_admin", False):
-        domains = getattr(user, "allowed_domains", None)
-        if domains:  # non-empty list → restrict
-            user_allowed_domains = list(domains)
+    # Multi-tenancy: hard-bind scope (org container is forced for non-admins;
+    # body.container_id is ignored). allowed_domains is the in-org sub-filter.
+    effective_container_id, user_allowed_domains = await resolve_chat_scope(
+        user, body.container_id, db
+    )
 
     try:
         result = await run_agent_query(
@@ -110,7 +108,7 @@ async def chat_message(
             user_id=user.id,
             is_admin=getattr(user, "is_admin", False),
             allowed_domains=user_allowed_domains,
-            container_id=body.container_id,
+            container_id=effective_container_id,
             prior_files=prior_files,
         )
 

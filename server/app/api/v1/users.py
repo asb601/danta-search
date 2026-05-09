@@ -10,6 +10,7 @@ from app.core.logger import auth_logger
 from app.dependencies import get_current_user, require_admin
 from app.models.file import File
 from app.models.folder import Folder
+from app.models.organization import Organization
 from app.models.user import User
 from app.schemas.user import UserOut
 
@@ -24,6 +25,10 @@ class _MeDomainsBody(BaseModel):
 
 class _RoleBody(BaseModel):
     role: str  # "admin" | "developer" | "user"
+
+
+class _OrgAssignBody(BaseModel):
+    organization_id: str | None  # None = detach (turn into platform admin)
 
 
 @router.get("/domains")
@@ -85,6 +90,7 @@ async def list_users(
             created_at=u.created_at,
             file_count=file_count,
             allowed_domains=u.allowed_domains,
+            organization_id=u.organization_id,
         )
         for u, file_count in rows
     ]
@@ -157,3 +163,37 @@ async def delete_user(
 
     auth_logger.info("user_deleted", deleted_user_id=user_id, by_admin=current_user.id)
     return {"deleted": True}
+
+
+@router.patch("/{user_id}/organization")
+async def assign_user_to_organization(
+    user_id: str,
+    body: _OrgAssignBody,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Attach (or detach) a user to an organization.
+
+    Setting organization_id=None turns them back into a platform-level admin
+    (no org scoping applied). Non-admin users without an organization will be
+    unable to chat — the chat endpoints require either is_admin or an org.
+    """
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if body.organization_id is not None:
+        org = await db.get(Organization, body.organization_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+    user.organization_id = body.organization_id
+    await db.commit()
+
+    auth_logger.info(
+        "user_organization_changed",
+        user_id=user_id,
+        organization_id=body.organization_id,
+        by=current_user.id,
+    )
+    return {"id": user.id, "organization_id": user.organization_id}
