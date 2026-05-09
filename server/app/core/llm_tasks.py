@@ -23,7 +23,13 @@ def safe_parse_json(text: str) -> dict:
         return {}
 
 
-async def generate_file_description(columns_info: list, sample_rows: list, filename: str) -> dict:
+async def generate_file_description(
+    columns_info: list,
+    sample_rows: list,
+    filename: str,
+    domain_tag: str | None = None,
+    column_glossary: dict[str, str] | None = None,
+) -> dict:
     def _run() -> dict:
         client, deployment = get_client()
         cols_for_prompt = [
@@ -35,9 +41,25 @@ async def generate_file_description(columns_info: list, sample_rows: list, filen
             }
             for c in columns_info
         ]
+
+        # Build domain + glossary context injected into the prompt
+        context_block = ""
+        if domain_tag:
+            context_block += f'\nDomain context: This file belongs to the "{domain_tag}" domain.'
+        if column_glossary:
+            glossary_lines = "\n".join(
+                f"  {code} = {meaning}" for code, meaning in column_glossary.items()
+            )
+            context_block += (
+                "\nColumn name glossary (translate raw codes to these business terms "
+                "in your output — do NOT use raw codes as-is):\n" + glossary_lines
+            )
+        if context_block:
+            context_block = "\n" + context_block.strip()
+
         prompt = f"""You are a data catalog expert analyzing a file named "{filename}".
 Your output will be used to match natural language business questions to the correct file.
-Be SPECIFIC and DISCRIMINATIVE — your description must distinguish this file from other similar files.
+Be SPECIFIC and DISCRIMINATIVE — your description must distinguish this file from other similar files.{context_block}
 
 Return ONLY this JSON with no preamble no markdown:
 {{

@@ -46,6 +46,7 @@ export interface FileItem {
   lastModified: Date;
   synced?: boolean;
   uploadedBy?: string;
+  domainTag?: string | null;  // set for domain-tagged folders
 }
 
 export interface UploadProgressItem {
@@ -118,7 +119,8 @@ function getIcon(type: FileType) {
   }
 }
 
-function getIconColor(type: FileType): string {
+function getIconColor(type: FileType, domainTag?: string | null): string {
+  if (type === "folder" && domainTag) return "text-violet-400";
   switch (type) {
     case "folder": return "text-foreground";
     default: return "text-muted-foreground";
@@ -309,6 +311,12 @@ function GridCard({
       <p className="text-[11px] text-foreground text-center truncate w-full mt-1 leading-tight">
         {item.name}
       </p>
+      {item.type === "folder" && item.domainTag && (
+        <span className="inline-flex items-center gap-1 mt-0.5 text-[9px] font-medium text-violet-400 bg-violet-400/10 border border-violet-400/20 rounded-full px-1.5 py-0.5 truncate max-w-full">
+          <span className="w-1 h-1 rounded-full bg-violet-400 shrink-0" />
+          {item.domainTag}
+        </span>
+      )}
       {item.type !== "folder" && (
         <div className="mt-0.5">
           <StatusBadge status={item.status} />
@@ -335,7 +343,7 @@ function ListRow({
   onMouseEnter?: () => void;
 }) {
   const Icon = getIcon(item.type);
-  const iconColor = getIconColor(item.type);
+  const iconColor = getIconColor(item.type, item.domainTag);
 
   return (
     <div
@@ -353,9 +361,16 @@ function ListRow({
         <Cloud className="w-3 h-3 shrink-0 text-muted-foreground" strokeWidth={1.5} />
       )}
       <span className="flex-1 truncate text-foreground">{item.name}</span>
-      <span className="text-[10px] px-1.5 py-0.5 bg-surface-raised rounded text-muted-foreground shrink-0">
-        {getTypeBadge(item.type)}
-      </span>
+      {item.type === "folder" && item.domainTag ? (
+        <span className="inline-flex items-center gap-1 text-[9px] font-medium text-violet-400 bg-violet-400/10 border border-violet-400/20 rounded-full px-1.5 py-0.5 shrink-0">
+          <span className="w-1 h-1 rounded-full bg-violet-400 shrink-0" />
+          {item.domainTag}
+        </span>
+      ) : (
+        <span className="text-[10px] px-1.5 py-0.5 bg-surface-raised rounded text-muted-foreground shrink-0">
+          {getTypeBadge(item.type)}
+        </span>
+      )}
       <span className="text-xs text-muted-foreground w-16 text-right shrink-0">
         {item.type === "folder" ? "—" : formatSize(item.size)}
       </span>

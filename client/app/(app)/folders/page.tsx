@@ -25,7 +25,7 @@ const containersFetcher = async (): Promise<Container[]> => {
   return res.json();
 };
 
-function mapFolder(f: { id: string; name: string; created_at: string }): FileItem {
+function mapFolder(f: { id: string; name: string; created_at: string; domain_tag?: string | null }): FileItem {
   return {
     id: f.id,
     name: f.name,
@@ -33,6 +33,7 @@ function mapFolder(f: { id: string; name: string; created_at: string }): FileIte
     size: 0,
     status: "not_ingested",
     lastModified: new Date(f.created_at),
+    domainTag: f.domain_tag ?? null,
   };
 }
 

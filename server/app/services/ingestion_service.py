@@ -17,12 +17,126 @@ from app.models.container import ContainerConfig
 from app.models.file import File
 from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
+from app.models.folder import Folder
 from app.services.analytics_service import compute_and_store_analytics, trigger_parquet_conversion
 from app.services.data_preprocessor import ALL_EXTS as _PREPROCESS_EXTS, preprocess_file, probe_raw_csv
+
+# Filename patterns that mark a file as a column-name schema/glossary.
+# Any file whose name (lowercased) contains one of these tokens is treated as
+# a schema file and skipped from normal ingest — its content is used instead
+# to enrich the AI description of sibling data files in the same folder.
+_SCHEMA_NAME_TOKENS = ("schema", "glossary", "column_map", "field_def", "mapping", "data_dict")
 
 
 def _ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 2)
+
+
+def _is_schema_file(filename: str) -> bool:
+    """Return True if the filename signals a column glossary / schema file."""
+    stem = Path(filename).stem.lower()
+    return any(token in stem for token in _SCHEMA_NAME_TOKENS)
+
+
+async def _load_schema_glossary(
+    folder_id: str,
+    db: AsyncSession,
+    connection_string: str,
+    container_name: str,
+) -> dict[str, str]:
+    """Find a schema file in the same folder and parse it as a column glossary.
+
+    Schema file format (auto-detected):
+      - First column = raw column code (e.g. WRBTR, BUKRS)
+      - Second column = business meaning (e.g. Amount in Local Currency)
+      Optional third column = longer description (appended to the meaning)
+
+    Returns an empty dict if no schema file is found or parsing fails.
+    """
+    # Find schema files in this folder (already uploaded, any ingest status)
+    result = await db.execute(
+        select(File).where(
+            File.folder_id == folder_id,
+            File.blob_path.isnot(None),
+        )
+    )
+    siblings = result.scalars().all()
+
+    schema_file: File | None = None
+    for sib in siblings:
+        if _is_schema_file(sib.name):
+            schema_file = sib
+            break
+
+    if not schema_file or not schema_file.blob_path:
+        return {}
+
+    ingest_logger.info(
+        "schema_file_found",
+        schema_file=schema_file.name,
+        blob_path=schema_file.blob_path,
+        folder_id=folder_id,
+    )
+
+    def _parse(blob_path: str) -> dict[str, str]:
+        """Read schema file synchronously with DuckDB, return code->meaning dict."""
+        try:
+            import duckdb  # noqa: PLC0415
+            import os  # noqa: PLC0415
+
+            _CA = "/etc/ssl/certs/ca-certificates.crt"
+            if os.path.exists(_CA):
+                os.environ.setdefault("CURL_CA_BUNDLE", _CA)
+
+            conn = duckdb.connect()
+            try:
+                conn.execute("INSTALL azure IF NOT EXISTS;")
+            except Exception:
+                try:
+                    conn.execute("INSTALL azure;")
+                except Exception:
+                    pass
+            conn.execute("LOAD azure;")
+            conn.execute("SET azure_transport_option_type = 'curl';")
+            safe_cs = connection_string.replace("'", "''")
+            conn.execute(f"SET azure_storage_connection_string='{safe_cs}';")
+
+            url = f"azure://{container_name}/{blob_path}"
+            rows = conn.execute(
+                f"SELECT * FROM read_csv_auto('{url}', header=true, "
+                f"ignore_errors=true, sample_size=500) LIMIT 500"
+            ).fetchall()
+            cols = [d[0] for d in conn.description]
+
+            if len(cols) < 2:
+                return {}
+
+            glossary: dict[str, str] = {}
+            for row in rows:
+                code = str(row[0]).strip() if row[0] is not None else ""
+                meaning = str(row[1]).strip() if row[1] is not None else ""
+                if len(cols) >= 3 and row[2]:
+                    extra = str(row[2]).strip()
+                    if extra:
+                        meaning = f"{meaning} ({extra})"
+                if code and meaning:
+                    glossary[code] = meaning
+            return glossary
+        except Exception as exc:
+            ingest_logger.warning(
+                "schema_parse_failed",
+                blob_path=blob_path,
+                error=str(exc)[:300],
+            )
+            return {}
+
+    glossary = await asyncio.to_thread(_parse, schema_file.blob_path)
+    ingest_logger.info(
+        "schema_glossary_loaded",
+        entry_count=len(glossary),
+        sample=dict(list(glossary.items())[:5]),
+    )
+    return glossary
 
 
 def _ensure_trace(file_id: str) -> None:
@@ -287,10 +401,28 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
         ingest_logger.info("step", step="2/6", name="ai_description", status="started",
                            filename=file.name)
 
+        # Resolve domain context from folder
+        domain_tag: str | None = None
+        column_glossary: dict[str, str] = {}
+        if file.folder_id:
+            folder = await db.get(Folder, file.folder_id)
+            if folder:
+                domain_tag = folder.domain_tag
+                # Load schema glossary from sibling schema file in same folder
+                if not _is_schema_file(file.name):  # don't try to glossary a schema file itself
+                    column_glossary = await _load_schema_glossary(
+                        folder_id=file.folder_id,
+                        db=db,
+                        connection_string=container.connection_string,
+                        container_name=container.container_name,
+                    )
+
         description = await generate_file_description(
             columns_info=sample["columns_info"],
             sample_rows=sample["sample_rows"],
             filename=file.name,
+            domain_tag=domain_tag,
+            column_glossary=column_glossary or None,
         )
 
         ingest_logger.info("step", step="2/6", name="ai_description", status="done",
