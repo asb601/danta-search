@@ -193,6 +193,9 @@ async def create_domain(
     )
     db.add(folder)
     await db.commit()
+    # Invalidate catalog so this new domain folder is reflected in chat scope
+    # immediately (default 5-min TTL would otherwise hide it from users).
+    invalidate_catalog_cache()
     return {"domain": name, "folder_id": folder.id}
 
 
@@ -216,6 +219,10 @@ async def set_user_domains(
         update(User).where(User.id == user_id).values(allowed_domains=domains)
     )
     await db.commit()
+    # Invalidate catalog so the next chat request rebuilds visibility from scratch.
+    # Without this, the user keeps seeing the previous (broader) catalog for up
+    # to the cache TTL window.
+    invalidate_catalog_cache()
     return {"user_id": user_id, "allowed_domains": domains}
 
 
@@ -237,6 +244,10 @@ async def set_folder_domain(
         update(Folder).where(Folder.id == folder_id).values(domain_tag=body.domain_tag or None)
     )
     await db.commit()
+    # Invalidate catalog so the folder's new domain_tag is reflected in chat
+    # scope immediately. Without this, files in the folder remain visible to
+    # users outside the new domain for up to 5 minutes (the cache TTL).
+    invalidate_catalog_cache()
     return {"folder_id": folder_id, "domain_tag": body.domain_tag or None}
 
 

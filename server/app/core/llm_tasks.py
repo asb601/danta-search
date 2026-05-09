@@ -50,9 +50,26 @@ async def generate_file_description(
             glossary_lines = "\n".join(
                 f"  {code} = {meaning}" for code, meaning in column_glossary.items()
             )
+            # Build the set of glossary keys (case-insensitive match basis)
+            glossary_keys = {k.strip().lower() for k in column_glossary.keys()}
+            # Identify columns in this file that are NOT covered by the glossary
+            uncovered = [
+                c["name"] for c in columns_info
+                if c.get("name") and c["name"].strip().lower() not in glossary_keys
+            ]
+            uncovered_clause = ""
+            if uncovered:
+                uncovered_preview = ", ".join(uncovered[:20])
+                uncovered_clause = (
+                    "\n\nColumns NOT in the glossary (use the raw column name AS-IS — "
+                    "do NOT invent or guess a business meaning for these; if a column's "
+                    f"purpose is unclear, describe it neutrally from its sample values): {uncovered_preview}"
+                )
             context_block += (
-                "\nColumn name glossary (translate raw codes to these business terms "
-                "in your output — do NOT use raw codes as-is):\n" + glossary_lines
+                "\nColumn name glossary — for any column listed below, ALWAYS write "
+                "the business term first and put the raw code in parentheses, e.g. "
+                "'Amount in Local Currency (WRBTR)'. Never use the raw code alone when "
+                "a glossary entry exists:\n" + glossary_lines + uncovered_clause
             )
         if context_block:
             context_block = "\n" + context_block.strip()

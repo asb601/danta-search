@@ -54,21 +54,39 @@ async def resolve_chat_scope(
     domains = getattr(user, "allowed_domains", None)
     allowed_domains: list[str] | None = list(domains) if (domains and not is_admin) else None
 
+    effective_container_id: str | None
+    scope_source: str
     if is_admin:
-        return requested_container_id, allowed_domains
+        effective_container_id = requested_container_id
+        scope_source = "admin_body"
+    else:
+        org_id = getattr(user, "organization_id", None)
+        if not org_id:
+            effective_container_id = requested_container_id
+            scope_source = "no_org_fallback_body"
+        else:
+            org = await db.get(Organization, org_id)
+            if not org or not org.container_id:
+                effective_container_id = requested_container_id
+                scope_source = "org_no_container_fallback_body"
+            else:
+                effective_container_id = org.container_id
+                scope_source = "org_forced"
 
-    org_id = getattr(user, "organization_id", None)
-    if not org_id:
-        # Not yet assigned to an org — fall back to the requested container_id.
-        # This preserves backward-compatibility for existing users.
-        return requested_container_id, allowed_domains
+    # Audit trail — every chat request records the resolved scope so we can
+    # confirm domain/container restrictions are actually being applied.
+    chat_logger.info(
+        "chat_scope_resolved",
+        user_id=getattr(user, "id", None),
+        is_admin=is_admin,
+        organization_id=getattr(user, "organization_id", None),
+        requested_container_id=requested_container_id,
+        effective_container_id=effective_container_id,
+        allowed_domains=allowed_domains,
+        scope_source=scope_source,
+    )
 
-    org = await db.get(Organization, org_id)
-    if not org or not org.container_id:
-        # Org exists but has no container — fall back rather than hard-blocking.
-        return requested_container_id, allowed_domains
-
-    return org.container_id, allowed_domains
+    return effective_container_id, allowed_domains
 
 
 async def bg_title_and_summary(conv_id: str) -> None:

@@ -34,11 +34,30 @@ async def get_folder_contents(
 
     is_root = folder_id == "root"
 
+    # Resolve effective domain restriction by walking ancestors. A subfolder
+    # without its own domain_tag inherits the tag of its nearest tagged
+    # ancestor. This prevents bypass via "untagged subfolder inside a tagged
+    # parent" — e.g. "FBL3N / archive" must remain restricted to FBL3N users
+    # even if 'archive' itself has no tag.
+    async def _effective_domain_tag(start_folder_id: str) -> str | None:
+        cursor_id: str | None = start_folder_id
+        seen: set[str] = set()
+        while cursor_id and cursor_id not in seen:
+            seen.add(cursor_id)
+            f = await db.get(Folder, cursor_id)
+            if f is None:
+                return None
+            if f.domain_tag:
+                return f.domain_tag
+            cursor_id = f.parent_id
+        return None
+
     # Non-root folder access check: if user has domain restrictions, verify they
-    # can access this specific folder before listing its contents
+    # can access this specific folder (or any tagged ancestor) before listing
+    # its contents.
     if not is_root and user.allowed_domains:
-        current_folder = await db.get(Folder, folder_id)
-        if current_folder and current_folder.domain_tag and current_folder.domain_tag not in user.allowed_domains:
+        eff_tag = await _effective_domain_tag(folder_id)
+        if eff_tag and eff_tag not in user.allowed_domains:
             raise HTTPException(status_code=403, detail="Access to this folder is restricted")
 
     # Subfolders — org-wide, no owner filter

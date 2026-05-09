@@ -178,24 +178,39 @@ async def _build_lean_cache(db: AsyncSession) -> dict | None:
         return None
 
     file_rows = list((await db.execute(select(File))).scalars().all())
-    folder_ids = {f.folder_id for f in file_rows if f.folder_id}
-    folder_rows = (
-        list(
-            (await db.execute(select(Folder).where(Folder.id.in_(folder_ids))))
-            .scalars()
-            .all()
-        )
-        if folder_ids
-        else []
-    )
-    folder_domain: dict[str, str | None] = {fo.id: fo.domain_tag for fo in folder_rows}
+    # Load ALL folders (not just ones referenced by files) so we can walk
+    # parent_id chains for domain inheritance below.
+    all_folder_rows = list((await db.execute(select(Folder))).scalars().all())
+    folder_by_id: dict[str, Folder] = {fo.id: fo for fo in all_folder_rows}
     file_folder: dict[str, str | None] = {f.id: f.folder_id for f in file_rows}
 
-    def _domain_tag(file_id: str) -> str | None:
-        fid = file_folder.get(file_id)
-        if not fid:
+    # Effective domain_tag = the folder's own tag, or the nearest tagged
+    # ancestor's tag. This prevents a "FBL3N / archive" subfolder (untagged)
+    # from being treated as public — its files should still inherit FBL3N.
+    _eff_cache: dict[str, str | None] = {}
+
+    def _effective_tag(folder_id: str | None) -> str | None:
+        if not folder_id:
             return None
-        return folder_domain.get(fid)
+        if folder_id in _eff_cache:
+            return _eff_cache[folder_id]
+        seen: set[str] = set()
+        cursor: str | None = folder_id
+        while cursor and cursor not in seen:
+            seen.add(cursor)
+            fo = folder_by_id.get(cursor)
+            if fo is None:
+                _eff_cache[folder_id] = None
+                return None
+            if fo.domain_tag:
+                _eff_cache[folder_id] = fo.domain_tag
+                return fo.domain_tag
+            cursor = fo.parent_id
+        _eff_cache[folder_id] = None
+        return None
+
+    def _domain_tag(file_id: str) -> str | None:
+        return _effective_tag(file_folder.get(file_id))
 
     catalog = [
         {

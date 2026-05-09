@@ -570,6 +570,15 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                            filename=file.name,
                            total_duration_ms=_ms(pipeline_start))
 
+        # Invalidate the in-memory catalog so freshly ingested file (and any
+        # domain_tag inherited from its folder) is visible to chat without
+        # waiting for the 5-minute TTL.
+        try:
+            from app.agent.catalog_cache import invalidate_catalog_cache
+            invalidate_catalog_cache()
+        except Exception as _inv_exc:
+            ingest_logger.warning("catalog_invalidate_failed", error=str(_inv_exc)[:200])
+
     except Exception as exc:
         if preprocess_task is not None and not preprocess_task.done():
             preprocess_task.cancel()
