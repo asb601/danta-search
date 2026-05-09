@@ -193,8 +193,11 @@ async def _query_filtered_catalog(
     catalog: list[dict] = []
     for r in meta_rows:
         eff_tag = _effective_tag(file_folder.get(r.file_id))
-        # Domain gate: if caller has restrictions, skip files outside their domains.
-        if allowed_domains and eff_tag and eff_tag not in allowed_domains:
+        # Domain gate: if caller has domain restrictions, only include files
+        # that are explicitly tagged with one of their allowed domains.
+        # Files with no domain tag (root-level or untagged folders) are
+        # treated as admin-only — NOT accessible to domain-restricted users.
+        if allowed_domains and (not eff_tag or eff_tag not in allowed_domains):
             continue
         catalog.append({
             "file_id": r.file_id,

@@ -69,11 +69,24 @@ async def get_folder_contents(
     if container_id:
         # Sync tags every folder it creates with container_id, so direct match works.
         folder_stmt = folder_stmt.where(Folder.container_id == container_id)
-    # Domain scope: only show folders the user is allowed to see
+    # Domain scope: only show folders the user is allowed to see.
+    # Rule: domain-restricted users see ONLY folders explicitly tagged with
+    # one of their allowed domains.
+    #   - At root: untagged folders (OEBS AP, SAP OTC EWM, …) are hidden.
+    #   - Inside an authorised folder: untagged subfolders inherit the parent's
+    #     domain and are shown (admin created them inside the domain folder).
     if user.allowed_domains:
-        folder_stmt = folder_stmt.where(
-            or_(Folder.domain_tag.is_(None), Folder.domain_tag.in_(user.allowed_domains))
-        )
+        if is_root:
+            # Root-level — must be explicitly tagged with an allowed domain.
+            folder_stmt = folder_stmt.where(
+                Folder.domain_tag.in_(user.allowed_domains)
+            )
+        else:
+            # Non-root — untagged subfolders inherit the parent's domain (allowed)
+            # AND explicitly tagged subfolders must be in allowed domains.
+            folder_stmt = folder_stmt.where(
+                or_(Folder.domain_tag.is_(None), Folder.domain_tag.in_(user.allowed_domains))
+            )
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_subfolders", folder_id=folder_id)
@@ -95,19 +108,29 @@ async def get_folder_contents(
             file_stmt = file_stmt.where(File.folder_id.is_(None))
         else:
             file_stmt = file_stmt.where(File.folder_id == folder_id)
-    # Domain scope: only show files in folders the user is allowed to access
+    # Domain scope: only show files in folders the user is allowed to access.
+    # Rule: domain-restricted users NEVER see root-level files (no domain tag)
+    # and NEVER see files in untagged non-root folders at root browsing level.
     if user.allowed_domains:
-        file_stmt = (
-            file_stmt
-            .outerjoin(Folder, File.folder_id == Folder.id)
-            .where(
-                or_(
-                    File.folder_id.is_(None),          # root-level files — no domain tag
-                    Folder.domain_tag.is_(None),        # untagged folder — visible to all
-                    Folder.domain_tag.in_(user.allowed_domains),
+        if is_root:
+            # Domain users should not see any root-level (no-folder) files.
+            # Root files have no domain tag — they are admin/system artefacts.
+            from sqlalchemy import false as _false
+            file_stmt = file_stmt.where(_false())
+        else:
+            # Inside an authorised folder: files in untagged subfolders inherit
+            # the parent's domain (allowed); files in explicitly tagged subfolders
+            # must match the user's allowed domains.
+            file_stmt = (
+                file_stmt
+                .outerjoin(Folder, File.folder_id == Folder.id)
+                .where(
+                    or_(
+                        Folder.domain_tag.is_(None),        # untagged subfolder inherits parent domain
+                        Folder.domain_tag.in_(user.allowed_domains),
+                    )
                 )
             )
-        )
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="select_files", folder_id=folder_id)
