@@ -96,12 +96,22 @@ async def chat_message_stream(
         try:
             final_payload = None
 
+            # Build domain filter — admins see everything, regular users only
+            # see their allowed domains. None = unrestricted. Empty list [] =
+            # no domain assigned yet, also treat as unrestricted.
+            _user_is_admin = getattr(user, "is_admin", False)
+            _user_domains: list[str] | None = None
+            if not _user_is_admin:
+                _domains = getattr(user, "allowed_domains", None)
+                if _domains:  # non-empty list → restrict
+                    _user_domains = list(_domains)
+
             async for evt in run_agent_query_stream(
                 query, db,
                 conversation_context=conversation_context,
                 user_id=user.id,
-                is_admin=getattr(user, "is_admin", False),
-                allowed_domains=None if getattr(user, "is_admin", False) else (getattr(user, "allowed_domains", None) or []),
+                is_admin=_user_is_admin,
+                allowed_domains=_user_domains,
                 container_id=body.container_id,
                 prior_files=prior_files,
             ):
