@@ -6,7 +6,7 @@ import { Building2, Clock, CheckCircle2, XCircle, Loader2, Send, LogOut } from "
 import { apiFetch } from "@/lib/auth";
 import { useAuth } from "@/components/auth-provider";
 
-type AccessStatus = "loading" | "none" | "pending" | "approved" | "declined";
+type AccessStatus = "loading" | "none" | "pending" | "approved" | "declined" | "no_domains";
 
 export default function OnboardingPage() {
   const { user, loading, logout } = useAuth();
@@ -30,9 +30,18 @@ export default function OnboardingPage() {
       .then((r) => r.json())
       .then((data) => {
         if (data.status === "approved") {
-          // Force a full page reload so the auth provider re-fetches /me
-          // and picks up the updated allowed_domains set by the approval.
-          window.location.replace("/chat");
+          // Only redirect if the user actually has domains assigned.
+          // If an admin removed all domains the request status stays "approved"
+          // but allowed_domains is empty — redirecting would cause an infinite
+          // loop (layout sends them back here because they have no domains).
+          if (user.allowed_domains && user.allowed_domains.length > 0) {
+            // Force a full page reload so the auth provider re-fetches /me
+            // and picks up the updated allowed_domains set by the approval.
+            window.location.replace("/chat");
+          } else {
+            // Approved but no domains assigned (admin may have removed them).
+            setStatus("no_domains");
+          }
         } else {
           setStatus(data.status as AccessStatus);
         }
@@ -139,6 +148,26 @@ export default function OnboardingPage() {
             </p>
             <p className="text-xs text-muted-foreground">
               You can close this tab. Check your inbox for the decision.
+            </p>
+          </div>
+        )}
+
+        {/* ── Approved but no domains assigned ── */}
+        {status === "no_domains" && (
+          <div className="text-center space-y-4">
+            <div className="flex justify-center">
+              <div className="w-14 h-14 rounded-2xl bg-yellow-500/10 flex items-center justify-center">
+                <Clock className="w-7 h-7 text-yellow-500" />
+              </div>
+            </div>
+            <h1 className="text-2xl font-semibold text-foreground">Awaiting Domain Assignment</h1>
+            <p className="text-sm text-muted-foreground">
+              Your account has been approved but no data domains have been assigned yet.
+              Please contact your administrator to complete the setup.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Signed in as{" "}
+              <span className="text-foreground font-medium">{user?.email}</span>
             </p>
           </div>
         )}
