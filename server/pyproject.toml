@@ -31,6 +31,7 @@ dependencies = [
     "langchain-core>=0.3",
     "langchain-community>=0.3",
     "pgvector>=0.3.6",
+    "datafusion>=53.0.0",
 ]
 
 [build-system]

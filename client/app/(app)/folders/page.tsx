@@ -305,6 +305,22 @@ export default function FoldersPage() {
     [items, swrKey, mutate]
   );
 
+  const handleMove = useCallback(
+    async (fileId: string, targetFolderId: string | null) => {
+      try {
+        await apiFetch(`/api/files/${fileId}/move`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ folder_id: targetFolderId }),
+        });
+        await mutate();
+      } catch {
+        await mutate();
+      }
+    },
+    [mutate]
+  );
+
   return (
     <FileManagerView
       files={items ?? []}
@@ -328,6 +344,7 @@ export default function FoldersPage() {
       onCancelAllUploads={handleCancelAll}
       onReingestAll={canWrite ? handleReingestAll : undefined}
       reingestLoading={reingestLoading}
+      onMove={canWrite ? handleMove : undefined}
     />
   );
 }

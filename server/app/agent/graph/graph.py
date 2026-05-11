@@ -39,6 +39,7 @@ from app.agent.tools.sample import build_sample_tool
 from app.agent.tools.sql import build_sql_tools
 from app.agent.tools.stats import build_stats_tool
 from app.core.logger import chat_logger, pipeline_logger
+from app.core import metrics
 from app.retrieval.embeddings import build_search_text
 
 # Per-request mutable stores (keyed by request_id)
@@ -96,6 +97,7 @@ async def _build_agent_context(
 
     cached = await load_catalog(db, allowed_domains=None if is_admin else allowed_domains, container_id=container_id)
     if not cached:
+        metrics.inc("catalog_miss_count")
         pipeline_logger.warning("catalog_empty", query=query, reason="no files ingested yet")
         return None
 
@@ -240,6 +242,7 @@ async def _build_agent_context(
             total_files=len(full_catalog),
             fallback_files=[e.get("blob_path") for e in catalog],
         )
+        metrics.inc("catalog_fallback_count")
 
     # ── STEP 2.6: HYDRATE HEAVY FIELDS for the shortlist only ───────────────
     # The cached catalog is intentionally lean (no columns_info samples,
@@ -267,9 +270,24 @@ async def _build_agent_context(
     with _stores_lock:
         _request_stores[req_id] = store
 
+    # Authorised blob paths for this request — all files visible to this user
+    # in the full catalog (not just the retrieval shortlist).  search_catalog can
+    # surface any of these files, so the ACL must cover the full set or the LLM
+    # will get a false rejection when it tries to query a file it found via search.
+    # Catalog entries only have blob_path (CSV); parquet paths live in all_parquet_paths.
+    allowed_blob_paths: set[str] = set()
+    for e in full_catalog:
+        if e.get("blob_path"):
+            allowed_blob_paths.add(f"az://{container_name}/{e['blob_path']}")
+    for pq_path in all_parquet_paths.values():
+        allowed_blob_paths.add(f"az://{container_name}/{pq_path}")
+
     # Build tools
     all_tools = []
-    all_tools.extend(build_sql_tools(connection_string, container_name, parquet_blob_path, store))
+    all_tools.extend(build_sql_tools(
+        connection_string, container_name, parquet_blob_path, store,
+        allowed_blob_paths=allowed_blob_paths,
+    ))
     # search_catalog uses the lean full catalog so it can find any file
     # without paying the heavy-field cost.
     all_tools.extend(build_catalog_tools(full_catalog, all_parquet_paths, container_name))

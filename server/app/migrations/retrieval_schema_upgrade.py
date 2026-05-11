@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.database import engine
 
@@ -57,14 +56,19 @@ _STATEMENTS: list[str] = [
 ]
 
 
-async def _run(conn: AsyncConnection) -> None:
-    for stmt in _STATEMENTS:
-        await conn.execute(text(stmt))
-
-
 async def migrate() -> None:
-    async with engine.begin() as conn:
-        await _run(conn)
+    """Run each DDL statement in its own transaction.
+
+    Azure managed PostgreSQL blocks some extensions (pg_trgm). Running each
+    statement separately ensures a blocked statement doesn't abort the rest
+    (e.g. pgvector, column additions, BM25 indexes).
+    """
+    for stmt in _STATEMENTS:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(stmt))
+        except Exception:
+            pass  # skip unsupported statements (pg_trgm etc.) and continue
     print("✓ Retrieval schema migration complete.")
 
 

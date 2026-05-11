@@ -1,3 +1,4 @@
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -40,6 +41,10 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
 
+    # Query engine — "duckdb" (default, safe) | "datafusion" (new, concurrent)
+    # Switch to "datafusion" once shadow testing confirms correctness.
+    QUERY_ENGINE: str = "duckdb"
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 
@@ -47,7 +52,7 @@ class Settings(BaseSettings):
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     STORAGE_ENCRYPTION_KEY: str = ""
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {"env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"), "extra": "ignore"}
 
 
 @lru_cache

@@ -12,8 +12,19 @@ import time
 
 from langchain_core.tools import tool
 
-from app.core.duckdb_client import execute_query_sync
+from app.core.duckdb_client import execute_query_sync as _duckdb_execute
+from app.core.datafusion_client import execute_query_sync as _datafusion_execute
+from app.core.config import get_settings
 from app.core.logger import chat_logger, pipeline_logger
+from app.core import metrics
+from app.agent.tools.sql_safety import validate_and_normalise
+
+
+def _execute(sql: str, connection_string: str, container_name: str, max_rows: int) -> tuple:
+    """Route to DataFusion or DuckDB based on QUERY_ENGINE config flag."""
+    if get_settings().QUERY_ENGINE == "datafusion":
+        return _datafusion_execute(sql, connection_string, max_rows=max_rows, container_name=container_name)
+    return _duckdb_execute(sql, connection_string, max_rows=max_rows)
 
 
 def build_sql_tools(
@@ -21,8 +32,14 @@ def build_sql_tools(
     container_name: str,
     parquet_blob_path: str | None,
     state_store: dict,
+    allowed_blob_paths: set[str] | None = None,
 ) -> list:
-    """Return SQL tools bound to connection context."""
+    """Return SQL tools bound to connection context.
+
+    allowed_blob_paths: every az:// path the user is authorised to query for
+    this request.  Derived from the catalog shortlist in graph.py and used
+    by validate_and_normalise to close the prompt-injection gap.
+    """
 
     @tool
     def run_sql(sql: str) -> str:
@@ -33,17 +50,19 @@ def build_sql_tools(
         Use TRY_CAST for date columns. Results are capped at 20 rows server-side.
         Returns row_count, total_rows, column names, and all result rows (up to 20).
         If total_rows > 20 the query returned more data — refine with WHERE/LIMIT/GROUP BY."""
-        sql_upper = sql.strip().upper()
-        for bad in ("DROP ", "DELETE ", "UPDATE ", "INSERT ", "CREATE ", "ALTER ", "TRUNCATE "):
-            if bad in sql_upper:
-                return json.dumps({"error": f"DML statement not allowed: {bad.strip()}"})
+        try:
+            sql = validate_and_normalise(sql, allowed_blob_paths=allowed_blob_paths)
+        except ValueError as ve:
+            return json.dumps({"error": str(ve)})
+
+        sql_upper = sql.upper()
 
         # ── Log the complete SQL before execution ──────────────────────────────
         pipeline_logger.info("sql_execute_start", sql=sql)
 
         t_exec = time.perf_counter()
         try:
-            rows, total = execute_query_sync(sql, connection_string, max_rows=20)
+            rows, total = _execute(sql, connection_string, container_name, max_rows=20)
             duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
 
             # ── Log full result: columns + first 20 rows + timing ──────────────
@@ -95,6 +114,7 @@ def build_sql_tools(
             return json.dumps(resp, default=str)
         except Exception as exc:
             duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
+            metrics.inc("llm_sql_failure_count")
             pipeline_logger.error(
                 "sql_execute_error",
                 sql=sql,

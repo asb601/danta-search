@@ -30,6 +30,7 @@ import {
   Cloud,
   ExternalLink,
   Clock,
+  MoveRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -84,6 +85,7 @@ interface FileManagerViewProps {
   onCancelAllUploads?: () => void;
   onReingestAll?: () => void;
   reingestLoading?: boolean;
+  onMove?: (fileId: string, targetFolderId: string | null) => void;
 }
 
 type ViewMode = "grid" | "list";
@@ -156,6 +158,62 @@ function StatusBadge({ status }: { status: FileStatus }) {
   );
 }
 
+/* ━━━ MoveToModal ━━━ */
+function MoveToModal({
+  folders,
+  onMove,
+  onClose,
+}: {
+  folders: FileItem[];
+  onMove: (targetFolderId: string | null) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[300] flex items-center justify-center" onClick={onClose}>
+      <div
+        className="bg-surface border border-border rounded-xl shadow-xl w-72 max-h-80 flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+          <span className="text-sm font-medium text-foreground">Move to…</span>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="overflow-y-auto flex-1">
+          <button
+            onClick={() => { onMove(null); onClose(); }}
+            className="w-full h-9 px-4 text-sm flex items-center gap-2 text-muted-foreground hover:bg-surface-raised hover:text-foreground transition-colors"
+          >
+            <Folder className="w-4 h-4 shrink-0" strokeWidth={1.5} />
+            Root (no folder)
+          </button>
+          {folders.length > 0 && <div className="h-px bg-border mx-3" />}
+          {folders.map((f) => (
+            <button
+              key={f.id}
+              onClick={() => { onMove(f.id); onClose(); }}
+              className="w-full h-9 px-4 text-sm flex items-center gap-2 text-foreground hover:bg-surface-raised transition-colors"
+            >
+              <Folder className="w-4 h-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+              <span className="truncate">{f.name}</span>
+            </button>
+          ))}
+          {folders.length === 0 && (
+            <p className="px-4 py-3 text-xs text-muted-foreground">No folders in current view</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ━━━ ContextMenu ━━━ */
 function ContextMenu({
   x,
@@ -167,6 +225,7 @@ function ContextMenu({
   onIngest,
   onRename,
   onDelete,
+  onMove,
   onClose,
 }: {
   x: number;
@@ -178,6 +237,7 @@ function ContextMenu({
   onIngest: () => void;
   onRename: () => void;
   onDelete: () => void;
+  onMove: () => void;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -249,13 +309,15 @@ function ContextMenu({
             <Pencil className="w-3.5 h-3.5 text-muted-foreground" />
             Rename
           </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); onClose(); }}
-            className="w-full h-8 px-3 text-sm flex items-center gap-2 text-foreground hover:bg-surface-raised transition-colors"
-          >
-            <Star className="w-3.5 h-3.5 text-muted-foreground" />
-            Star
-          </button>
+          {!isFolder && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onMove(); onClose(); }}
+              className="w-full h-8 px-3 text-sm flex items-center gap-2 text-foreground hover:bg-surface-raised transition-colors"
+            >
+              <MoveRight className="w-3.5 h-3.5 text-muted-foreground" />
+              Move to…
+            </button>
+          )}
           <div className="h-px bg-border mx-2 my-0.5" />
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(); onClose(); }}
@@ -407,6 +469,7 @@ export default function FileManagerView({
   onCancelAllUploads,
   onReingestAll,
   reingestLoading,
+  onMove,
 }: FileManagerViewProps) {
   const items = files ?? [];
   const [view, setView] = useState<ViewMode>("grid");
@@ -417,6 +480,7 @@ export default function FileManagerView({
   const [newFolderName, setNewFolderName] = useState("Untitled Folder");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [movingFileId, setMovingFileId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const newFolderInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -808,7 +872,17 @@ export default function FileManagerView({
           onIngest={() => onIngest(ctxItem.id)}
           onRename={() => startRename(ctxItem.id)}
           onDelete={() => onDelete(ctxItem.id)}
+          onMove={() => setMovingFileId(ctxItem.id)}
           onClose={() => setCtxMenu(null)}
+        />
+      )}
+
+      {/* ── Move to modal ── */}
+      {movingFileId && onMove && (
+        <MoveToModal
+          folders={sorted.filter((i) => i.type === "folder" && i.id !== movingFileId)}
+          onMove={(targetFolderId) => onMove(movingFileId, targetFolderId)}
+          onClose={() => setMovingFileId(null)}
         />
       )}
 

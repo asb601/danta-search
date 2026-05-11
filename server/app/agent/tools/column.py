@@ -20,8 +20,16 @@ from typing import Iterable
 
 from langchain_core.tools import tool
 
-from app.core.duckdb_client import execute_query_sync
+from app.core.duckdb_client import execute_query_sync as _duckdb_execute
+from app.core.datafusion_client import execute_query_sync as _datafusion_execute
+from app.core.config import get_settings
 from app.core.logger import pipeline_logger
+
+
+def _execute(sql: str, connection_string: str, container_name: str | None, max_rows: int) -> tuple:
+    if get_settings().QUERY_ENGINE == "datafusion":
+        return _datafusion_execute(sql, connection_string, max_rows=max_rows, container_name=container_name)
+    return _duckdb_execute(sql, connection_string, max_rows=max_rows)
 
 
 # Tokens in column names that strongly imply identifier semantics — used to
@@ -188,7 +196,7 @@ def build_column_tool(
                     f"WHERE \"{column_name}\" IS NOT NULL "
                     f"LIMIT 5"
                 )
-                rows, _total = execute_query_sync(sql, connection_string, max_rows=5)
+                rows, _total = _execute(sql, connection_string, container_name, max_rows=5)
                 samples = [r.get("v") for r in rows if r.get("v") is not None]
                 # Dtype inference from the first non-null value.
                 if dtype == "unknown" and samples:

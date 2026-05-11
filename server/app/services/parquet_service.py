@@ -24,12 +24,15 @@ import os
 import tempfile
 import time
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from azure.storage.blob import BlobServiceClient
 
 from app.core.cost_tracker import track_azure_blob
 from app.core.duckdb_client import _clear_connection, _get_connection
 from app.core.logger import ingest_logger
+from app.core import metrics
 
 # ── In-memory progress store (keyed by job_id) ────────────────────────────────
 # { job_id: {"phase": "converting"|"uploading", "pct": 0-100} }
@@ -43,6 +46,116 @@ def get_progress(job_id: str) -> dict | None:
 
 def _ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 2)
+
+
+# ── Parquet post-processing ────────────────────────────────────────────────────
+# Files ≤ MAX_REWRITE_BYTES are fully re-written with PyArrow after DuckDB COPY
+# to gain write_statistics, page index, and bloom filters.
+# Files > MAX_REWRITE_BYTES skip the full rewrite but still compute profiles
+# from the first row group (fast, representative sample).
+_MAX_REWRITE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
+
+
+def _profile_and_rewrite(tmp_parquet_path: str) -> list[dict]:
+    """Compute column profiles and rewrite the local Parquet with optimal settings.
+
+    Returns a list of column profile dicts, one per column:
+      {"name", "type", "semantic_type", "null_pct",
+       "min"?, "max"?, "distinct_count"?, "top_values"?}
+
+    Side effect: overwrites tmp_parquet_path in place (only if file ≤ _MAX_REWRITE_BYTES).
+    """
+    file_size = os.path.getsize(tmp_parquet_path)
+    pf = pq.ParquetFile(tmp_parquet_path)
+
+    # Profile from first row group only (fast, ~representative for most files)
+    sample = pf.read_row_group(0)
+    num_sample_rows = len(sample)
+
+    profiles: list[dict] = []
+    bloom_cols: list[str] = []
+
+    for col_name in sample.column_names:
+        col = sample.column(col_name)
+        arrow_type_str = str(col.type)
+        null_count = col.null_count
+
+        # ── Semantic type detection ────────────────────────────────────────────
+        if pa.types.is_temporal(col.type):
+            semantic_type = "date"
+        elif (pa.types.is_integer(col.type)
+              or pa.types.is_floating(col.type)
+              or pa.types.is_decimal(col.type)):
+            semantic_type = "measure"
+        else:
+            semantic_type = "text"
+
+        profile: dict = {
+            "name": col_name,
+            "type": arrow_type_str,
+            "semantic_type": semantic_type,
+            "null_pct": round(null_count / num_sample_rows * 100, 1) if num_sample_rows else 0,
+        }
+
+        # ── Min / max for numeric and date columns ─────────────────────────────
+        if semantic_type in ("measure", "date"):
+            try:
+                min_v = pc.min(col).as_py()
+                max_v = pc.max(col).as_py()
+                if min_v is not None:
+                    profile["min"] = str(min_v) if semantic_type == "date" else min_v
+                if max_v is not None:
+                    profile["max"] = str(max_v) if semantic_type == "date" else max_v
+            except Exception:
+                pass
+
+        # ── Cardinality for string columns ─────────────────────────────────────
+        if pa.types.is_large_string(col.type) or pa.types.is_string(col.type):
+            try:
+                non_null = col.drop_null()
+                if len(non_null) > 0:
+                    distinct_count = pc.count_distinct(non_null).as_py()
+                    profile["distinct_count"] = distinct_count
+                    cardinality_ratio = distinct_count / len(non_null)
+                    if cardinality_ratio < 0.05 and distinct_count < 5000:
+                        profile["semantic_type"] = "category"
+                        bloom_cols.append(col_name)
+                        # Top 10 most frequent values
+                        vc = non_null.value_counts()
+                        sorted_vc = vc.sort_by([("counts", "descending")])
+                        profile["top_values"] = sorted_vc["values"][:10].to_pylist()
+            except Exception:
+                pass
+
+        profiles.append(profile)
+
+    # ── Rewrite with optimal Parquet settings (only for manageable file sizes) ─
+    if file_size <= _MAX_REWRITE_BYTES:
+        full_table = pq.read_table(tmp_parquet_path)
+        write_kwargs: dict = dict(
+            compression="zstd",
+            compression_level=3,
+            row_group_size=1_000_000,
+            write_statistics=True,
+            write_page_index=True,
+            use_dictionary=True,
+        )
+        if bloom_cols:
+            write_kwargs["bloom_filter_columns"] = bloom_cols
+        # Write to a sibling temp file then atomically replace the original.
+        # Avoids a corrupt file if the process dies mid-write.
+        tmp_rewrite = tmp_parquet_path + ".rewrite"
+        try:
+            pq.write_table(full_table, tmp_rewrite, **write_kwargs)
+            os.replace(tmp_rewrite, tmp_parquet_path)
+        finally:
+            if os.path.exists(tmp_rewrite):
+                try:
+                    os.unlink(tmp_rewrite)
+                except OSError:
+                    pass
+
+    return profiles
 
 
 def _run_conversion(
@@ -102,7 +215,7 @@ def _run_conversion(
                     )
                 )
                 TO '{safe_parquet}'
-                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)
+                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 1000000)
             """)
         except Exception:
             _clear_connection(connection_string)
@@ -124,6 +237,16 @@ def _run_conversion(
                            duration_ms=convert_ms)
         track_azure_blob("download", blob_path, csv_size_bytes, convert_ms)
 
+        # ── Step 1b: Profile columns + rewrite with statistics / bloom filters ─
+        t_profile = time.perf_counter()
+        column_profiles = _profile_and_rewrite(tmp_parquet_path)
+        # Rewrite may change size — refresh
+        parquet_size_bytes = os.path.getsize(tmp_parquet_path)
+        ingest_logger.info("parquet_service", step="rewrite", status="done",
+                           bloom_cols=len([p for p in column_profiles if "top_values" in p]),
+                           profiles=len(column_profiles),
+                           duration_ms=_ms(t_profile))
+
         # ── Step 2: upload Parquet back to Azure ──────────────────────────────
         t = time.perf_counter()
         ingest_logger.info("parquet_service", step="upload", status="started",
@@ -143,7 +266,15 @@ def _run_conversion(
         if job_id:
             _PROGRESS.pop(job_id, None)  # clean up — job is done
 
-        return {"parquet_blob_path": parquet_blob_path, "size_bytes": parquet_size_bytes}
+        metrics.inc("parquet_conversions")
+        metrics.inc("azure_bytes_read", csv_size_bytes)
+        metrics.inc("azure_bytes_written", parquet_size_bytes)
+        return {
+            "parquet_blob_path": parquet_blob_path,
+            "size_bytes": parquet_size_bytes,
+            "total_rows": total_rows,
+            "column_profiles": column_profiles,
+        }
 
     finally:
         if tmp_parquet_path and os.path.exists(tmp_parquet_path):

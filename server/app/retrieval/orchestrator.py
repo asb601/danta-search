@@ -94,6 +94,8 @@ async def retrieve_with_scores(
     # ── Stages 4-6: sequential retrieval ─────────────────────────────────────
     # SQLAlchemy async sessions share one connection and do not support
     # concurrent operations. Run BM25, fuzzy, vector sequentially.
+    # Each stage is wrapped independently — a failing stage returns [] instead
+    # of silently killing all retrieval (e.g. pg_trgm not installed on Azure).
     try:
         bm25_results = await bm25_search(
             query, user_id, is_admin, db,
@@ -102,6 +104,11 @@ async def retrieve_with_scores(
             allowed_domains=allowed_domains,
             container_id=container_id,
         )
+    except Exception as exc:
+        chat_logger.warning("retrieval_bm25_error", error=str(exc)[:200])
+        bm25_results = []
+
+    try:
         fuzzy_results = await fuzzy_search(
             query, user_id, is_admin, db,
             date_from=date_from, date_to=date_to,
@@ -109,6 +116,11 @@ async def retrieve_with_scores(
             allowed_domains=allowed_domains,
             container_id=container_id,
         )
+    except Exception as exc:
+        chat_logger.warning("retrieval_fuzzy_error", error=str(exc)[:200])
+        fuzzy_results = []
+
+    try:
         vector_results = await vector_search(
             query, user_id, is_admin, db,
             date_from=date_from, date_to=date_to,
@@ -117,8 +129,8 @@ async def retrieve_with_scores(
             container_id=container_id,
         )
     except Exception as exc:
-        chat_logger.warning("retrieval_parallel_error", error=str(exc)[:200])
-        return []
+        chat_logger.warning("retrieval_vector_error", error=str(exc)[:200])
+        vector_results = []
 
     # ── Stage 7: RRF fusion ───────────────────────────────────────────────────
     fused = rrf_fuse(

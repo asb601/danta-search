@@ -9,6 +9,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.core.config import get_settings
 from app.core.database import engine, Base
 from app.core.logger import upload_logger, folder_logger, container_logger, auth_logger, chat_logger
+from app.core import metrics as _metrics
 from app.api.v1.auth import router as auth_router
 from app.api.v1.folders import router as folders_router
 from app.api.v1.files import router as files_router
@@ -151,3 +152,14 @@ app.include_router(organizations_router, prefix="/api")
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/metrics")
+async def metrics():
+    """Live in-process metrics snapshot.
+
+    Returns query latency percentiles, error counts, blob bytes, and other
+    key operational counters defined in RND_IMPLEMENTATION_PLAN Phase 4.
+    No authentication required — restrict at the infra/network layer if needed.
+    """
+    return _metrics.get_snapshot()

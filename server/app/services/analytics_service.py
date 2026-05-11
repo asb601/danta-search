@@ -119,6 +119,7 @@ async def trigger_parquet_conversion(
         parquet_path = result["parquet_blob_path"]
         parquet_size = result["size_bytes"]
         total_rows = result.get("total_rows")
+        column_profiles = result.get("column_profiles")
 
         async with _async_session() as db:
             analytics_row = (
@@ -142,12 +143,15 @@ async def trigger_parquet_conversion(
                 )
                 db.add(new_analytics)
 
-            if total_rows:
+            if total_rows or column_profiles:
                 meta_row = (
                     await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
                 ).scalar_one_or_none()
                 if meta_row:
-                    meta_row.row_count = total_rows
+                    if total_rows:
+                        meta_row.row_count = total_rows
+                    if column_profiles:
+                        meta_row.columns_info = column_profiles
 
             job_row = await db.get(BackgroundJob, job_id)
             if job_row:
