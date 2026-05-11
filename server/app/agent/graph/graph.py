@@ -10,6 +10,7 @@ This module orchestrates the pipeline:
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 import uuid
@@ -137,23 +138,69 @@ async def _build_agent_context(
     # ── In-memory keyword scorer (used for fallback AND for lookup-slot fill) ─
     q_words = tokenize_search_query(query)
 
-    def _kw_score(e: dict) -> int:
-        search_text = build_search_text(e).lower()
-        score = sum(1 for w in q_words if w in search_text)
-
-        # Accept both heavy (columns_info: list of dicts) and lean
-        # (column_names: list of strings) catalog shapes.
-        col_names: list[str] = []
-        for c in (e.get("columns_info") or []):
+    # IDF weights — rare tokens (those that appear in few catalog files)
+    # are far more discriminative than common ones. Without this, a query
+    # like "Group by FBL3N line items" treats "items" (in 30 files) the
+    # same as "FBL3N" (in 1 file) and the wrong files win the fallback.
+    # Computed once per request: O(N_files × N_tokens), trivial.
+    _N = max(1, len(full_catalog))
+    _doc_freq: dict[str, int] = {}
+    _file_blobs: list[str] = []
+    _file_search_text: list[str] = []
+    _file_col_text: list[str] = []
+    for _e in full_catalog:
+        st = build_search_text(_e).lower()
+        bp = (_e.get("blob_path") or "").lower()
+        cnames: list[str] = []
+        for c in (_e.get("columns_info") or []):
             if isinstance(c, dict) and c.get("name"):
-                col_names.append(c["name"])
-        if not col_names:
-            col_names = [c for c in (e.get("column_names") or []) if isinstance(c, str)]
-        column_text = " ".join(col_names).lower()
-        score += sum(2 for w in q_words if w in column_text)
+                cnames.append(c["name"])
+        if not cnames:
+            cnames = [c for c in (_e.get("column_names") or []) if isinstance(c, str)]
+        ct = " ".join(cnames).lower()
+        _file_search_text.append(st)
+        _file_blobs.append(bp)
+        _file_col_text.append(ct)
+        # Only count each token once per file (document frequency).
+        seen_in_file: set[str] = set()
+        for w in q_words:
+            if w in seen_in_file:
+                continue
+            if w in st or w in bp or w in ct:
+                _doc_freq[w] = _doc_freq.get(w, 0) + 1
+                seen_in_file.add(w)
+    # Smoothed IDF: log((N + 1) / (df + 1)) + 1 — always positive, dampens
+    # very common tokens, gives unique tokens (df=1) the largest weight.
+    _idf = {w: math.log((_N + 1) / (_doc_freq.get(w, 0) + 1)) + 1.0 for w in q_words}
 
-        blob_path = (e.get("blob_path") or "").lower()
-        score += sum(1 for w in q_words if w in blob_path)
+    def _kw_score(e: dict) -> float:
+        # Find this entry in the precomputed arrays by blob_path (cheap).
+        bp = (e.get("blob_path") or "").lower()
+        try:
+            idx = _file_blobs.index(bp)
+            search_text = _file_search_text[idx]
+            column_text = _file_col_text[idx]
+        except ValueError:
+            search_text = build_search_text(e).lower()
+            cnames: list[str] = []
+            for c in (e.get("columns_info") or []):
+                if isinstance(c, dict) and c.get("name"):
+                    cnames.append(c["name"])
+            if not cnames:
+                cnames = [c for c in (e.get("column_names") or []) if isinstance(c, str)]
+            column_text = " ".join(cnames).lower()
+
+        score = 0.0
+        for w in q_words:
+            weight = _idf.get(w, 1.0)
+            # Filename / blob_path hit is the strongest signal — a unique
+            # filename token (e.g. "FBL3N") should dominate the ranking.
+            if w in bp:
+                score += 3.0 * weight
+            if w in column_text:
+                score += 2.0 * weight
+            if w in search_text:
+                score += 1.0 * weight
         return score
 
     if retrieved_with_scores:
@@ -252,6 +299,13 @@ async def _build_agent_context(
     shortlist_ids = [e["file_id"] for e in catalog if e.get("file_id")]
     heavy_by_file = await hydrate_files(db, shortlist_ids)
     catalog = [merge_hydrated(e, heavy_by_file.get(e.get("file_id"))) for e in catalog]
+    # The shortlist is what the system prompt shows the LLM. The FULL catalog
+    # (with hydrated heavy fields where available) is what discovery tools
+    # bind to, so the LLM can inspect any file it surfaces via search_catalog
+    # without "File not found in catalog" failures.
+    full_catalog = [
+        merge_hydrated(e, heavy_by_file.get(e.get("file_id"))) for e in full_catalog
+    ]
     sample_rows_by_blob = {
         e["blob_path"]: e.get("sample_rows") or []
         for e in catalog
@@ -294,11 +348,20 @@ async def _build_agent_context(
     # inspect_column lets the agent pull dtype/samples/suggested predicate
     # for any column on demand. Replaces the long DuckDB / date-format
     # rules that used to live as prose in the system prompt.
+    # inspect_column lets the agent pull dtype/samples/suggested predicate
+    # for any column on demand. Bind to the FULL catalog so the LLM can
+    # inspect any file surfaced via search_catalog — not just the shortlist.
+    # For non-hydrated files, the tool falls back to a bounded SQL probe.
     all_tools.extend(
-        build_column_tool(catalog, all_parquet_paths, container_name, connection_string)
+        build_column_tool(full_catalog, all_parquet_paths, container_name, connection_string)
     )
     all_tools.extend(build_stats_tool(store))
-    all_tools.extend(build_sample_tool(sample_rows_by_blob))
+    # inspect_data_format previews rows. Same full-catalog binding as
+    # inspect_column; cached sample_rows for shortlist files, SQL probe
+    # fallback for the rest.
+    all_tools.extend(build_sample_tool(
+        full_catalog, all_parquet_paths, container_name, connection_string,
+    ))
 
     # Build graph
     graph = build_graph(all_tools)
