@@ -2,7 +2,7 @@ name: Deploy to VM
 
 on:
   push:
-    branches: [feature/rnd-optimizations]
+    branches: [main]
 
 jobs:
   deploy:
@@ -24,9 +24,7 @@ jobs:
             git checkout server/uv.lock 2>/dev/null || true
 
             # Pull latest code
-            git fetch origin
-            git checkout ${{ github.ref_name }}
-            git pull origin ${{ github.ref_name }}
+            git pull origin main
 
             # Remove client folder — VM only needs server
             rm -rf ~/G-CHAT-/client
