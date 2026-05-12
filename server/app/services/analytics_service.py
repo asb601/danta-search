@@ -11,6 +11,7 @@ Strategy:
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 
@@ -23,6 +24,12 @@ from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
 from app.services.analytics_computer import compute_sample_analytics
 from app.services.parquet_service import convert_csv_to_parquet
+
+# Cap concurrent parquet conversions at 2.
+# Each conversion runs DuckDB + PyArrow + DataFusion profiling in threads and
+# peaks at ~300–500 MB RAM. Without this cap, re-ingest-all on 20+ files fires
+# all jobs simultaneously and OOM-kills the VM kernel.
+_PARQUET_SEMAPHORE = asyncio.Semaphore(2)
 
 
 def _ms(start: float) -> float:
@@ -112,10 +119,13 @@ async def trigger_parquet_conversion(
         db.add(job)
         await db.commit()
 
-    ingest_logger.info("parquet_conversion", status="started", blob_path=blob_path, job_id=job_id)
+    ingest_logger.info("parquet_conversion", status="queued", blob_path=blob_path, job_id=job_id)
+
+    async with _PARQUET_SEMAPHORE:
+        ingest_logger.info("parquet_conversion", status="started", blob_path=blob_path, job_id=job_id)
+        result = await convert_csv_to_parquet(blob_path, connection_string, container_name, job_id=job_id)
 
     try:
-        result = await convert_csv_to_parquet(blob_path, connection_string, container_name, job_id=job_id)
         parquet_path = result["parquet_blob_path"]
         parquet_size = result["size_bytes"]
         total_rows = result.get("total_rows")
