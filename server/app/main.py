@@ -28,6 +28,7 @@ import app.models.file_analytics  # ensure FileAnalytics table is created
 import app.models.background_job  # ensure BackgroundJob table is created
 import app.models.conversation  # ensure Conversation + Message tables are created
 import app.models.organization  # ensure Organization table is created
+import app.models.schema_dictionary  # ensure SchemaDictionary table is created
 
 
 async def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:

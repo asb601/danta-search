@@ -153,6 +153,62 @@ async def trigger_parquet_conversion(
                     if column_profiles:
                         meta_row.columns_info = column_profiles
 
+            # ── Register as schema dictionary if detected ─────────────────
+            schema_dict_meta = result.get("schema_dict_meta")
+            if schema_dict_meta and parquet_path:
+                try:
+                    from app.models.schema_dictionary import SchemaDictionary  # local import
+
+                    # Get container_id from file_metadata (needed for lookup scoping).
+                    if not meta_row:
+                        meta_row = (
+                            await db.execute(
+                                select(FileMetadata).where(FileMetadata.file_id == file_id)
+                            )
+                        ).scalar_one_or_none()
+                    container_id_for_dict = meta_row.container_id if meta_row else None
+
+                    if container_id_for_dict:
+                        # Upsert: replace any previous registration for this file.
+                        existing_sd = (
+                            await db.execute(
+                                select(SchemaDictionary).where(
+                                    SchemaDictionary.file_id == file_id
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if existing_sd:
+                            existing_sd.parquet_blob_path = parquet_path
+                            existing_sd.field_name_col = schema_dict_meta["field_name_col"]
+                            existing_sd.description_col = schema_dict_meta["description_col"]
+                            existing_sd.notes_col = schema_dict_meta.get("notes_col")
+                        else:
+                            db.add(SchemaDictionary(
+                                id=str(uuid.uuid4()),
+                                container_id=container_id_for_dict,
+                                file_id=file_id,
+                                parquet_blob_path=parquet_path,
+                                field_name_col=schema_dict_meta["field_name_col"],
+                                description_col=schema_dict_meta["description_col"],
+                                notes_col=schema_dict_meta.get("notes_col"),
+                            ))
+                        ingest_logger.info(
+                            "schema_dict_registered",
+                            file_id=file_id,
+                            container_id=container_id_for_dict,
+                            parquet_path=parquet_path,
+                            field_name_col=schema_dict_meta["field_name_col"],
+                            description_col=schema_dict_meta["description_col"],
+                        )
+                except Exception as sd_exc:
+                    # Non-fatal — schema dict registration failure must never
+                    # block the parquet conversion job.
+                    ingest_logger.warning(
+                        "schema_dict_registration_failed",
+                        file_id=file_id,
+                        error=str(sd_exc)[:300],
+                    )
+
             job_row = await db.get(BackgroundJob, job_id)
             if job_row:
                 job_row.status = "done"

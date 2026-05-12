@@ -123,9 +123,16 @@ def build_column_tool(
     parquet_paths: dict[str, str],
     container_name: str,
     connection_string: str,
+    field_definitions: dict[str, dict] | None = None,
 ) -> list:
-    """Return the inspect_column tool bound to the request's catalog + DuckDB."""
+    """Return the inspect_column tool bound to the request's catalog + DuckDB.
 
+    Args:
+        field_definitions: optional {FIELD_NAME_UPPER → {description, notes}}
+            pre-loaded from registered schema dictionaries.  When provided,
+            inspect_column automatically appends business meaning to its output.
+    """
+    _defs = field_definitions or {}
     catalog_by_blob = {e["blob_path"]: e for e in catalog if e.get("blob_path")}
 
     @tool
@@ -266,7 +273,16 @@ def build_column_tool(
             "distinct_count": unique_count or None,
             "suggested_predicate": suggested,
         }
-        pipeline_logger.info("inspect_column", **result)
+
+        # Enrich with business meaning from schema dictionary if available.
+        # Key is always UPPER to match SAP-style naming conventions.
+        defn = _defs.get(column_name.upper())
+        if defn:
+            result["description"] = defn["description"]
+            if defn.get("notes"):
+                result["notes"] = defn["notes"]
+
+        pipeline_logger.info("inspect_column", **{k: v for k, v in result.items() if k != "sample_values"})
         return json.dumps(result, default=str)
 
     return [inspect_column]

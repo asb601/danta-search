@@ -36,6 +36,7 @@ from app.agent.response_helpers import (
 from app.agent.state import AgentState
 from app.agent.tools.catalog import build_catalog_tools
 from app.agent.tools.column import build_column_tool
+from app.agent.tools.definition_lookup import build_definition_lookup_tool, load_schema_registry
 from app.agent.tools.sample import build_sample_tool
 from app.agent.tools.sql import build_sql_tools
 from app.agent.tools.stats import build_stats_tool
@@ -117,6 +118,17 @@ async def _build_agent_context(
     container_name = cached["container_name"]
     parquet_blob_path = cached["parquet_blob_path"]
     all_parquet_paths = cached["parquet_paths_all"]
+
+    # ── STEP 2b: SCHEMA REGISTRY — load field definitions from any uploaded
+    # data-dictionary files for this container.  Returns {} if none registered.
+    # This is pre-loaded once here so all tool builders can share the same dict
+    # without repeating SQL queries at each tool call.
+    resolved_container_id = container_id or (
+        full_catalog[0].get("container_id") if full_catalog else None
+    )
+    field_definitions = await load_schema_registry(
+        db, resolved_container_id, connection_string, container_name
+    )
 
     # ── STEP 2.5: RETRIEVAL — filter catalog to top-K relevant files ─────────
     # Run the 9-stage retrieval pipeline (temporal → BM25 → fuzzy → vector →
@@ -345,16 +357,19 @@ async def _build_agent_context(
     # search_catalog uses the lean full catalog so it can find any file
     # without paying the heavy-field cost.
     all_tools.extend(build_catalog_tools(full_catalog, all_parquet_paths, container_name))
-    # inspect_column lets the agent pull dtype/samples/suggested predicate
-    # for any column on demand. Replaces the long DuckDB / date-format
-    # rules that used to live as prose in the system prompt.
-    # inspect_column lets the agent pull dtype/samples/suggested predicate
-    # for any column on demand. Bind to the FULL catalog so the LLM can
-    # inspect any file surfaced via search_catalog — not just the shortlist.
-    # For non-hydrated files, the tool falls back to a bounded SQL probe.
+    # inspect_column — bound to full catalog with optional schema dict enrichment.
+    # For non-hydrated files, falls back to a bounded SQL probe.
+    # When field_definitions is non-empty, automatically appends business meaning
+    # to the output (e.g. SHKZG → "Debit/Credit indicator: S=debit, H=credit").
     all_tools.extend(
-        build_column_tool(full_catalog, all_parquet_paths, container_name, connection_string)
+        build_column_tool(
+            full_catalog, all_parquet_paths, container_name, connection_string,
+            field_definitions=field_definitions,
+        )
     )
+    # lookup_field_definition — standalone tool for explicit semantic lookups.
+    # Uses the same pre-loaded dict as inspect_column — zero extra SQL calls.
+    all_tools.extend(build_definition_lookup_tool(field_definitions))
     all_tools.extend(build_stats_tool(store))
     # inspect_data_format previews rows. Same full-catalog binding as
     # inspect_column; cached sample_rows for shortlist files, SQL probe

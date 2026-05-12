@@ -482,6 +482,7 @@ export default function FileManagerView({
   const [renameValue, setRenameValue] = useState("");
   const [movingFileId, setMovingFileId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const newFolderInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
@@ -705,10 +706,38 @@ export default function FileManagerView({
                 <Upload className="w-3.5 h-3.5" />
                 <span className="text-xs">Upload</span>
               </button>
+              <button
+                onClick={() => {
+                  if (!selectedContainerId && containers && containers.length > 0) return;
+                  folderInputRef.current?.click();
+                }}
+                disabled={!selectedContainerId && (containers?.length ?? 0) > 0}
+                title="Upload an entire folder (preserves subdirectory structure)"
+                className={cn(
+                  "h-7 px-2.5 flex items-center gap-1.5 rounded-md text-sm transition-colors",
+                  !selectedContainerId && (containers?.length ?? 0) > 0
+                    ? "text-muted-foreground/50 cursor-not-allowed"
+                    : "text-muted-foreground hover:text-foreground hover:bg-surface-raised"
+                )}
+              >
+                <FolderPlus className="w-3.5 h-3.5" />
+                <span className="text-xs">Upload Folder</span>
+              </button>
               <input
                 ref={fileInputRef}
                 type="file"
                 multiple
+                className="hidden"
+                onChange={handleFileInput}
+              />
+              <input
+                ref={folderInputRef}
+                type="file"
+                multiple
+                // Non-standard but supported by all major browsers; lets the
+                // file picker accept a directory tree.
+                {...({ webkitdirectory: "" } as Record<string, string>)}
+                {...({ directory: "" } as Record<string, string>)}
                 className="hidden"
                 onChange={handleFileInput}
               />

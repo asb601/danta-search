@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import tempfile
 import time
 
@@ -54,6 +55,123 @@ def _ms(start: float) -> float:
 # Files > MAX_REWRITE_BYTES skip the full rewrite but still compute profiles
 # from the first row group (fast, representative sample).
 _MAX_REWRITE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
+
+
+# ── Schema dictionary detection ───────────────────────────────────────────────
+# A file is treated as a data-dictionary ONLY when its filename contains the
+# word "schema" (e.g. schema.csv, schema_fbl3n.csv, fbl3n_schema.csv,
+# schema-bseg-fields.parquet). This is an explicit, opt-in convention — we
+# do NOT scan random files looking for dictionary-shaped column names because
+# that produces false positives on ordinary lookup/master tables (e.g. a
+# vendor master that happens to have name + description columns).
+
+# Once a file is identified as a schema by filename, we map its columns to:
+#   - field_name_col: the column listing technical field names (e.g. SHKZG)
+#   - description_col: the column with the human description
+#   - notes_col: optional secondary long-text column
+_FIELD_NAME_TOKENS = frozenset({
+    "field", "fieldname", "field_name", "column", "column_name", "col_name",
+    "attribute", "technical_name", "tabname", "dataelem", "rollname",
+    "element", "fieldid", "field_id", "colname",
+})
+_DESCRIPTION_TOKENS = frozenset({
+    "description", "desc", "short_text", "long_text", "scrtext_m",
+    "scrtext_l", "ddtext", "reptext", "label", "meaning",
+    "definition", "documentation", "help_text", "medium_text",
+    "descr", "description_text", "explanation",
+})
+_NOTES_TOKENS = frozenset({
+    "long_text", "scrtext_l", "documentation", "notes", "remark",
+    "extended_description", "detail", "comment",
+})
+
+
+def _norm_col(name: str) -> str:
+    """Normalise a column name for pattern matching."""
+    return name.lower().replace("-", "_").replace(" ", "_")
+
+
+def _filename_marks_schema(blob_path: str) -> bool:
+    """True if the filename signals this is a data-dictionary upload.
+
+    Match rule: the basename (without directories or extension), tokenised
+    on common separators, contains the literal token "schema". This catches:
+      - schema.csv
+      - schema_fbl3n.csv
+      - fbl3n_schema.csv
+      - schema-bseg-fields.parquet
+      - 2024.10.01_schema_v2.csv
+    But NOT a column called "schema_id" inside a regular data file, since
+    we never look at columns to decide.
+    """
+    if not blob_path:
+        return False
+    # Take the filename only — strip path and extension.
+    base = blob_path.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
+    # Tokenise on _, -, ., space.
+    tokens = re.split(r"[_\-.\s]+", base)
+    return "schema" in tokens
+
+
+def detect_schema_dictionary(blob_path: str, profiles: list[dict]) -> dict | None:
+    """Return {field_name_col, description_col, notes_col} if the file is a
+    data dictionary, else None.
+
+    A file qualifies ONLY if the filename contains "schema" as a token.
+    For qualifying files we then map columns by name heuristics.
+
+    If the filename signals "schema" but column names cannot be mapped, we
+    log a warning and return None so the file is treated as a normal data
+    file — never registered as a dictionary with the wrong columns.
+    """
+    if not _filename_marks_schema(blob_path):
+        return None
+
+    if not profiles:
+        return None
+
+    col_names = [p["name"] for p in profiles]
+    normed = {n: _norm_col(n) for n in col_names}
+
+    def _pick(tokens: frozenset, exclude: set[str]) -> str | None:
+        # Exact match first.
+        for original, norm in normed.items():
+            if original in exclude:
+                continue
+            if norm in tokens:
+                return original
+        # Substring match fallback.
+        for original, norm in normed.items():
+            if original in exclude:
+                continue
+            if any(t in norm for t in tokens):
+                return original
+        return None
+
+    field_name_col = _pick(_FIELD_NAME_TOKENS, set())
+    description_col = _pick(_DESCRIPTION_TOKENS, {field_name_col} if field_name_col else set())
+
+    if not field_name_col or not description_col:
+        ingest_logger.warning(
+            "schema_dict_columns_not_recognised",
+            blob_path=blob_path,
+            columns=col_names[:30],
+            hint=(
+                "Filename marks this as a schema dictionary but the column "
+                "names do not match the expected (field_name, description) "
+                "convention. Add a column whose name contains 'field' and "
+                "another whose name contains 'description' to register it."
+            ),
+        )
+        return None
+
+    notes_col = _pick(_NOTES_TOKENS, {field_name_col, description_col})
+
+    return {
+        "field_name_col": field_name_col,
+        "description_col": description_col,
+        "notes_col": notes_col,
+    }
 
 
 def _profile_and_rewrite(tmp_parquet_path: str) -> list[dict]:
@@ -242,6 +360,22 @@ def _run_conversion(
         column_profiles = _profile_and_rewrite(tmp_parquet_path)
         # Rewrite may change size — refresh
         parquet_size_bytes = os.path.getsize(tmp_parquet_path)
+
+        # ── Step 1c: Detect schema dictionary ────────────────────────────────
+        # Filename-based: the upload must contain "schema" as a token in the
+        # filename (e.g. schema_fbl3n.csv). We never auto-classify a regular
+        # data file as a dictionary based on column names alone.
+        schema_dict_meta = detect_schema_dictionary(blob_path, column_profiles)
+        if schema_dict_meta:
+            ingest_logger.info(
+                "parquet_service",
+                step="schema_dict_detected",
+                field_name_col=schema_dict_meta["field_name_col"],
+                description_col=schema_dict_meta["description_col"],
+                notes_col=schema_dict_meta.get("notes_col"),
+                parquet_blob_path=parquet_blob_path,
+            )
+
         ingest_logger.info("parquet_service", step="rewrite", status="done",
                            bloom_cols=len([p for p in column_profiles if "top_values" in p]),
                            profiles=len(column_profiles),
@@ -274,6 +408,8 @@ def _run_conversion(
             "size_bytes": parquet_size_bytes,
             "total_rows": total_rows,
             "column_profiles": column_profiles,
+            # Present only if the file was identified as a data dictionary.
+            "schema_dict_meta": schema_dict_meta,
         }
 
     finally:

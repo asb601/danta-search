@@ -83,6 +83,10 @@ class ConfirmUploadRequest(BaseModel):
     upload_duration_secs: float | None = None
     folder_id: str | None = None
     container_id: str
+    # Optional folder path (slash-separated) relative to folder_id, used when
+    # uploading whole directories. e.g. "sales/2025/q1". Intermediate folders
+    # are created on demand if they don't already exist.
+    relative_path: str | None = None
 
 
 @router.post("/upload-url", response_model=UploadUrlResponse)
@@ -126,6 +130,55 @@ async def get_upload_url(
     return UploadUrlResponse(file_id=file_id, sas_url=sas_url, blob_name=blob_name)
 
 
+async def _resolve_folder_path(
+    db: AsyncSession,
+    parent_id: str | None,
+    container_id: str | None,
+    relative_path: str,
+    owner_id: str,
+    domain_tag: str | None,
+) -> str | None:
+    """Walk a slash-separated path under parent_id, creating folders that
+    don't exist yet. Returns the leaf folder id (or parent_id if path empty).
+
+    Used when the client uploads a directory: each file carries the folder
+    chain it lived in inside the user's filesystem (from
+    File.webkitRelativePath without the filename component).
+    """
+    # Strip empty / dangerous segments.
+    parts = [p for p in (relative_path or "").split("/") if p and p not in (".", "..")]
+    if not parts:
+        return parent_id
+
+    current_parent = parent_id
+    for name in parts:
+        # Look for an existing sibling with the same name and parent.
+        stmt = select(Folder).where(
+            Folder.name == name,
+            Folder.parent_id == current_parent,
+            Folder.container_id == container_id,
+        )
+        existing = (await db.execute(stmt)).scalar_one_or_none()
+        if existing:
+            current_parent = existing.id
+            continue
+
+        # Create the missing folder. domain_tag is inherited from caller —
+        # we never expand access by default.
+        new_folder = Folder(
+            name=name,
+            parent_id=current_parent,
+            owner_id=owner_id,
+            container_id=container_id,
+            domain_tag=domain_tag,
+        )
+        db.add(new_folder)
+        await db.flush()  # populate id without ending the transaction
+        current_parent = new_folder.id
+
+    return current_parent
+
+
 @router.post("/confirm-upload", response_model=FileOut)
 async def confirm_upload(
     body: ConfirmUploadRequest,
@@ -136,6 +189,7 @@ async def confirm_upload(
     start = time.perf_counter()
     upload_logger.info("confirm_started", file_id=body.file_id, filename=body.filename, size_bytes=body.size, blob_name=body.blob_name)
 
+    parent_domain_tag: str | None = None
     if body.folder_id:
         db_start = time.perf_counter()
         db_logger.info("query_started", query="check_folder_exists", folder_id=body.folder_id)
@@ -147,6 +201,21 @@ async def confirm_upload(
         # Domain scope: block upload to folders outside developer's allowed domains
         if folder.domain_tag and admin.allowed_domains and folder.domain_tag not in admin.allowed_domains:
             raise HTTPException(status_code=403, detail="Not authorized to upload to this domain folder")
+        parent_domain_tag = folder.domain_tag
+
+    # Folder upload support: if the client sent a relative_path (the chain
+    # of subdirectories the file lived in on disk), create matching folders
+    # under body.folder_id and reparent the file to the leaf.
+    target_folder_id = body.folder_id
+    if body.relative_path:
+        target_folder_id = await _resolve_folder_path(
+            db,
+            parent_id=body.folder_id,
+            container_id=body.container_id,
+            relative_path=body.relative_path,
+            owner_id=admin.id,
+            domain_tag=parent_domain_tag,
+        )
 
     mime = mimetypes.guess_type(body.filename)[0] or "application/octet-stream"
 
@@ -155,7 +224,7 @@ async def confirm_upload(
         name=body.filename,
         content_type=mime,
         size=body.size,
-        folder_id=body.folder_id,
+        folder_id=target_folder_id,
         container_id=body.container_id,
         owner_id=admin.id,
         uploaded_by_id=admin.id,

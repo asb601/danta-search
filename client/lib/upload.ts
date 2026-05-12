@@ -162,6 +162,16 @@ export async function uploadFileDirect(
   const uploadDurationSecs = parseFloat(((Date.now() - uploadStartTime) / 1000).toFixed(1));
   onProgress({ fileIndex, fileName: filename, percent: 99, speedMBps: 0, remainingSecs: 0, phase: "confirming" });
 
+  // For folder uploads, the browser sets webkitRelativePath to e.g.
+  // "myfolder/sub/file.csv". The path part (without the filename) is sent
+  // so the server can recreate the folder hierarchy.
+  let relativePath: string | undefined;
+  // webkitRelativePath is non-standard but supported in all major browsers.
+  const wrp = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+  if (wrp && wrp.includes("/")) {
+    relativePath = wrp.substring(0, wrp.lastIndexOf("/"));
+  }
+
   const confirmRes = await apiFetch("/api/files/confirm-upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -174,6 +184,7 @@ export async function uploadFileDirect(
       upload_duration_secs: uploadDurationSecs,
       folder_id: folderId,
       container_id: containerId,
+      relative_path: relativePath,
     }),
     signal: abortSignal,
   });
