@@ -95,7 +95,7 @@ async def get_upload_url(
     admin: User = Depends(require_developer),
     db: AsyncSession = Depends(get_db),
 ):
-    """ Generate a SAS URL for direct browser-to-Azure upload. Supports files of any size."""
+    """Generate a SAS URL for direct browser-to-Azure upload. Supports files of any size."""
     start = time.perf_counter()
     upload_logger.info("sas_token_requested", filename=body.filename, container_id=body.container_id)
 
