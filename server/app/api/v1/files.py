@@ -84,7 +84,7 @@ class ConfirmUploadRequest(BaseModel):
     folder_id: str | None = None
     container_id: str
     # Optional folder path (slash-separated) relative to folder_id, used when
-    # uploading whole directories. e.g. "sales/2025/q1". Intermediate folders
+    # uploading w hole directories. e.g. "sales/2025/q1". Intermediate folders
     # are created on demand if they don't already exist.
     relative_path: str | None = None
 
