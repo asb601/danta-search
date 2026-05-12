@@ -89,10 +89,18 @@ def _suggest_predicate(col_name: str, dtype: str, samples: list) -> str:
             return f"{col_name} = 2024"
         return f"{col_name} = '2024'  -- column is string; match as string"
 
-    if "date" in dtype_l or "timestamp" in dtype_l:
+    if "timestamp" in dtype_l:
+        return (
+            f"{col_name} BETWEEN TIMESTAMP '<start>' AND TIMESTAMP '<end>'  "
+            f"-- EXTRACT(YEAR FROM {col_name}) = 2024  "
+            f"-- EXTRACT(HOUR FROM {col_name}) BETWEEN 9 AND 17 for business hours"
+        )
+
+    if "date" in dtype_l:
         return (
             f"{col_name} BETWEEN DATE '<start>' AND DATE '<end>'  "
-            f"-- or EXTRACT(YEAR FROM {col_name}) = 2024"
+            f"-- EXTRACT(YEAR FROM {col_name}) = 2024  "
+            f"-- DATE columns have no time component; EXTRACT(HOUR FROM ...) always returns 0"
         )
 
     if "int" in dtype_l or "float" in dtype_l or "decimal" in dtype_l:
@@ -186,27 +194,60 @@ def build_column_tool(
                 })
             column_name = match_name
 
-        # If we still don't have samples, do a tiny DuckDB probe for them.
+        # If we still don't have samples, do a tiny live probe for them.
         # Bounded to 5 distinct values and a top-of-file sample.
+        # IMPORTANT: we get the dtype from typeof() rather than inferring
+        # from the Python type of the returned value. _json_safe() in the
+        # DataFusion client converts datetime.date/datetime objects to ISO
+        # strings via .isoformat() before they reach here, so
+        # type(samples[0]).__name__ is always "str" regardless of the
+        # actual column type. A DATE column would be misreported as
+        # "string", causing the LLM to write SUBSTR(date_col, ...) which
+        # DataFusion rejects. The typeof() query bypasses this by asking
+        # the engine directly.
         if not samples:
             try:
-                sql = (
+                sql_path_expr = _sql_path(blob_path, parquet_paths, container_name)
+                # One query for both typeof and sample values so we pay only
+                # one round-trip. We add a TRY_CAST guard on the hour
+                # extractor so the LLM gets a ready-to-use predicate even
+                # before inspect_column is called on datetime columns.
+                typeof_sql = (
+                    f"SELECT typeof(\"{column_name}\") AS col_type "
+                    f"FROM {sql_path_expr} "
+                    f"WHERE \"{column_name}\" IS NOT NULL "
+                    f"LIMIT 1"
+                )
+                type_rows, _ = _execute(typeof_sql, connection_string, container_name, max_rows=1)
+                raw_type = (type_rows[0].get("col_type") or "").upper() if type_rows else ""
+
+                # Canonical dtype mapping from DataFusion/DuckDB type strings.
+                # These type strings differ slightly between engines so we
+                # check via substring to be engine-agnostic.
+                if "TIMESTAMP" in raw_type or "TIMETZ" in raw_type:
+                    dtype = "timestamp"
+                elif raw_type in ("DATE",):
+                    dtype = "date"
+                elif raw_type in ("BOOLEAN", "BOOL"):
+                    dtype = "boolean"
+                elif any(t in raw_type for t in ("BIGINT", "INTEGER", "INT", "SMALLINT", "TINYINT", "HUGEINT")):
+                    dtype = "int64"
+                elif any(t in raw_type for t in ("DOUBLE", "FLOAT", "DECIMAL", "NUMERIC", "REAL")):
+                    dtype = "float64"
+                elif raw_type in ("VARCHAR", "UTF8", "TEXT", "STRING", "CHAR"):
+                    dtype = "string"
+                elif raw_type:
+                    dtype = raw_type.lower()
+
+                # Separate DISTINCT probe for sample values.
+                sample_sql = (
                     f"SELECT DISTINCT \"{column_name}\" AS v "
-                    f"FROM {_sql_path(blob_path, parquet_paths, container_name)} "
+                    f"FROM {sql_path_expr} "
                     f"WHERE \"{column_name}\" IS NOT NULL "
                     f"LIMIT 5"
                 )
-                rows, _total = _execute(sql, connection_string, container_name, max_rows=5)
+                rows, _total = _execute(sample_sql, connection_string, container_name, max_rows=5)
                 samples = [r.get("v") for r in rows if r.get("v") is not None]
-                # Dtype inference from the first non-null value.
-                if dtype == "unknown" and samples:
-                    py_type = type(samples[0]).__name__
-                    dtype = {
-                        "str": "string",
-                        "int": "int64",
-                        "float": "float64",
-                        "bool": "boolean",
-                    }.get(py_type, py_type)
             except Exception as exc:
                 pipeline_logger.warning(
                     "inspect_column_probe_failed",
