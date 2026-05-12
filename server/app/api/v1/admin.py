@@ -52,13 +52,54 @@ _REINGEST_SEMAPHORE = asyncio.Semaphore(2)  # 2 concurrent ingests — safer for
 
 
 async def _batch_reingest(file_ids: list[str]) -> None:
-    """Re-ingest a list of files with concurrency capped at 2."""
+    """Re-ingest a list of files with concurrency capped at 2.
+
+    File-level deduplication: each worker atomically claims a file by
+    transitioning its ingest_status to 'running'.  Files that another
+    process / coroutine has already claimed are skipped silently.  This
+    makes the endpoint safe against:
+
+      * the same admin double-clicking "reingest all"
+      * two admins triggering reingest concurrently
+      * a single file appearing in two queued batches
+
+    The claim is a DB-level UPDATE ... WHERE ingest_status != 'running'
+    RETURNING id — atomic at the row level even with multiple API
+    replicas hitting Postgres.
+    """
     done = 0
     failed = 0
+    skipped = 0
 
     async def _one(file_id: str) -> None:
-        nonlocal done, failed
+        nonlocal done, failed, skipped
         async with _REINGEST_SEMAPHORE:
+            # ── Atomic claim ──────────────────────────────────────────────
+            # Set status to 'pending' iff it isn't already in an active state.
+            # `ingest_file` itself moves it through pending → ingested/failed,
+            # so excluding both 'pending' and 'running' here makes the claim
+            # idempotent against any concurrent reingest path.
+            async with async_session() as claim_db:
+                claimed = (
+                    await claim_db.execute(
+                        update(File)
+                        .where(File.id == file_id)
+                        .where(File.ingest_status.notin_(("pending", "running")))
+                        .values(ingest_status="pending")
+                        .returning(File.id)
+                    )
+                ).scalar_one_or_none()
+                await claim_db.commit()
+
+            if claimed is None:
+                skipped += 1
+                ingest_logger.info(
+                    "reingest_skip_claimed",
+                    file_id=file_id,
+                    reason="already_running",
+                )
+                return
+
             trace_id = f"reingest-{uuid.uuid4().hex[:12]}"
             structlog.contextvars.clear_contextvars()
             structlog.contextvars.bind_contextvars(
@@ -77,7 +118,8 @@ async def _batch_reingest(file_ids: list[str]) -> None:
                 else:
                     done += 1
                 ingest_logger.info("reingest_progress", done=done, failed=failed,
-                                   remaining=len(file_ids) - done - failed)
+                                   skipped=skipped,
+                                   remaining=len(file_ids) - done - failed - skipped)
             except Exception as exc:
                 failed += 1
                 ingest_logger.exception("reingest_crashed", error=str(exc)[:500])
@@ -86,7 +128,7 @@ async def _batch_reingest(file_ids: list[str]) -> None:
 
     await asyncio.gather(*[_one(fid) for fid in file_ids])
     invalidate_catalog_cache()
-    ingest_logger.info("reingest_complete", done=done, failed=failed)
+    ingest_logger.info("reingest_complete", done=done, failed=failed, skipped=skipped)
 
 
 @router.post("/reingest-all")
@@ -97,6 +139,14 @@ async def reingest_all(
     """
     Wipe all metadata / analytics / relationships, reset every
     CSV/TXT/TSV file to not_ingested, and re-run the full pipeline.
+
+    Concurrency safety:
+      * Files already in an active state ('pending' / 'running') are NOT
+        reset and NOT re-queued — another reingest already owns them.
+      * The remaining files are reset and queued; each one is then
+        atomically claimed inside `_batch_reingest`, so even if this
+        endpoint is hit twice in quick succession, no file is processed
+        twice in parallel.
     """
     # Find all ingestable files
     result = await db.execute(select(File))
@@ -109,12 +159,28 @@ async def reingest_all(
     if not ingestable:
         raise HTTPException(status_code=400, detail="No ingestable files found.")
 
-    file_ids = [f.id for f in ingestable]
+    # Exclude files that are currently being processed by another reingest.
+    in_flight = [f.id for f in ingestable if f.ingest_status in ("pending", "running")]
+    file_ids = [f.id for f in ingestable if f.ingest_status not in ("pending", "running")]
+    if in_flight:
+        ingest_logger.info(
+            "reingest_all_skipping_in_flight",
+            in_flight_count=len(in_flight),
+        )
+    if not file_ids:
+        return {
+            "message": "All ingestable files are already being processed.",
+            "file_count": 0,
+            "in_flight_count": len(in_flight),
+        }
 
-    # Delete old metadata, analytics, relationships
-    await db.execute(delete(FileRelationship))
-    await db.execute(delete(FileAnalytics))
-    await db.execute(delete(FileMetadata))
+    # Delete old metadata, analytics, relationships ONLY for files we will reingest.
+    # Leaving in-flight files' rows alone prevents their running pipeline from
+    # crashing on a missing FK target.
+    await db.execute(delete(FileRelationship).where(FileRelationship.file_a_id.in_(file_ids)))
+    await db.execute(delete(FileRelationship).where(FileRelationship.file_b_id.in_(file_ids)))
+    await db.execute(delete(FileAnalytics).where(FileAnalytics.file_id.in_(file_ids)))
+    await db.execute(delete(FileMetadata).where(FileMetadata.file_id.in_(file_ids)))
 
     # Reset ingest status AND preprocessed flag so the preprocessor actually runs again.
     # Without resetting is_preprocessed, ingest_file skips preprocessing entirely
@@ -127,12 +193,17 @@ async def reingest_all(
     await db.commit()
     invalidate_catalog_cache()
 
-    ingest_logger.info("reingest_all_started", admin_id=admin.id, file_count=len(file_ids))
+    ingest_logger.info("reingest_all_started", admin_id=admin.id,
+                       file_count=len(file_ids), in_flight_count=len(in_flight))
 
     # Fire background task
     asyncio.create_task(_batch_reingest(file_ids))
 
-    return {"message": "Re-ingestion started", "file_count": len(file_ids)}
+    return {
+        "message": "Re-ingestion started",
+        "file_count": len(file_ids),
+        "in_flight_count": len(in_flight),
+    }
 
 
 # ── Domain access control ────────────────────────────────────────────────────

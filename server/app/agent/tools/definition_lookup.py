@@ -137,6 +137,7 @@ async def load_schema_registry(
             await db.execute(
                 select(
                     SchemaDictionary.parquet_blob_path,
+                    SchemaDictionary.source_blob_path,
                     SchemaDictionary.field_name_col,
                     SchemaDictionary.description_col,
                     SchemaDictionary.notes_col,
@@ -155,6 +156,7 @@ async def load_schema_registry(
 
         for row in rows:
             parquet_path = row.parquet_blob_path
+            source_path = row.source_blob_path
             fn_col = row.field_name_col
             desc_col = row.description_col
             notes_col = row.notes_col
@@ -164,57 +166,92 @@ async def load_schema_registry(
             if notes_col:
                 select_cols += f', "{notes_col}"'
 
-            sql = (
-                f"SELECT {select_cols} "
-                f"FROM read_parquet('az://{container_name}/{parquet_path}') "
-                f"WHERE \"{fn_col}\" IS NOT NULL"
-            )
+            # Try parquet first (faster, columnar).  Fall back to the source
+            # CSV if parquet hasn't been produced yet or the read fails — this
+            # keeps the agent's definitions available even when parquet
+            # conversion is queued, missing, or stale.
+            attempts: list[tuple[str, str]] = []
+            if parquet_path:
+                attempts.append(("parquet", f"read_parquet('az://{container_name}/{parquet_path}')"))
+            if source_path:
+                attempts.append(("csv", f"read_csv_auto('az://{container_name}/{source_path}')"))
 
-            try:
-                # Cap is intentionally large; SAP DDIC dumps may be ~40k
-                # fields. If a real dictionary is larger we want to know.
-                _MAX_DICT_ROWS = 50_000
-                if settings.QUERY_ENGINE == "datafusion":
-                    load_rows, total = await asyncio.to_thread(
-                        _df_exec, sql, connection_string,
-                        max_rows=_MAX_DICT_ROWS, container_name=container_name
-                    )
-                else:
-                    load_rows, total = await asyncio.to_thread(
-                        _duckdb_exec, sql, connection_string, max_rows=_MAX_DICT_ROWS
-                    )
-                if total > len(load_rows):
-                    pipeline_logger.warning(
-                        "schema_registry_truncated",
-                        parquet_path=parquet_path,
-                        loaded=len(load_rows),
-                        total=total,
-                        cap=_MAX_DICT_ROWS,
-                    )
-
-                for r in load_rows:
-                    field = str(r.get(fn_col) or "").strip().upper()
-                    description = str(r.get(desc_col) or "").strip()
-                    notes = str(r.get(notes_col) or "").strip() if notes_col else None
-                    if field and description and field not in merged:
-                        merged[field] = {
-                            "description": description,
-                            "notes": notes if notes else None,
-                        }
-
-                pipeline_logger.info(
-                    "schema_registry_loaded",
-                    parquet_path=parquet_path,
-                    fields_loaded=len(load_rows),
-                    container_id=container_id,
+            if not attempts:
+                pipeline_logger.warning(
+                    "schema_registry_no_source",
+                    field_name_col=fn_col,
                 )
+                continue
 
-            except Exception as exc:
+            load_rows: list[dict] = []
+            total = 0
+            last_err: str | None = None
+            for source_kind, table_expr in attempts:
+                sql = (
+                    f"SELECT {select_cols} FROM {table_expr} "
+                    f"WHERE \"{fn_col}\" IS NOT NULL"
+                )
+                try:
+                    # Cap is intentionally large; SAP DDIC dumps may be ~40k
+                    # fields. If a real dictionary is larger we want to know.
+                    _MAX_DICT_ROWS = 50_000
+                    if settings.QUERY_ENGINE == "datafusion":
+                        load_rows, total = await asyncio.to_thread(
+                            _df_exec, sql, connection_string,
+                            max_rows=_MAX_DICT_ROWS, container_name=container_name
+                        )
+                    else:
+                        load_rows, total = await asyncio.to_thread(
+                            _duckdb_exec, sql, connection_string, max_rows=_MAX_DICT_ROWS
+                        )
+                    last_err = None
+                    if load_rows:
+                        if source_kind == "csv" and parquet_path:
+                            pipeline_logger.info(
+                                "schema_registry_csv_fallback",
+                                source_path=source_path,
+                                parquet_path=parquet_path,
+                            )
+                        break
+                except Exception as exc:
+                    last_err = str(exc)[:300]
+                    continue
+
+            if last_err and not load_rows:
                 pipeline_logger.warning(
                     "schema_registry_load_failed",
                     parquet_path=parquet_path,
-                    error=str(exc)[:300],
+                    source_path=source_path,
+                    error=last_err,
                 )
+                continue
+
+            if total > len(load_rows):
+                pipeline_logger.warning(
+                    "schema_registry_truncated",
+                    parquet_path=parquet_path,
+                    loaded=len(load_rows),
+                    total=total,
+                    cap=50_000,
+                )
+
+            for r in load_rows:
+                field = str(r.get(fn_col) or "").strip().upper()
+                description = str(r.get(desc_col) or "").strip()
+                notes = str(r.get(notes_col) or "").strip() if notes_col else None
+                if field and description and field not in merged:
+                    merged[field] = {
+                        "description": description,
+                        "notes": notes if notes else None,
+                    }
+
+            pipeline_logger.info(
+                "schema_registry_loaded",
+                parquet_path=parquet_path,
+                source_path=source_path,
+                fields_loaded=len(load_rows),
+                container_id=container_id,
+            )
 
         pipeline_logger.info(
             "schema_registry_ready",

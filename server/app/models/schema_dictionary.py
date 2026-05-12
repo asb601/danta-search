@@ -40,8 +40,14 @@ class SchemaDictionary(Base):
         ForeignKey("files.id", ondelete="CASCADE"),
         nullable=False,
     )
-    # Azure blob path of the converted parquet.
-    parquet_blob_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    # Azure blob path of the converted parquet.  Nullable: a dictionary may
+    # be registered before parquet conversion completes (or that step may have
+    # failed).  When NULL, the lookup falls back to source_blob_path via
+    # `read_csv_auto`.
+    parquet_blob_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # Original / cleaned CSV blob path.  Always populated so that lookup is
+    # possible even if parquet conversion is missing or stale.
+    source_blob_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
     # Column names discovered by detection heuristics.
     field_name_col: Mapped[str] = mapped_column(String(200), nullable=False)

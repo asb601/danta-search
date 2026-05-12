@@ -189,6 +189,7 @@ async def trigger_parquet_conversion(
                         ).scalar_one_or_none()
                         if existing_sd:
                             existing_sd.parquet_blob_path = parquet_path
+                            existing_sd.source_blob_path = blob_path
                             existing_sd.field_name_col = schema_dict_meta["field_name_col"]
                             existing_sd.description_col = schema_dict_meta["description_col"]
                             existing_sd.notes_col = schema_dict_meta.get("notes_col")
@@ -198,6 +199,7 @@ async def trigger_parquet_conversion(
                                 container_id=container_id_for_dict,
                                 file_id=file_id,
                                 parquet_blob_path=parquet_path,
+                                source_blob_path=blob_path,
                                 field_name_col=schema_dict_meta["field_name_col"],
                                 description_col=schema_dict_meta["description_col"],
                                 notes_col=schema_dict_meta.get("notes_col"),

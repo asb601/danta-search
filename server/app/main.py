@@ -92,6 +92,13 @@ async def lifespan(app: FastAPI):
         await _domain_migrate()
     except Exception as exc:
         chat_logger.warning("domain_migration_failed", error=str(exc)[:300])
+
+    # Schema-dictionary table: nullable parquet path + new source_blob_path
+    from app.migrations.schema_dictionary_upgrade import migrate as _schema_dict_migrate
+    try:
+        await _schema_dict_migrate()
+    except Exception as exc:
+        chat_logger.warning("schema_dict_migration_failed", error=str(exc)[:300])
     yield
     await engine.dispose()
 
