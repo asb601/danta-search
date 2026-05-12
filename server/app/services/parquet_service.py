@@ -1,39 +1,120 @@
 """
-Parquet conversion service — converts CSV to Parquet using DuckDB's az:// reader.
+Parquet conversion service — converts CSV to Parquet via streaming PyArrow.
 
-Why DuckDB instead of PyArrow:
-  PyArrow required downloading the full CSV to disk first (50+ min on slow connections).
-  DuckDB reads directly from az://container/blob.csv via HTTP range requests — no local
-  CSV temp file. It also uses all CPU cores for CSV parsing (multi-threaded by default).
-  The old "DuckDB az:// bug" (1MB buffer / thousands of HTTP calls) was fixed in DuckDB 1.1.0.
-  We're on 1.5.1.
+Architecture (zero-disk, bounded RAM):
+  Azure CSV blob
+    └─ _AzureInputStream  (io.RawIOBase wrapping Azure chunk iterator)
+         └─ io.BufferedReader (8 MB read-ahead)
+              └─ pa.csv.open_csv()  → BatchedCSVReader  (64 MB batches)
+                   └─ pq.ParquetWriter(sink)  (writes each batch as a row group)
+                        └─ _ParquetBlobWriter  (buffers → Azure staged blocks)
+                             └─ commit_block_list()  (atomic Azure publish)
 
-Steps:
-  1. DuckDB COPY reads az://container/blob.csv → local Parquet temp file
-     (streaming HTTP, parallel reads, ZSTD compression, 100k rows per row group)
-  2. Azure SDK uploads Parquet back to blob storage (3-5x smaller than CSV)
-  3. Temp Parquet file deleted
-
-Peak memory: DuckDB internal buffers (~256–512MB), regardless of file size.
-For a 3GB CSV: total ~2-5 minute conversion + ~1 min upload.
+Peak memory: ~2 × batch_size ≈ 128–256 MB per job, regardless of file size.
+No temp files. No DuckDB. Works on any file size without OOM risk.
 """
 from __future__ import annotations
 
 import asyncio
-import os
+import base64
+import io
 import re
-import tempfile
 import time
 
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 from azure.storage.blob import BlobServiceClient
 
 from app.core.cost_tracker import track_azure_blob
-from app.core.duckdb_client import _clear_connection, _get_connection
 from app.core.logger import ingest_logger
 from app.core import metrics
+
+# ── Azure streaming helpers ──────────────────────────────────────────────────
+
+class _AzureInputStream(io.RawIOBase):
+    """io.RawIOBase wrapper around an Azure StorageStreamDownloader chunk iterator.
+
+    Allows pyarrow.csv.open_csv() (which expects a seekable-or-readable file)
+    to consume an Azure blob as a streaming HTTP download — no local disk.
+    """
+
+    def __init__(self, downloader) -> None:
+        self._chunks = downloader.chunks()
+        self._buf = b""
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buf: bytearray) -> int:
+        while not self._buf:
+            try:
+                self._buf = next(self._chunks)
+            except StopIteration:
+                return 0
+        n = min(len(buf), len(self._buf))
+        buf[:n] = self._buf[:n]
+        self._buf = self._buf[n:]
+        return n
+
+
+class _ParquetBlobWriter(io.RawIOBase):
+    """Write-only io.RawIOBase sink that stages Azure Block Blob chunks.
+
+    pq.ParquetWriter wraps any io.IOBase subclass in pyarrow.PythonFile, so
+    inheriting from io.RawIOBase gives us .closed, .writable() and the standard
+    close() protocol for free.
+
+    We buffer to _MIN_BLOCK bytes (8 MB) before staging each block, keeping the
+    Azure block count well under the 50 000-block limit even for 100 GB files.
+    commit_block_list() is called atomically from close() after ParquetWriter
+    has written the footer.
+
+    No disk.  ~8 MB RAM overhead.
+    """
+
+    _MIN_BLOCK = 8 * 1024 * 1024  # 8 MB per staged block
+
+    def __init__(self, blob_client) -> None:
+        super().__init__()
+        self._bc = blob_client
+        self._buf: bytearray = bytearray()
+        self._blocks: list[str] = []
+        self._pos: int = 0
+
+    # ── io.RawIOBase contract ──────────────────────────────────────────────────
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: bytes) -> int:
+        self._buf.extend(data)
+        self._pos += len(data)
+        if len(self._buf) >= self._MIN_BLOCK:
+            self._stage_block()
+        return len(data)
+
+    def tell(self) -> int:
+        return self._pos
+
+    def close(self) -> None:
+        if not self.closed:
+            self._stage_block()
+            if self._blocks:
+                self._bc.commit_block_list(self._blocks)
+        super().close()
+
+    # ── internal ───────────────────────────────────────────────────────────────
+
+    def _stage_block(self) -> None:
+        if not self._buf:
+            return
+        block_id = base64.b64encode(f"{len(self._blocks):06d}".encode()).decode()
+        self._bc.stage_block(block_id, bytes(self._buf))
+        self._blocks.append(block_id)
+        self._buf.clear()
+
 
 # ── In-memory progress store (keyed by job_id) ────────────────────────────────
 # { job_id: {"phase": "converting"|"uploading", "pct": 0-100} }
@@ -48,13 +129,6 @@ def get_progress(job_id: str) -> dict | None:
 def _ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 2)
 
-
-# ── Parquet post-processing ────────────────────────────────────────────────────
-# Files ≤ MAX_REWRITE_BYTES are fully re-written with PyArrow after DuckDB COPY
-# to gain write_statistics, page index, and bloom filters.
-# Files > MAX_REWRITE_BYTES skip the full rewrite but still compute profiles
-# from the first row group (fast, representative sample).
-_MAX_REWRITE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
 
 
 # ── Schema dictionary detection ───────────────────────────────────────────────
@@ -174,48 +248,48 @@ def detect_schema_dictionary(blob_path: str, profiles: list[dict]) -> dict | Non
     }
 
 
-def _profile_and_rewrite(tmp_parquet_path: str) -> list[dict]:
-    """Compute column profiles and rewrite the local Parquet with optimal settings.
+def _profile_from_batch(batch: pa.RecordBatch) -> list[dict]:
+    """Compute column profiles from a representative Arrow RecordBatch.
 
-    Returns a list of column profile dicts, one per column:
+    Returns a list of column profile dicts compatible with the downstream
+    schema-dictionary detector and analytics service:
       {"name", "type", "semantic_type", "null_pct",
        "min"?, "max"?, "distinct_count"?, "top_values"?}
 
-    Side effect: overwrites tmp_parquet_path in place (only if file ≤ _MAX_REWRITE_BYTES).
+    Called on the first streaming batch from the CSV reader, which is a
+    representative sample (64 MB of CSV = ~500K–1M rows for typical SAP files).
     """
-    file_size = os.path.getsize(tmp_parquet_path)
-    pf = pq.ParquetFile(tmp_parquet_path)
-
-    # Profile from first row group only (fast, ~representative for most files)
-    sample = pf.read_row_group(0)
-    num_sample_rows = len(sample)
-
+    num_rows = len(batch)
     profiles: list[dict] = []
-    bloom_cols: list[str] = []
 
-    for col_name in sample.column_names:
-        col = sample.column(col_name)
-        arrow_type_str = str(col.type)
+    for col_name in batch.schema.names:
+        col = batch.column(col_name)
+        arrow_type = col.type
         null_count = col.null_count
 
-        # ── Semantic type detection ────────────────────────────────────────────
-        if pa.types.is_temporal(col.type):
+        # ── Semantic type ──────────────────────────────────────────────────────
+        if pa.types.is_temporal(arrow_type):
             semantic_type = "date"
-        elif (pa.types.is_integer(col.type)
-              or pa.types.is_floating(col.type)
-              or pa.types.is_decimal(col.type)):
+        elif (
+            pa.types.is_integer(arrow_type)
+            or pa.types.is_floating(arrow_type)
+            or pa.types.is_decimal(arrow_type)
+        ):
             semantic_type = "measure"
+        elif pa.types.is_dictionary(arrow_type):
+            # auto_dict_encode produced this — low cardinality string column
+            semantic_type = "category"
         else:
             semantic_type = "text"
 
         profile: dict = {
             "name": col_name,
-            "type": arrow_type_str,
+            "type": str(arrow_type),
             "semantic_type": semantic_type,
-            "null_pct": round(null_count / num_sample_rows * 100, 1) if num_sample_rows else 0,
+            "null_pct": round(null_count / num_rows * 100, 1) if num_rows else 0,
         }
 
-        # ── Min / max for numeric and date columns ─────────────────────────────
+        # ── Min / max for numerics and dates ──────────────────────────────────
         if semantic_type in ("measure", "date"):
             try:
                 min_v = pc.min(col).as_py()
@@ -227,8 +301,16 @@ def _profile_and_rewrite(tmp_parquet_path: str) -> list[dict]:
             except Exception:
                 pass
 
-        # ── Cardinality for string columns ─────────────────────────────────────
-        if pa.types.is_large_string(col.type) or pa.types.is_string(col.type):
+        # ── Cardinality / top-values for strings and categories ───────────────
+        if pa.types.is_dictionary(arrow_type):
+            try:
+                dictionary = col.dictionary
+                distinct_count = len(dictionary)
+                profile["distinct_count"] = distinct_count
+                profile["top_values"] = dictionary[:10].to_pylist()
+            except Exception:
+                pass
+        elif pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
             try:
                 non_null = col.drop_null()
                 if len(non_null) > 0:
@@ -237,8 +319,6 @@ def _profile_and_rewrite(tmp_parquet_path: str) -> list[dict]:
                     cardinality_ratio = distinct_count / len(non_null)
                     if cardinality_ratio < 0.05 and distinct_count < 5000:
                         profile["semantic_type"] = "category"
-                        bloom_cols.append(col_name)
-                        # Top 10 most frequent values
                         vc = non_null.value_counts()
                         sorted_vc = vc.sort_by([("counts", "descending")])
                         profile["top_values"] = sorted_vc["values"][:10].to_pylist()
@@ -246,32 +326,6 @@ def _profile_and_rewrite(tmp_parquet_path: str) -> list[dict]:
                 pass
 
         profiles.append(profile)
-
-    # ── Rewrite with optimal Parquet settings (only for manageable file sizes) ─
-    if file_size <= _MAX_REWRITE_BYTES:
-        full_table = pq.read_table(tmp_parquet_path)
-        write_kwargs: dict = dict(
-            compression="zstd",
-            compression_level=3,
-            row_group_size=1_000_000,
-            write_statistics=True,
-            write_page_index=True,
-            use_dictionary=True,
-        )
-        if bloom_cols:
-            write_kwargs["bloom_filter_columns"] = bloom_cols
-        # Write to a sibling temp file then atomically replace the original.
-        # Avoids a corrupt file if the process dies mid-write.
-        tmp_rewrite = tmp_parquet_path + ".rewrite"
-        try:
-            pq.write_table(full_table, tmp_rewrite, **write_kwargs)
-            os.replace(tmp_rewrite, tmp_parquet_path)
-        finally:
-            if os.path.exists(tmp_rewrite):
-                try:
-                    os.unlink(tmp_rewrite)
-                except OSError:
-                    pass
 
     return profiles
 
@@ -284,140 +338,141 @@ def _run_conversion(
     job_id: str | None = None,
 ) -> dict:
     """
-    Synchronous conversion. Runs inside asyncio.to_thread() — never blocks the event loop.
+    Synchronous CSV→Parquet conversion via streaming PyArrow.
+    Runs inside asyncio.to_thread() — never blocks the event loop.
 
-    Steps:
-      1. DuckDB reads CSV from az://container/blob.csv → local Parquet temp file
-      2. Azure SDK uploads Parquet back to Azure Blob Storage
-      3. Temp Parquet file deleted
+    Data path (zero disk, bounded RAM):
+      Azure CSV blob → _AzureInputStream → io.BufferedReader
+        → pa.csv.open_csv (64 MB batches)
+          → pq.ParquetWriter
+            → _ParquetBlobWriter (8 MB staged blocks)
+              → Azure Block Blob (atomic commit_block_list)
 
-    Returns {"parquet_blob_path": str, "size_bytes": int}
+    Memory: ~2 × batch_size ≈ 128–256 MB regardless of CSV size.
+    No tempfiles.  No DuckDB.
+
+    Returns {"parquet_blob_path", "size_bytes", "total_rows",
+             "column_profiles", "schema_dict_meta"}
     """
-    tmp_parquet_path = None
+    client = BlobServiceClient.from_connection_string(connection_string)
+    src_bc = client.get_blob_client(container=container_name, blob=blob_path)
+    dst_bc = client.get_blob_client(container=container_name, blob=parquet_blob_path)
+
+    csv_size_bytes: int = src_bc.get_blob_properties().size
+
+    t_start = time.perf_counter()
+    ingest_logger.info(
+        "parquet_service", step="convert", status="started",
+        blob_path=blob_path, csv_size_mb=round(csv_size_bytes / 1024 / 1024, 1),
+    )
+    if job_id:
+        _PROGRESS[job_id] = {"phase": "converting", "pct": 0}
+
+    # ── Stream CSV from Azure ─────────────────────────────────────────────────
+    downloader = src_bc.download_blob()
+    azure_stream = io.BufferedReader(_AzureInputStream(downloader), buffer_size=8 * 1024 * 1024)
+
+    reader = pa_csv.open_csv(
+        azure_stream,
+        read_options=pa_csv.ReadOptions(block_size=64 * 1024 * 1024),
+        parse_options=pa_csv.ParseOptions(),
+        convert_options=pa_csv.ConvertOptions(
+            null_values=[
+                "", "NULL", "null", "N/A", "n/a", "NA", "na",
+                "None", "none", "NaN", "nan", "-", "TBD", "tbd",
+            ],
+            strings_can_be_null=True,
+            # Auto-encode low-cardinality string columns as Parquet dictionaries
+            # (ideal for SAP categorical codes like BLART, MWSKZ, WAERS, …)
+            auto_dict_encode=True,
+            auto_dict_max_cardinality=500,
+        ),
+    )
+
+    # ── Stream batches → Parquet → Azure staged blocks ────────────────────────
+    first_batch: pa.RecordBatch | None = None
+    total_rows = 0
+    parquet_writer: pq.ParquetWriter | None = None
+    blob_writer = _ParquetBlobWriter(dst_bc)
 
     try:
-        azure_csv_path = f"az://{container_name}/{blob_path}"
-        client = BlobServiceClient.from_connection_string(connection_string)
+        for batch_idx, batch in enumerate(reader):
+            if first_batch is None:
+                first_batch = batch
+                parquet_writer = pq.ParquetWriter(
+                    blob_writer,
+                    batch.schema,
+                    compression="zstd",
+                    compression_level=3,
+                    write_statistics=True,
+                    use_dictionary=True,
+                )
+            parquet_writer.write_batch(batch)
+            total_rows += len(batch)
+            if job_id:
+                # Rough progress estimate — each 64 MB batch ≈ 5% of a 1.2 GB CSV
+                _PROGRESS[job_id] = {"phase": "converting", "pct": min(95, batch_idx * 5)}
 
-        # Get CSV size upfront for cost tracking
-        csv_size_bytes: int = (
-            client.get_blob_client(container=container_name, blob=blob_path)
-            .get_blob_properties()
-            .size
+        if parquet_writer is not None:
+            parquet_writer.close()   # writes Parquet footer into blob_writer buffer
+        blob_writer.close()          # flushes remaining buffer + commit_block_list
+
+    except Exception:
+        blob_writer._buf.clear()     # discard partial buffer — staged blocks expire
+        blob_writer._blocks.clear()  # prevent any accidental commit_block_list
+        if parquet_writer is not None:
+            try:
+                parquet_writer.close()
+            except Exception:
+                pass
+        raise
+
+    convert_ms = _ms(t_start)
+
+    # ── Column profiling (from first batch — representative sample) ───────────
+    column_profiles = _profile_from_batch(first_batch) if first_batch is not None else []
+
+    # ── Schema dictionary detection ───────────────────────────────────────────
+    schema_dict_meta = detect_schema_dictionary(blob_path, column_profiles)
+    if schema_dict_meta:
+        ingest_logger.info(
+            "parquet_service",
+            step="schema_dict_detected",
+            field_name_col=schema_dict_meta["field_name_col"],
+            description_col=schema_dict_meta["description_col"],
+            notes_col=schema_dict_meta.get("notes_col"),
+            parquet_blob_path=parquet_blob_path,
         )
 
-        # ── Step 1: DuckDB converts CSV from Azure → local Parquet temp file ──
-        t = time.perf_counter()
-        ingest_logger.info("parquet_service", step="convert", status="started",
-                           blob_path=blob_path, csv_size_mb=round(csv_size_bytes / 1024 / 1024, 1))
+    # Parquet size from blob properties — no local file to stat
+    parquet_size_bytes: int = dst_bc.get_blob_properties().size
 
-        if job_id:
-            _PROGRESS[job_id] = {"phase": "converting", "pct": 0}
+    ingest_logger.info(
+        "parquet_service", step="convert", status="done",
+        parquet_size_mb=round(parquet_size_bytes / 1024 / 1024, 1),
+        total_rows=total_rows,
+        compression_ratio=(
+            round(csv_size_bytes / parquet_size_bytes, 2) if parquet_size_bytes else None
+        ),
+        duration_ms=convert_ms,
+    )
+    track_azure_blob("download", blob_path, csv_size_bytes, convert_ms)
+    track_azure_blob("upload", parquet_blob_path, parquet_size_bytes, convert_ms)
 
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            tmp_parquet_path = tmp.name
+    if job_id:
+        _PROGRESS.pop(job_id, None)
 
-        conn = _get_connection(connection_string)
-        safe_csv = azure_csv_path.replace("'", "''")
-        safe_parquet = tmp_parquet_path.replace("'", "''")
+    metrics.inc("parquet_conversions")
+    metrics.inc("azure_bytes_read", csv_size_bytes)
+    metrics.inc("azure_bytes_written", parquet_size_bytes)
 
-        try:
-            conn.execute(f"""
-                COPY (
-                    SELECT * FROM read_csv_auto(
-                        '{safe_csv}',
-                        null_padding=true,
-                        ignore_errors=true,
-                        nullstr=['', 'NULL', 'null', 'N/A', 'n/a', 'NA', 'na',
-                                 'None', 'none', 'NaN', 'nan', '-', 'TBD', 'tbd']
-                    )
-                )
-                TO '{safe_parquet}'
-                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 1000000)
-            """)
-        except Exception:
-            _clear_connection(connection_string)
-            raise
-
-        parquet_size_bytes = os.path.getsize(tmp_parquet_path)
-
-        # Row count from Parquet metadata — cheap, no full scan needed
-        pf = pq.ParquetFile(tmp_parquet_path)
-        total_rows = pf.metadata.num_rows
-        num_row_groups = pf.metadata.num_row_groups
-
-        convert_ms = _ms(t)
-        ingest_logger.info("parquet_service", step="convert", status="done",
-                           parquet_size_mb=round(parquet_size_bytes / 1024 / 1024, 1),
-                           total_rows=total_rows,
-                           row_groups=num_row_groups,
-                           compression_ratio=round(csv_size_bytes / parquet_size_bytes, 2),
-                           duration_ms=convert_ms)
-        track_azure_blob("download", blob_path, csv_size_bytes, convert_ms)
-
-        # ── Step 1b: Profile columns + rewrite with statistics / bloom filters ─
-        t_profile = time.perf_counter()
-        column_profiles = _profile_and_rewrite(tmp_parquet_path)
-        # Rewrite may change size — refresh
-        parquet_size_bytes = os.path.getsize(tmp_parquet_path)
-
-        # ── Step 1c: Detect schema dictionary ────────────────────────────────
-        # Filename-based: the upload must contain "schema" as a token in the
-        # filename (e.g. schema_fbl3n.csv). We never auto-classify a regular
-        # data file as a dictionary based on column names alone.
-        schema_dict_meta = detect_schema_dictionary(blob_path, column_profiles)
-        if schema_dict_meta:
-            ingest_logger.info(
-                "parquet_service",
-                step="schema_dict_detected",
-                field_name_col=schema_dict_meta["field_name_col"],
-                description_col=schema_dict_meta["description_col"],
-                notes_col=schema_dict_meta.get("notes_col"),
-                parquet_blob_path=parquet_blob_path,
-            )
-
-        ingest_logger.info("parquet_service", step="rewrite", status="done",
-                           bloom_cols=len([p for p in column_profiles if "top_values" in p]),
-                           profiles=len(column_profiles),
-                           duration_ms=_ms(t_profile))
-
-        # ── Step 2: upload Parquet back to Azure ──────────────────────────────
-        t = time.perf_counter()
-        ingest_logger.info("parquet_service", step="upload", status="started",
-                           parquet_blob_path=parquet_blob_path)
-        if job_id:
-            _PROGRESS[job_id] = {"phase": "uploading", "pct": 0}
-
-        parquet_blob_client = client.get_blob_client(container=container_name, blob=parquet_blob_path)
-        with open(tmp_parquet_path, "rb") as f:
-            parquet_blob_client.upload_blob(f, overwrite=True)
-
-        ingest_logger.info("parquet_service", step="upload", status="done",
-                           size_mb=round(parquet_size_bytes / 1024 / 1024, 1),
-                           duration_ms=_ms(t))
-        track_azure_blob("upload", parquet_blob_path, parquet_size_bytes, _ms(t))
-
-        if job_id:
-            _PROGRESS.pop(job_id, None)  # clean up — job is done
-
-        metrics.inc("parquet_conversions")
-        metrics.inc("azure_bytes_read", csv_size_bytes)
-        metrics.inc("azure_bytes_written", parquet_size_bytes)
-        return {
-            "parquet_blob_path": parquet_blob_path,
-            "size_bytes": parquet_size_bytes,
-            "total_rows": total_rows,
-            "column_profiles": column_profiles,
-            # Present only if the file was identified as a data dictionary.
-            "schema_dict_meta": schema_dict_meta,
-        }
-
-    finally:
-        if tmp_parquet_path and os.path.exists(tmp_parquet_path):
-            try:
-                os.unlink(tmp_parquet_path)
-            except OSError:
-                pass
+    return {
+        "parquet_blob_path": parquet_blob_path,
+        "size_bytes": parquet_size_bytes,
+        "total_rows": total_rows,
+        "column_profiles": column_profiles,
+        "schema_dict_meta": schema_dict_meta,
+    }
 
 
 async def convert_csv_to_parquet(
@@ -427,7 +482,7 @@ async def convert_csv_to_parquet(
     job_id: str | None = None,
 ) -> dict:
     """
-    Convert a CSV blob to Parquet using DuckDB's az:// reader.
+    Convert a CSV blob to Parquet using streaming PyArrow (zero disk, bounded RAM).
     Runs synchronous conversion in a thread — never blocks the FastAPI event loop.
 
     Returns {"parquet_blob_path": str, "size_bytes": int}
