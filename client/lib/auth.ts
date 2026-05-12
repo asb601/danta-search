@@ -37,16 +37,20 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
   return fetch(`${API_URL}${path}`, { ...init, headers });
 }
 
-/** Fetch current user from the backend */
+/** Fetch current user from the backend — fails fast after 8 s */
 export async function fetchMe(): Promise<User | null> {
   const token = getToken();
   if (!token) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
   try {
-    const res = await apiFetch("/api/auth/me");
+    const res = await apiFetch("/api/auth/me", { signal: controller.signal });
     if (!res.ok) return null;
     return res.json();
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

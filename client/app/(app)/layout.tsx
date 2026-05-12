@@ -33,6 +33,9 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (loading) return;
     if (!user) {
+      // Clear the token cookie so the middleware doesn't bounce the user
+      // back to /chat after we redirect them to /login.
+      document.cookie = "token=; path=/; max-age=0";
       router.replace("/login");
       return;
     }
