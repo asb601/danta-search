@@ -356,15 +356,22 @@ class NumericDetector:
     NO_HINT_THRESHOLD = 0.75
 
     # Pre-compiled regex / charsets.
+    # NOTE: built from literal Unicode codepoints (not `\uXXXX` escapes) so
+    # that pandas' Arrow-backed string accessor can pass these to PyArrow's
+    # RE2 kernel without raising "invalid escape sequence: \u".
     _CURRENCY_RE = re.compile(
-        r"[$\u20b9\u20ac\xa3\xa5\u20a9\u20a6\u20b1\u20ba\u20b4\u20bd\xa2\u0e3f]+"
+        "[$"
+        "\u20b9\u20ac\xa3\xa5\u20a9\u20a6\u20b1\u20ba\u20b4\u20bd\xa2\u0e3f"
+        "]+"
     )
     _SPACE_THOU_RE = re.compile(r"(\d)\s(\d)")
     _COMMA_THOU_RE = re.compile(r"^[+-]?[\d,]+\.?\d*$")
     _PERCENT_RE = re.compile(r"^([+-]?\d+\.?\d*)\s*%$")
     _INVISIBLE_RE = re.compile(
-        r"[\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad"
-        r"\u180e\u2060\u2061\u2062\u2063\u2064\u3000]"
+        "["
+        "\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad"
+        "\u180e\u2060\u2061\u2062\u2063\u2064\u3000"
+        "]"
     )
 
     # ── helpers ──────────────────────────────────────────────────────────────

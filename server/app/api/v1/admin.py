@@ -48,7 +48,13 @@ async def cost_summary(current_user: User = Depends(get_current_user)) -> dict:
 
 # ── Re-ingest all files ──────────────────────────────────────────────────────
 
-_REINGEST_SEMAPHORE = asyncio.Semaphore(2)  # 2 concurrent ingests — safer for Azure API limits
+# Concurrency cap for the orchestration loop.  Each slot drives one
+# ingest (probe + DuckDB sample + AI desc + embed + analytics) plus an
+# async parquet conversion that has its OWN semaphore (see
+# analytics_service._PARQUET_SEMAPHORE).  4 here keeps Azure OpenAI and
+# Postgres comfortable while restoring throughput; the original
+# unbounded design is what blew up the VM.
+_REINGEST_SEMAPHORE = asyncio.Semaphore(4)
 
 
 async def _batch_reingest(file_ids: list[str]) -> None:

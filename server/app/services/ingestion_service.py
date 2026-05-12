@@ -561,6 +561,59 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                 ingest_logger.info("step", step="5/5", name="parquet",
                                    status="skipped", reason="parquet_already_exists",
                                    parquet_path=analytics.parquet_blob_path)
+
+            # ── Schema-dictionary registration for direct .parquet uploads ──
+            # CSV/TXT/Excel paths register through parquet_service._run_conversion.
+            # A file uploaded as `.parquet` skips that step entirely, so without
+            # this branch its definitions would NEVER reach the agent.  Detect
+            # and register here using the sample's column profile.
+            if ext == ".parquet":
+                try:
+                    from app.services.parquet_service import detect_schema_dictionary
+                    from app.models.schema_dictionary import SchemaDictionary
+                    sd_meta = detect_schema_dictionary(file.name, sample["columns_info"])
+                    if sd_meta:
+                        async with _async_session() as sd_db:
+                            existing = (
+                                await sd_db.execute(
+                                    select(SchemaDictionary).where(
+                                        SchemaDictionary.file_id == file_id
+                                    )
+                                )
+                            ).scalar_one_or_none()
+                            if existing:
+                                existing.parquet_blob_path = file.blob_path
+                                existing.source_blob_path = file.blob_path
+                                existing.field_name_col = sd_meta["field_name_col"]
+                                existing.description_col = sd_meta["description_col"]
+                                existing.notes_col = sd_meta.get("notes_col")
+                            else:
+                                sd_db.add(SchemaDictionary(
+                                    id=str(uuid.uuid4()),
+                                    container_id=file.container_id,
+                                    file_id=file_id,
+                                    parquet_blob_path=file.blob_path,
+                                    source_blob_path=file.blob_path,
+                                    field_name_col=sd_meta["field_name_col"],
+                                    description_col=sd_meta["description_col"],
+                                    notes_col=sd_meta.get("notes_col"),
+                                ))
+                            await sd_db.commit()
+                        ingest_logger.info(
+                            "schema_dict_registered",
+                            file_id=file_id,
+                            parquet_path=file.blob_path,
+                            field_name_col=sd_meta["field_name_col"],
+                            description_col=sd_meta["description_col"],
+                            source="parquet_upload",
+                        )
+                except Exception as sd_exc:
+                    ingest_logger.warning(
+                        "schema_dict_registration_failed",
+                        file_id=file_id,
+                        error=str(sd_exc)[:300],
+                        source="parquet_upload",
+                    )
         except Exception as analytics_exc:
             ingest_logger.warning("step", step="5/5", name="compute_analytics", status="failed",
                                   error=str(analytics_exc)[:300],

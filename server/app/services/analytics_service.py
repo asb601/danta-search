@@ -29,7 +29,12 @@ from app.services.parquet_service import convert_csv_to_parquet
 # Each conversion runs DuckDB + PyArrow + DataFusion profiling in threads and
 # peaks at ~300–500 MB RAM. Without this cap, re-ingest-all on 20+ files fires
 # all jobs simultaneously and OOM-kills the VM kernel.
-_PARQUET_SEMAPHORE = asyncio.Semaphore(2)
+# Cap simultaneous CSV->Parquet conversions.  DuckDB loads the whole CSV
+# into RAM during conversion, so each slot is the heaviest single user
+# of memory in the pipeline.  3 = empirical sweet spot for an 8 GB VM:
+# enough parallelism to keep up with the reingest loop, low enough to
+# leave headroom for Postgres + the API process.
+_PARQUET_SEMAPHORE = asyncio.Semaphore(3)
 
 
 def _ms(start: float) -> float:

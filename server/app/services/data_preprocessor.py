@@ -109,22 +109,41 @@ _NULLSTR: frozenset[str] = frozenset({
 # (garbage-row removal, control-char stripping) and the header-row scanner.
 
 _GARBAGE_ROW_RE = re.compile(
+    # NOTE: pandas' string accessor (`.str.match`/`.str.contains`) on Arrow-
+    # backed string columns routes the pattern through PyArrow's RE2 compute
+    # kernel.  RE2 does NOT accept Python-style `\uXXXX` escapes inside
+    # character classes — it raises `Invalid regular expression: invalid
+    # escape sequence: \u`.  Build the non-ASCII pieces from literal Unicode
+    # codepoints (concatenated outside a raw string) so RE2 sees the raw
+    # character, not the escape sequence.
     r"^\s*(total|grand\s+total|subtotal|sub\s+total|sum|page\s+total|"
     r"running\s+total|end\s+of\s+report|average|avg|mean|balance\s+forward|"
     r"carried\s+forward|min|max|"
     # German (SAP, other ERP exports)
     r"summe|gesamtsumme|gesamt|zwischensumme|durchschnitt|"
     # French
-    r"total\s+g[e\u00e9]n[e\u00e9]ral|total\s+partiel|moyenne|"
+    r"total\s+g[e" + "\u00e9" + r"]n[e" + "\u00e9" + r"]ral|total\s+partiel|moyenne|"
     # Spanish / Portuguese
-    r"total\s+general|suma\s+total|promedio|m[e\u00e9]dia)\b",
+    r"total\s+general|suma\s+total|promedio|m[e" + "\u00e9" + r"]dia)\b",
     re.IGNORECASE,
 )
 _SEP_ROW_RE    = re.compile(r"^[-=*_~\s|+]+$")
-_CTRL_RE       = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Same RE2-safety rule as _GARBAGE_ROW_RE: build with literal codepoints, not
+# `\xNN` / `\uXXXX` escapes, so the pattern works whether pandas evaluates it
+# natively or via PyArrow.
+_CTRL_RE       = re.compile(
+    "["
+    "\x00-\x08"
+    "\x0b\x0c"
+    "\x0e-\x1f"
+    "\x7f"
+    "]"
+)
 _INVISIBLE_RE  = re.compile(
-    r"[\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad"
-    r"\u180e\u2060\u2061\u2062\u2063\u2064\u3000]"
+    "["
+    "\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad"
+    "\u180e\u2060\u2061\u2062\u2063\u2064\u3000"
+    "]"
 )
 
 
