@@ -51,13 +51,11 @@ import os
 import re
 import tempfile
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, date as _date_type
 from pathlib import Path
 from typing import Callable, Iterator
 
-import numpy as np
 import pandas as pd
 from azure.storage.blob import BlobClient, BlobServiceClient
 
@@ -66,7 +64,7 @@ from app.core.logger import ingest_logger
 
 # ── Tunable constants ─────────────────────────────────────────────────────────
 
-CHUNK_ROWS              = 100_000       # rows per streaming chunk
+CHUNK_ROWS              = 50_000        # rows per streaming chunk (lower = less RAM per thread)
 SMALL_FILE_THRESHOLD_MB = 50            # files under this get full-load + dedup
 HEADER_SCAN_ROWS        = 15            # max rows to scan for the real header
 TYPE_DETECT_SAMPLE_ROWS = 1_000         # rows used for column-type detection
@@ -145,6 +143,26 @@ _INVISIBLE_RE  = re.compile(
     "\u180e\u2060\u2061\u2062\u2063\u2064\u3000"
     "]"
 )
+# Pre-compiled patterns used by vectorized _clean_str_series
+_NEWLINE_RE     = re.compile(r"[\r\n\t]")
+_MULTI_SPACE_RE = re.compile(r" {2,}")
+
+# ── Concurrency guard ─────────────────────────────────────────────────────────
+# Preprocessing is CPU + I/O heavy. On an 8 GB VM, allow at most 2 concurrent
+# preprocessing jobs so pandas string ops don't saturate all cores / exhaust RAM.
+_PREPROCESS_SEMAPHORE: asyncio.Semaphore | None = None  # lazily initialised
+
+
+def _get_preprocess_semaphore() -> asyncio.Semaphore:
+    """Return the process-wide semaphore, creating it on first call.
+
+    Must be called inside an async context so the semaphore is bound to the
+    correct event loop.
+    """
+    global _PREPROCESS_SEMAPHORE
+    if _PREPROCESS_SEMAPHORE is None:
+        _PREPROCESS_SEMAPHORE = asyncio.Semaphore(2)
+    return _PREPROCESS_SEMAPHORE
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -395,24 +413,27 @@ async def preprocess_file(
     dst_bc          = svc_client.get_blob_client(container=container_name, blob=clean_blob_path)
     block_writer    = _BlockBlobWriter(dst_bc)
 
-    if ext in EXCEL_EXTS:
-        # Excel still needs one local temp file (openpyxl requires seekable I/O)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            raw_path = os.path.join(tmpdir, f"raw{ext}")
-            await asyncio.to_thread(
-                _download_blob_to_file,
-                src_bc, raw_path,
-            )
+    # ── Semaphore: cap concurrent preprocessing to avoid OOM under heavy load ──
+    _sem = _get_preprocess_semaphore()
+    async with _sem:
+        if ext in EXCEL_EXTS:
+            # Excel still needs one local temp file (openpyxl requires seekable I/O)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                raw_path = os.path.join(tmpdir, f"raw{ext}")
+                await asyncio.to_thread(
+                    _download_blob_to_file,
+                    src_bc, raw_path,
+                )
+                result = await asyncio.to_thread(
+                    _process_excel_to_blob, raw_path, block_writer, ext, is_large, warns,
+                )
+            # tmpdir (and the only temp file) is deleted here; block_writer still in RAM
+        else:
+            # CSV/text: fully streaming, zero disk
             result = await asyncio.to_thread(
-                _process_excel_to_blob, raw_path, block_writer, ext, is_large, warns,
+                _process_text_stream,
+                src_bc, block_writer, ext, file_size, is_large, warns,
             )
-        # tmpdir (and the only temp file) is deleted here; block_writer still in RAM
-    else:
-        # CSV/text: fully streaming, zero disk
-        result = await asyncio.to_thread(
-            _process_text_stream,
-            src_bc, block_writer, ext, file_size, is_large, warns,
-        )
 
     ingest_logger.info("preprocess", status="cleaned",
                        original_rows=result["original_rows"],
@@ -1121,32 +1142,39 @@ def _process_text(
 # Cell-level string cleaning
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _clean_str(v: object) -> object:
-    if not isinstance(v, str):
-        return v
-    v = _INVISIBLE_RE.sub("", v)
-    v = unicodedata.normalize("NFKC", v)
-    v = _CTRL_RE.sub("", v)
-    v = v.replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
-    v = re.sub(r" {2,}", " ", v).strip()
-    return v if v else None
-
-
 def _clean_str_series(s: pd.Series) -> pd.Series:
-    return s.apply(_clean_str)
+    """Vectorized column cleaning — one C-level call per pattern, NOT a Python loop.
 
-
-def _nullify(v: object) -> object:
-    if v is None:
-        return None
-    if isinstance(v, float) and np.isnan(v):
-        return None
-    sv = str(v).strip().lower()
-    return None if sv in _NULLSTR else v
+    Replaces the old `s.apply(_clean_str)` which fired a Python function call
+    for every single cell (30M+ calls on a SAP file with 300 cols × 100K rows).
+    Vectorized .str operations call into pandas/regex C extensions once per column.
+    """
+    # Only process object/string columns — pass through already-typed numerics/dates
+    if s.dtype.kind not in ("O", "U"):
+        return s
+    # Remove invisible Unicode and control characters
+    s = s.str.replace(_INVISIBLE_RE, "", regex=True)
+    s = s.str.replace(_CTRL_RE, "", regex=True)
+    # Collapse line endings and tabs to a single space
+    s = s.str.replace(_NEWLINE_RE, " ", regex=True)
+    # Collapse repeated spaces and strip leading/trailing whitespace
+    s = s.str.replace(_MULTI_SPACE_RE, " ", regex=True)
+    s = s.str.strip()
+    # Normalise empty strings to NaN so downstream .fillna("") works correctly
+    s = s.replace("", None)
+    return s
 
 
 def _nullify_series(s: pd.Series) -> pd.Series:
-    return s.apply(_nullify)
+    """Vectorized null normalization — one isin() call for all null-like strings.
+
+    Replaces the old `s.apply(_nullify)` per-cell Python loop.
+    """
+    if s.dtype.kind not in ("O", "U"):
+        return s
+    lower = s.astype(str).str.strip().str.lower()
+    null_mask = lower.isin(_NULLSTR) | s.isna()
+    return s.where(~null_mask, other=None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
