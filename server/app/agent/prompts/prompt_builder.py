@@ -38,7 +38,7 @@ def _neutralize_description(desc: str) -> str:
     return out
 
 
-SYSTEM_PROMPT_TEMPLATE = """You are a data analyst with DuckDB SQL access to files in Azure Blob Storage.
+SYSTEM_PROMPT_TEMPLATE = """{file_override_note}You are a data analyst with DuckDB SQL access to files in Azure Blob Storage.
 
 Today's date: {today_iso} ({today_human}).
 Resolve every relative time expression in the user's question against THIS date,
@@ -76,7 +76,9 @@ question (a customer, supplier, item, account, transaction id, ...):
      (\"name\", \"master\", \"lookup\", \"reference\", \"directory\", \"code table\").
   3. Verify before filtering: look at sample values returned by get_file_schema.
      If samples don't resemble the user's literal value, this file does not
-     contain that entity \u2014 search_catalog for an alternate file before filtering.
+     contain that entity — search_catalog for an alternate file before filtering.
+     Only reference column names that literally appear in the get_file_schema
+     or inspect_column output — never fabricate or guess column names.
   4. Never repeat a filter that returned 0 rows with only whitespace or quoting
      changes. Switch the file or column instead.
 
@@ -84,6 +86,13 @@ search_catalog searches metadata only (filenames, descriptions, columns).
 It does NOT search row values \u2014 to find a row value, filter inside a file.
 
 --- HOW TO WRITE A FILTER ---
+COLUMN NAMES ARE SACRED: Only use column names that appear verbatim in the
+output of get_file_schema or inspect_column. Never guess, abbreviate, or
+invent a column name (e.g. do NOT write "InvoiceNumber" if the schema shows
+"BillingDocumentNumber" or "CreditMemoReference"). If a SQL error says
+"column not found", re-read the schema output — do NOT use the error message's
+"Did you mean X?" suggestion unless X appears in the schema you retrieved.
+
 Before writing any WHERE clause that depends on a column's storage format
 (year, period, date, code, id, currency-as-string, ...), call inspect_column
 on that column. Paste the dtype + samples into your reasoning, then use the
@@ -244,6 +253,7 @@ def build_system_prompt(
     sample_rows_by_blob: dict[str, list],
     conversation_context: str = "",
     total_file_count: int | None = None,
+    mentioned_files: list[str] | None = None,
 ) -> str:
     """Assemble the full system prompt for the agent."""
     parquet_note = build_parquet_note(
@@ -280,6 +290,16 @@ def build_system_prompt(
     # Last 30 days
     last_30_start = today - timedelta(days=30)
 
+    if mentioned_files:
+        names = ", ".join(f"`{f}`" for f in mentioned_files)
+        file_override_note = (
+            f"USER SPECIFIED FILE: {names}\n"
+            f"Query ONLY this file. Do not redirect to a different file based on "
+            f"semantic matching. Call get_file_schema on {names} first, then run SQL on it.\n\n"
+        )
+    else:
+        file_override_note = ""
+
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         container_name=container_name,
         max_calls=MAX_TOOL_CALLS,
@@ -288,6 +308,7 @@ def build_system_prompt(
         shortlist_header=shortlist_header,
         shortlist_count=shortlist_count,
         total_file_count=full_count,
+        file_override_note=file_override_note,
         today_iso=today.isoformat(),
         today_human=today.strftime("%A, %d %B %Y"),
         this_month_start=first_of_this_month.isoformat(),

@@ -11,6 +11,7 @@ This module orchestrates the pipeline:
 from __future__ import annotations
 
 import math
+import re
 import threading
 import time
 import uuid
@@ -49,6 +50,38 @@ _request_stores: dict[str, dict] = {}
 _stores_lock = threading.Lock()
 
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
+
+# ── Explicit file-name extractor ─────────────────────────────────────────────
+# When the user writes "on AP_invoices_all.csv" or "use billing_document.csv",
+# we detect that mention and pin the matching catalog entry at the TOP of the
+# shortlist so the retrieval ranking can never override the user's choice.
+_HASH_PREFIX_RE = re.compile(r'^[0-9a-f]{8}_', re.IGNORECASE)
+
+
+def _extract_mentioned_files(query: str, full_catalog: list[dict]) -> list[dict]:
+    """Return catalog entries whose filename appears verbatim in the user query.
+
+    Matching is case-insensitive. The 8-hex-char upload hash prefix
+    (e.g. 'dba1285e_') is stripped before comparison so the user never has
+    to know about internal storage names.
+    """
+    if not query:
+        return []
+    query_lower = query.lower()
+    mentioned: list[dict] = []
+    seen: set[str] = set()
+    for entry in full_catalog:
+        blob = entry.get("blob_path", "")
+        filename = blob.rsplit("/", 1)[-1]                          # drop any folder prefix
+        clean = _HASH_PREFIX_RE.sub("", filename).lower()           # drop hash prefix
+        stem = clean.rsplit(".", 1)[0] if "." in clean else clean   # drop extension
+        fid = entry.get("file_id", "")
+        # Match full filename (with ext) OR stem — both case-insensitive.
+        # Require stem length ≥ 4 to avoid false positives on short tokens.
+        if fid not in seen and len(stem) >= 4 and (clean in query_lower or stem in query_lower):
+            mentioned.append(entry)
+            seen.add(fid)
+    return mentioned
 
 async def _polish_answer(raw: str) -> str:
     """Polish pass DISABLED — it added a full LLM round-trip (~1500 tokens)
@@ -303,6 +336,25 @@ async def _build_agent_context(
         )
         metrics.inc("catalog_fallback_count")
 
+    # ── STEP 2.55: PIN EXPLICITLY-MENTIONED FILES ────────────────────────────
+    # If the user named a specific file (e.g. "on AP_invoices_all.csv"),
+    # force that file to the front of the shortlist regardless of retrieval rank.
+    # This is done AFTER all retrieval/lookup logic so nothing can push it out.
+    mentioned_entries = _extract_mentioned_files(query, full_catalog)
+    mentioned_file_names: list[str] = []
+    if mentioned_entries:
+        mentioned_ids = {e.get("file_id") for e in mentioned_entries}
+        catalog = mentioned_entries + [e for e in catalog if e.get("file_id") not in mentioned_ids]
+        mentioned_file_names = [
+            _HASH_PREFIX_RE.sub("", e.get("blob_path", "").rsplit("/", 1)[-1])
+            for e in mentioned_entries
+        ]
+        pipeline_logger.info(
+            "explicit_file_pinned",
+            query=query[:200],
+            pinned=mentioned_file_names,
+        )
+
     # ── STEP 2.6: HYDRATE HEAVY FIELDS for the shortlist only ───────────────
     # The cached catalog is intentionally lean (no columns_info samples,
     # sample_rows, or column_stats). We now load those heavy fields ONLY for
@@ -390,6 +442,7 @@ async def _build_agent_context(
         sample_rows_by_blob=sample_rows_by_blob,
         conversation_context=conversation_context,
         total_file_count=len(full_catalog),
+        mentioned_files=mentioned_file_names or None,
     )
 
     # ── Log the complete system prompt so we can audit exactly what the LLM sees ──
