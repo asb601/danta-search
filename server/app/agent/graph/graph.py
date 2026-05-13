@@ -722,9 +722,11 @@ async def run_agent_query_stream(
                     iteration=tool_calls_made,
                     output=str(tool_output),  # full output, no truncation
                 )
+                tool_output_str = tool_output if isinstance(tool_output, str) else str(tool_output)
                 if isinstance(tool_output, str):
                     files_used.update(extract_blob_paths(tool_output))
-                    tool_outputs.append(tool_output)
+                if tool_output_str:
+                    tool_outputs.append(tool_output_str)
 
     except Exception as exc:
         chat_logger.exception("agent_stream_error", error=str(exc)[:400])
@@ -778,8 +780,13 @@ async def run_agent_query_stream(
                 f"Query returned {len(sql_results)} rows (first 15 shown):\n"
                 + _j.dumps(sql_results[:15], default=str)
             )
-        elif tool_outputs:
+        if tool_outputs:
             _context_parts.append("Tool outputs:\n" + "\n---\n".join(tool_outputs[-3:]))
+        if not _context_parts:
+            _context_parts.append(
+                f"The system executed {tool_calls_made} tool call(s) but the queries returned 0 rows. "
+                "Explain that the data was not found and describe what was searched."
+            )
         if _context_parts:
             try:
                 _synth_resp = await get_llm_mini().ainvoke([
