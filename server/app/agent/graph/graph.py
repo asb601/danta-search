@@ -797,6 +797,8 @@ async def run_agent_query_stream(
                 ])
                 if _synth_resp.content:
                     final_answer = _synth_resp.content
+                    # Stream the synthesized answer so clients see tokens (not blank)
+                    yield {"type": "token", "content": final_answer}
                     chat_logger.info("synthesis_fallback_used",
                                      query=query[:100],
                                      tool_calls=tool_calls_made,
