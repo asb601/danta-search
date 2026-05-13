@@ -1,4 +1,6 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const USER_CACHE_KEY = "gchat_user";
+const USER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export interface User {
   id: string;
@@ -25,6 +27,27 @@ export function setToken(token: string): void {
 /** Clear stored token */
 export function clearToken(): void {
   localStorage.removeItem("token");
+  localStorage.removeItem(USER_CACHE_KEY);
+}
+
+/** Read user synchronously from localStorage cache (zero network). */
+export function getCachedUser(): User | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(USER_CACHE_KEY);
+    if (!raw) return null;
+    const { user, ts } = JSON.parse(raw) as { user: User; ts: number };
+    if (Date.now() - ts > USER_CACHE_TTL_MS) return null; // stale
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+/** Write user to localStorage cache. */
+export function setCachedUser(user: User): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(USER_CACHE_KEY, JSON.stringify({ user, ts: Date.now() }));
 }
 
 /** Authenticated fetch wrapper */
@@ -46,7 +69,9 @@ export async function fetchMe(): Promise<User | null> {
   try {
     const res = await apiFetch("/api/auth/me", { signal: controller.signal });
     if (!res.ok) return null;
-    return res.json();
+    const user: User = await res.json();
+    setCachedUser(user); // keep cache fresh
+    return user;
   } catch {
     return null;
   } finally {

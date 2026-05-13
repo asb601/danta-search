@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,12 +19,21 @@ from app.api.v1.chat_common import (
     resolve_chat_scope,
 )
 from app.core.database import async_session
+from app.core.response_cache import get_cached_response, set_cached_response
 from app.dependencies import get_db, get_current_user
 from app.models.conversation import Conversation, Message
 from app.models.user import User
 from app.services.context_service import build_conversation_context, count_tokens, get_recent_files_used
 
 router = APIRouter()
+
+# ── Concurrency backpressure ─────────────────────────────────────────────────
+# Limits simultaneous LLM requests to prevent Azure OpenAI quota exhaustion.
+# Requests beyond this limit receive a 503 immediately with a Retry-After header
+# instead of silently queuing for 60s then timing out.
+# Tune this to ~70% of your Azure deployment's TPM concurrency capacity.
+_LLM_SEMAPHORE = asyncio.Semaphore(5)
+_RETRY_AFTER_SECONDS = 10
 
 
 @router.post("/message/stream")
@@ -98,37 +108,61 @@ async def chat_message_stream(
     )
     user_is_admin = bool(getattr(user, "is_admin", False))
 
+    # ── Backpressure: reject when LLM slots are exhausted ───────────────────
+    # Returns 503 immediately instead of silently queuing for 60s then timing out.
+    if _LLM_SEMAPHORE.locked() and _LLM_SEMAPHORE._value == 0:
+        raise HTTPException(
+            status_code=503,
+            detail="Server is busy. Please retry in a few seconds.",
+            headers={"Retry-After": str(_RETRY_AFTER_SECONDS)},
+        )
+
+    # ── Response cache: return immediately for recently-seen identical queries ─
+    cache_key = (effective_container_id or "default", query)
+    cached = get_cached_response(cache_key)
+
     async def event_stream():
         yield f"data: {_json.dumps({'event': 'started', 'conversation_id': conv_id})}\n\n"
+
+        # Serve from cache — emit full answer as a single token burst, then done.
+        if cached is not None:
+            answer_text = cached.get("answer", "")
+            for chunk in (answer_text[i:i+80] for i in range(0, len(answer_text), 80)):
+                yield f"data: {_json.dumps({'event': 'token', 'content': chunk})}\n\n"
+            cached["conversation_id"] = conv_id
+            cached["from_cache"] = True
+            yield f"data: {_json.dumps({'event': 'done', 'result': cached})}\n\n"
+            return
 
         try:
             final_payload = None
 
-            async for evt in run_agent_query_stream(
-                query, db,
-                conversation_context=conversation_context,
-                user_id=user.id,
-                is_admin=user_is_admin,
-                allowed_domains=user_allowed_domains,
-                container_id=effective_container_id,
-                prior_files=prior_files,
-            ):
-                evt_type = evt["type"]
+            async with _LLM_SEMAPHORE:
+                async for evt in run_agent_query_stream(
+                    query, db,
+                    conversation_context=conversation_context,
+                    user_id=user.id,
+                    is_admin=user_is_admin,
+                    allowed_domains=user_allowed_domains,
+                    container_id=effective_container_id,
+                    prior_files=prior_files,
+                ):
+                    evt_type = evt["type"]
 
-                if evt_type == "token":
-                    yield f"data: {_json.dumps({'event': 'token', 'content': evt['content']})}\n\n"
+                    if evt_type == "token":
+                        yield f"data: {_json.dumps({'event': 'token', 'content': evt['content']})}\n\n"
 
-                elif evt_type == "thinking":
-                    yield f"data: {_json.dumps({'event': 'thinking', 'tool': evt.get('tool', '')})}\n\n"
+                    elif evt_type == "thinking":
+                        yield f"data: {_json.dumps({'event': 'thinking', 'tool': evt.get('tool', '')})}\n\n"
 
-                elif evt_type == "pipeline_step":
-                    yield f"data: {_json.dumps({'event': 'pipeline_step', 'step': evt.get('step', ''), 'retrieved_files': evt.get('retrieved_files', 0), 'total_files': evt.get('total_files', 0)})}\n\n"
+                    elif evt_type == "pipeline_step":
+                        yield f"data: {_json.dumps({'event': 'pipeline_step', 'step': evt.get('step', ''), 'retrieved_files': evt.get('retrieved_files', 0), 'total_files': evt.get('total_files', 0)})}\n\n"
 
-                elif evt_type == "tool_result":
-                    yield f"data: {_json.dumps({'event': 'tool_result', 'tool': evt.get('tool', '')})}\n\n"
+                    elif evt_type == "tool_result":
+                        yield f"data: {_json.dumps({'event': 'tool_result', 'tool': evt.get('tool', '')})}\n\n"
 
-                elif evt_type == "done":
-                    final_payload = evt["payload"]
+                    elif evt_type == "done":
+                        final_payload = evt["payload"]
 
             if final_payload:
                 answer_text = final_payload.get("answer", "")
@@ -168,6 +202,9 @@ async def chat_message_stream(
                         f"This conversation has {new_count}/{MAX_MESSAGES_PER_CONVERSATION} messages. "
                         "It will auto-continue in a new thread when full."
                     )
+
+                # Store in cache for subsequent identical queries
+                set_cached_response(cache_key, final_payload)
 
                 yield f"data: {_json.dumps({'event': 'done', 'result': final_payload})}\n\n"
 

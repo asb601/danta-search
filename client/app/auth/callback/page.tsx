@@ -17,7 +17,7 @@ function CallbackHandler() {
     setToken(token);
     document.cookie = `token=${token}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`;
 
-    // Fetch user to decide where to send them
+    // Fetch user, cache it, then decide where to send them
     fetchMe().then((user) => {
       if (user && !user.is_admin && !user.allowed_domains) {
         // First-time user: no domain selected yet — send to onboarding

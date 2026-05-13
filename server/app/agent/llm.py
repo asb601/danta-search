@@ -30,8 +30,8 @@ def _make_llm(deployment: str, max_tokens: int = 1500) -> AzureChatOpenAI:
         api_version=api_version,
         temperature=0,
         max_completion_tokens=max_tokens,
-        timeout=60,
-        max_retries=2,
+        timeout=25,  # reduced from 60 — fail fast, free up quota faster
+        max_retries=1,  # reduced from 2 — one retry is enough under load
     )
 
 
@@ -46,10 +46,12 @@ def get_llm() -> AzureChatOpenAI:
 
 
 def get_llm_mini() -> AzureChatOpenAI:
-    """Return the gpt-4o-mini singleton (follow-up turns 2+)."""
+    """Return the gpt-4o-mini singleton (primary model for all turns)."""
     global _llm_mini
     if _llm_mini is None:
         with _lock:
             if _llm_mini is None:
-                _llm_mini = _make_llm(get_settings().AZURE_OPENAI_DEPLOYMENT_MINI)
+                # 800 max_tokens is sufficient for SQL (avg ~200 tokens) and
+                # structured answers. Lower ceiling = faster streaming TTFT.
+                _llm_mini = _make_llm(get_settings().AZURE_OPENAI_DEPLOYMENT_MINI, max_tokens=800)
     return _llm_mini

@@ -7,7 +7,7 @@ import {
   useEffect,
   useState,
 } from "react";
-import { fetchMe, clearToken, type User } from "@/lib/auth";
+import { fetchMe, clearToken, getCachedUser, type User } from "@/lib/auth";
 
 interface AuthContextValue {
   user: User | null;
@@ -22,13 +22,19 @@ const AuthContext = createContext<AuthContextValue>({
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Read cache synchronously — if present, loading starts as false and the
+  // page renders immediately without waiting for a network round-trip.
+  const cached = getCachedUser();
+  const [user, setUser] = useState<User | null>(cached);
+  const [loading, setLoading] = useState(cached === null);
 
   useEffect(() => {
+    // If we had a valid cache hit, still revalidate in the background so the
+    // cache stays fresh — but the page doesn't block on it.
     fetchMe()
-      .then(setUser)
+      .then((u) => { if (u) setUser(u); else if (!cached) setUser(null); })
       .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const logout = useCallback(() => {

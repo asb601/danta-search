@@ -68,11 +68,13 @@ def build_agent_node(all_tools: list):
         if count >= MAX_TOOL_CALLS:
             return {"messages": [AIMessage(content="I've gathered enough data. Let me summarise.")]}
 
-        # Model selection: default to gpt-4o-mini for cost. Escalate to gpt-4o
-        # only when the previous run_sql errored or returned zero rows.
-        primary_llm = get_llm()
-        escalate = _should_escalate_to_primary(state["messages"])
-        active_llm = primary_llm if escalate else get_llm_mini()
+        # Model selection: always use gpt-4o-mini.
+        # gpt-4o-mini has higher quota, lower latency (~3x faster than gpt-4o),
+        # and sufficient capability for SQL generation and ERP data answering.
+        # gpt-4o escalation is disabled — it has lower RPM quota which becomes
+        # the bottleneck under concurrent load, making slowdowns worse.
+        active_llm = get_llm_mini()
+        _ = get_llm  # kept for import compatibility
         llm_with_tools = active_llm.bind_tools(all_tools)
 
         # ── Log every message going into the LLM this iteration ──────────────
@@ -92,18 +94,6 @@ def build_agent_node(all_tools: list):
                 break
             except RateLimitError as exc:
                 last_exc = exc
-                # If we were using mini and it's rate-limited, switch immediately
-                # to the primary model instead of waiting and retrying mini.
-                if active_llm is not primary_llm:
-                    llm_logger.warning(
-                        "llm_mini_rate_limited_fallback_to_primary",
-                        attempt=attempt + 1,
-                        error=str(exc)[:200],
-                    )
-                    active_llm = primary_llm
-                    llm_with_tools = primary_llm.bind_tools(all_tools)
-                    # retry immediately on primary — don't sleep
-                    continue
                 if attempt < _MAX_LLM_RETRIES:
                     delay = _RETRY_BASE_DELAY * (2 ** attempt)
                     llm_logger.warning("llm_rate_limited",
