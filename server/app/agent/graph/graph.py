@@ -761,12 +761,55 @@ async def run_agent_query_stream(
         total_duration_ms=total_ms,
     )
 
+    # ── Silent-model recovery ─────────────────────────────────────────────────
+    # gpt-4o-mini sometimes produces zero text tokens in its final turn after a
+    # multi-tool chain (it just stops without writing the answer). Detect this
+    # and do one focused synthesis call from the SQL results / tool outputs so
+    # the user always gets a real answer rather than a hollow fallback.
+    _HOLLOW = {
+        "", "Here are the results:",
+        "I've gathered enough data. Let me summarise.",
+    }
+    if final_answer.strip() in _HOLLOW and tool_calls_made > 0:
+        _context_parts: list[str] = []
+        if sql_results:
+            import json as _j
+            _context_parts.append(
+                f"Query returned {len(sql_results)} rows (first 15 shown):\n"
+                + _j.dumps(sql_results[:15], default=str)
+            )
+        elif tool_outputs:
+            _context_parts.append("Tool outputs:\n" + "\n---\n".join(tool_outputs[-3:]))
+        if _context_parts:
+            try:
+                _synth_resp = await get_llm_mini().ainvoke([
+                    SystemMessage(content=(
+                        "You are an ERP data analyst. The user asked a question and the "
+                        "system executed queries to find the answer. Write a clear, direct "
+                        "response based on the query results below. Include key numbers, "
+                        "totals, and observations. If 0 rows were returned, say the data "
+                        "was not found and briefly explain what was searched."
+                    )),
+                    HumanMessage(content=(
+                        f"User question: {query}\n\n"
+                        + "\n\n".join(_context_parts)
+                    )),
+                ])
+                if _synth_resp.content:
+                    final_answer = _synth_resp.content
+                    chat_logger.info("synthesis_fallback_used",
+                                     query=query[:100],
+                                     tool_calls=tool_calls_made,
+                                     sql_rows=len(sql_results))
+            except Exception as _synth_exc:
+                chat_logger.warning("synthesis_fallback_error", error=str(_synth_exc)[:200])
+
     if not final_answer and sql_results:
         final_answer = "Here are the results:"
-    elif not final_answer and not sql_results:
+    elif not final_answer:
         final_answer = fallback_answer_from_outputs(tool_outputs)
 
-    # Polish pass — gpt-4o-mini makes the answer warmer and more client-friendly
+    # Polish pass — no-op currently, kept for future use
     final_answer = await _polish_answer(final_answer)
 
     chart = infer_chart(final_answer, sql_results)
