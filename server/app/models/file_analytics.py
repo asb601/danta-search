@@ -42,6 +42,15 @@ class FileAnalytics(Base):
     parquet_blob_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     parquet_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # ── Cleaning audit ──
+    # Populated by the data preprocessor — records rows that were dropped
+    # during cleaning and why (garbage keywords, separators, empty rows).
+    # quarantine_sample holds the first MAX_QUARANTINE_SAMPLE dropped rows
+    # as [{"reason": "garbage_keyword", "row": {"col": "value", ...}}]
+    quarantine_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    quarantine_sample: Mapped[list | None] = mapped_column(JSONB, default=list)
+    cleaning_audit: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+
     # ── Timestamps ──
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

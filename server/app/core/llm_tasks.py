@@ -80,8 +80,8 @@ Be SPECIFIC and DISCRIMINATIVE — your description must distinguish this file f
 
 Return ONLY this JSON with no preamble no markdown:
 {{
-  "summary": "2 sentences: (1) what specific business questions this file is the PRIMARY source for — name the exact columns that make it uniquely suited (e.g. 'AMOUNT_DUE_REMAINING tracks open balance', 'STATUS=OP filters open items'); (2) what this file contains that similar-sounding files do NOT have.",
-  "good_for": ["3-6 exact natural language business question phrases this file is the BEST source for. Use the actual business domain terms, column names, and metrics specific to this file — do NOT use generic placeholder terms. Make each phrase discriminative: it should clearly distinguish this file from other similar-sounding files in the catalog."],
+    "summary": "2 sentences: (1) what specific business questions this file can support, naming the exact columns that make it useful (e.g. 'AMOUNT_DUE_REMAINING tracks open balance', 'STATUS=OP filters open items'); (2) what this file contains that similar-sounding files do not have. Avoid claiming this is the only, best, or primary source unless that is explicitly present in metadata.",
+    "good_for": ["3-6 exact natural language business question phrases this file can support. Use the actual business domain terms, column names, and metrics specific to this file — do NOT use generic placeholder terms. Make each phrase discriminative: it should clearly distinguish this file from other similar-sounding files in the catalog without claiming exclusivity."],
   "key_metrics": ["numeric columns used for aggregation and SUM/AVG calculations"],
   "key_dimensions": ["categorical, status, and ID columns used for filtering and grouping — include their important values where relevant, e.g. STATUS: OP=open CL=closed"],
   "date_range_start": "YYYY-MM-DD or null",

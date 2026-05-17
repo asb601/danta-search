@@ -25,6 +25,8 @@ import app.models.access_request  # ensure AccessRequest table is created
 import app.models.container  # ensure ContainerConfig table is created
 import app.models.file_metadata  # ensure FileMetadata table is created
 import app.models.file_analytics  # ensure FileAnalytics table is created
+import app.models.column_key_registry  # ensure ColumnKeyRegistry table is created
+import app.models.semantic_layer  # ensure semantic layer tables are created
 import app.models.background_job  # ensure BackgroundJob table is created
 import app.models.conversation  # ensure Conversation + Message tables are created
 import app.models.organization  # ensure Organization table is created
@@ -99,6 +101,52 @@ async def lifespan(app: FastAPI):
         await _schema_dict_migrate()
     except Exception as exc:
         chat_logger.warning("schema_dict_migration_failed", error=str(exc)[:300])
+
+    # Cleaning config + quarantine audit columns
+    from app.migrations.cleaning_config_upgrade import migrate as _cleaning_migrate
+    try:
+        await _cleaning_migrate()
+    except Exception as exc:
+        chat_logger.warning("cleaning_config_migration_failed", error=str(exc)[:300])
+
+    # Ontology layer — column_semantic_roles + GIN index + relationship semantic_role
+    from app.migrations.ontology_schema_upgrade import migrate as _ontology_migrate
+    try:
+        await _ontology_migrate()
+    except Exception as exc:
+        chat_logger.warning("ontology_migration_failed", error=str(exc)[:300])
+
+    # Per-container semantic role extensions
+    from app.migrations.semantic_config_upgrade import migrate as _semantic_config_migrate
+    try:
+        await _semantic_config_migrate()
+    except Exception as exc:
+        chat_logger.warning("semantic_config_migration_failed", error=str(exc)[:300])
+
+    # Relationship fingerprint index — tenant-scoped database-backed hashmap
+    from app.migrations.relationship_index_upgrade import migrate as _relationship_index_migrate
+    try:
+        await _relationship_index_migrate()
+    except Exception as exc:
+        chat_logger.warning("relationship_index_migration_failed", error=str(exc)[:300])
+
+    # Semantic layer — entities, cardinality, approved/candidate business joins
+    from app.migrations.semantic_layer_upgrade import migrate as _semantic_layer_migrate
+    try:
+        await _semantic_layer_migrate()
+    except Exception as exc:
+        chat_logger.warning("semantic_layer_migration_failed", error=str(exc)[:300])
+
+    # Pre-warm DataFusion session pool — pays UDF-registration cost once at startup
+    # so the first N concurrent queries borrow a ready context without overhead.
+    try:
+        import asyncio as _asyncio
+        from app.core.datafusion_client import warm_context_pool as _warm_pool
+        await _asyncio.get_event_loop().run_in_executor(None, _warm_pool)
+        chat_logger.info("datafusion_pool_startup", status="warmed")
+    except Exception as exc:
+        chat_logger.warning("datafusion_pool_startup_failed", error=str(exc)[:200])
+
     yield
     await engine.dispose()
 

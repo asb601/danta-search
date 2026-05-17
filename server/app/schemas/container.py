@@ -6,6 +6,7 @@ class ContainerCreate(BaseModel):
     name: str
     container_name: str
     connection_string: str
+    semantic_config: dict | None = None
 
     @field_validator("name", "container_name", "connection_string", mode="before")
     @classmethod
@@ -20,8 +21,18 @@ class ContainerOut(BaseModel):
     last_synced_at: datetime | None
     file_count: int = 0
     created_at: datetime
+    semantic_config: dict | None = None
 
     model_config = {"from_attributes": True}
+
+
+class ContainerSemanticConfigUpdate(BaseModel):
+    semantic_config: dict | None = None
+
+
+class ContainerSemanticRebuildRequest(BaseModel):
+    re_resolve_roles: bool = True
+    batch_size: int = 250
 
 
 class ContainerSyncResponse(BaseModel):

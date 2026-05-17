@@ -36,7 +36,7 @@ from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
 from app.models.folder import Folder
 from app.models.user import User
-from app.services.ingestion_service import ingest_file
+from app.worker.ingest_tasks import run_ingest_pipeline
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -47,94 +47,6 @@ async def cost_summary(current_user: User = Depends(get_current_user)) -> dict:
 
 
 # ── Re-ingest all files ──────────────────────────────────────────────────────
-
-# Concurrency cap for the orchestration loop.  Each slot drives one
-# ingest (probe + DuckDB sample + AI desc + embed + analytics) plus an
-# async parquet conversion that has its OWN semaphore (see
-# analytics_service._PARQUET_SEMAPHORE).  4 here keeps Azure OpenAI and
-# Postgres comfortable while restoring throughput; the original
-# unbounded design is what blew up the VM.
-_REINGEST_SEMAPHORE = asyncio.Semaphore(4)
-
-
-async def _batch_reingest(file_ids: list[str]) -> None:
-    """Re-ingest a list of files with concurrency capped at 2.
-
-    File-level deduplication: each worker atomically claims a file by
-    transitioning its ingest_status to 'running'.  Files that another
-    process / coroutine has already claimed are skipped silently.  This
-    makes the endpoint safe against:
-
-      * the same admin double-clicking "reingest all"
-      * two admins triggering reingest concurrently
-      * a single file appearing in two queued batches
-
-    The claim is a DB-level UPDATE ... WHERE ingest_status != 'running'
-    RETURNING id — atomic at the row level even with multiple API
-    replicas hitting Postgres.
-    """
-    done = 0
-    failed = 0
-    skipped = 0
-
-    async def _one(file_id: str) -> None:
-        nonlocal done, failed, skipped
-        async with _REINGEST_SEMAPHORE:
-            # ── Atomic claim ──────────────────────────────────────────────
-            # Set status to 'pending' iff it isn't already in an active state.
-            # `ingest_file` itself moves it through pending → ingested/failed,
-            # so excluding both 'pending' and 'running' here makes the claim
-            # idempotent against any concurrent reingest path.
-            async with async_session() as claim_db:
-                claimed = (
-                    await claim_db.execute(
-                        update(File)
-                        .where(File.id == file_id)
-                        .where(File.ingest_status.notin_(("pending", "running")))
-                        .values(ingest_status="pending")
-                        .returning(File.id)
-                    )
-                ).scalar_one_or_none()
-                await claim_db.commit()
-
-            if claimed is None:
-                skipped += 1
-                ingest_logger.info(
-                    "reingest_skip_claimed",
-                    file_id=file_id,
-                    reason="already_running",
-                )
-                return
-
-            trace_id = f"reingest-{uuid.uuid4().hex[:12]}"
-            structlog.contextvars.clear_contextvars()
-            structlog.contextvars.bind_contextvars(
-                trace_id=trace_id, pipeline="reingest", file_id=file_id
-            )
-            try:
-                async with async_session() as db:
-                    await ingest_file(file_id, db)
-                # ingest_file catches all exceptions internally and sets
-                # ingest_status="failed" — check the actual outcome so the
-                # failed counter is accurate (not always 0).
-                async with async_session() as check_db:
-                    f = await check_db.get(File, file_id)
-                if f and f.ingest_status == "failed":
-                    failed += 1
-                else:
-                    done += 1
-                ingest_logger.info("reingest_progress", done=done, failed=failed,
-                                   skipped=skipped,
-                                   remaining=len(file_ids) - done - failed - skipped)
-            except Exception as exc:
-                failed += 1
-                ingest_logger.exception("reingest_crashed", error=str(exc)[:500])
-            finally:
-                structlog.contextvars.clear_contextvars()
-
-    await asyncio.gather(*[_one(fid) for fid in file_ids])
-    invalidate_catalog_cache()
-    ingest_logger.info("reingest_complete", done=done, failed=failed, skipped=skipped)
 
 
 @router.post("/reingest-all")
@@ -199,16 +111,25 @@ async def reingest_all(
     await db.commit()
     invalidate_catalog_cache()
 
-    ingest_logger.info("reingest_all_started", admin_id=admin.id,
-                       file_count=len(file_ids), in_flight_count=len(in_flight))
+    # Dispatch each file to a Celery worker — isolated from the API event loop.
+    # Worker concurrency (-c flag) is the throttle; no in-process semaphore needed.
+    # The endpoint returns immediately after queuing.
+    task_ids = [run_ingest_pipeline.delay(fid).id for fid in file_ids]
 
-    # Fire background task
-    asyncio.create_task(_batch_reingest(file_ids))
+    ingest_logger.info(
+        "reingest_all_queued",
+        admin_id=admin.id,
+        file_count=len(file_ids),
+        in_flight_count=len(in_flight),
+        task_ids=task_ids,
+        backend="celery",
+    )
 
     return {
-        "message": "Re-ingestion started",
+        "message": "Re-ingestion queued",
         "file_count": len(file_ids),
         "in_flight_count": len(in_flight),
+        "task_ids": task_ids,
     }
 
 

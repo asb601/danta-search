@@ -108,7 +108,7 @@ HARD_QUESTIONS = [
 
 def run_question(base_url: str, token: str, question: str, timeout: float = 120.0) -> dict:
     """Send one streaming question, return timing + full answer."""
-    url = f"{base_url}/api/v1/message/stream"
+    url = f"{base_url}/api/chat/message/stream"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",

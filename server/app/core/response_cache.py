@@ -43,6 +43,31 @@ _lock = threading.Lock()
 _WHITESPACE_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s]")
 
+# Phrases that mark a hollow/fallback answer — never worth caching.
+# These come from response_helpers.py fallback_answer() and graph.py synthesis fallback.
+_HOLLOW_PHRASES: tuple[str, ...] = (
+    "wasn't able to find",
+    "was not able to find",
+    "could not find",
+    "couldn't find",
+    "no relevant data",
+    "no data found",
+    "unable to answer",
+    "cannot answer",
+    "no information",
+    "not available",
+    "i don't have",
+    "i do not have",
+    "failed to retrieve",
+    "no results",
+    "could not be answered",
+    "could not retrieve",
+    "please try again",
+    "i apologize",
+    "unfortunately",
+)
+_MIN_ANSWER_TOKENS = 15  # answers shorter than this are too thin to be worth caching
+
 
 def _normalize(query: str) -> str:
     """Lowercase, collapse whitespace, strip punctuation."""
@@ -91,18 +116,41 @@ def get_cached_response(cache_key: tuple) -> dict | None:
     return None
 
 
+def _is_hollow_answer(answer: str) -> bool:
+    """Return True if the answer is a fallback/error message not worth caching.
+
+    Two checks:
+    1. Token length — answers under 15 words are too thin (e.g. "I couldn't find that.")
+    2. Phrase match — explicit fallback phrases from the agent's response_helpers.py
+    """
+    if not answer:
+        return True
+    words = answer.split()
+    if len(words) < _MIN_ANSWER_TOKENS:
+        return True
+    low = answer.lower()
+    return any(phrase in low for phrase in _HOLLOW_PHRASES)
+
+
 def set_cached_response(cache_key: tuple, payload: dict) -> None:
     """Store *payload* under *cache_key* with current timestamp.
 
     Payload is a copy — mutations to the caller's dict won't affect the cache.
     Evicts the oldest entry when the store is full.
+
+    Never caches:
+      - error responses
+      - empty answers
+      - hollow fallback answers (agent couldn't find data, retrying would fix it)
     """
     container_id, raw_query = cache_key
     norm_query = _normalize(raw_query)
     lookup_key = (container_id, norm_query)
 
-    # Don't cache error responses
-    if payload.get("error") or not payload.get("answer"):
+    answer = payload.get("answer", "")
+
+    # Don't cache error responses or hollow/fallback answers
+    if payload.get("error") or _is_hollow_answer(answer):
         return
 
     with _lock:

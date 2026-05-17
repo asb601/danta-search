@@ -39,11 +39,24 @@ from app.agent.tools.catalog import build_catalog_tools
 from app.agent.tools.column import build_column_tool
 from app.agent.tools.definition_lookup import build_definition_lookup_tool, load_schema_registry
 from app.agent.tools.sample import build_sample_tool
-from app.agent.tools.sql import build_sql_tools
+from app.agent.tools.relations import build_relations_tool
+from app.agent.tools.sql import build_sql_tools, _execute as _sql_execute
 from app.agent.tools.stats import build_stats_tool
 from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
 from app.retrieval.embeddings import build_search_text
+from app.services.semantic_policy import get_semantic_policy
+
+# Lazy import — planner is only loaded when first query arrives (avoids circular
+# import at module level; semantic_planner imports FileMetadata / FileRelationship).
+_semantic_plan = None
+
+def _get_planner():
+    global _semantic_plan
+    if _semantic_plan is None:
+        from app.services.semantic_planner import plan as _p
+        _semantic_plan = _p
+    return _semantic_plan
 
 # Per-request mutable stores (keyed by request_id)
 _request_stores: dict[str, dict] = {}
@@ -88,6 +101,116 @@ async def _polish_answer(raw: str) -> str:
     for cosmetic rewriting with marginal value. Returns raw unchanged.
     Kept as a no-op so callers don't break."""
     return raw
+
+
+# ── Semantic Planner fast path ─────────────────────────────────────────────────
+
+async def _try_planner(
+    query: str,
+    ctx: dict,
+    db,
+    pipeline_start: float,
+) -> dict | None:
+    """Attempt the semantic planner path. Returns result dict on success, None on fallback.
+
+    On success: SQL confidence passes the semantic policy threshold, executes via DataFusion,
+    and synthesized via one LLM call (mini). Skips the full LangGraph agent.
+    On fallback: returns None — caller continues with existing LangGraph path.
+
+    The fallback guarantee: this function NEVER raises. Any exception returns None.
+    """
+    try:
+        catalog = ctx["initial_state"]["catalog"]
+        connection_string = ctx["initial_state"]["connection_string"]
+        container_name = ctx["initial_state"]["container_name"]
+
+        planner = _get_planner()
+        ep = await planner(query, catalog, db, timeout_seconds=2.5)
+
+        # Fallback conditions
+        if ep.fallback_reason or not ep.sql or ep.confidence < get_semantic_policy().planner_fast_path_confidence:
+            chat_logger.info(
+                "planner_fallback_to_agent",
+                reason=ep.fallback_reason or "low_confidence",
+                confidence=round(ep.confidence, 2),
+                planning_ms=ep.planning_ms,
+            )
+            return None
+
+        # ── Execute the planner SQL ───────────────────────────────────────────
+        import asyncio as _asyncio
+        chat_logger.info(
+            "planner_executing",
+            sql_preview=ep.sql[:300],
+            confidence=round(ep.confidence, 2),
+            files=len(ep.files),
+            joins=len(ep.joins),
+        )
+        loop = _asyncio.get_event_loop()
+        rows, total = await loop.run_in_executor(
+            None, lambda: _sql_execute(ep.sql, connection_string, container_name, max_rows=100)
+        )
+
+        if not rows and total == 0:
+            # Planner generated valid SQL but data returned 0 rows — let agent try
+            chat_logger.info("planner_zero_rows_fallback", sql_preview=ep.sql[:200])
+            return None
+
+        # ── Synthesize response with one mini LLM call ───────────────────────
+        import json as _json
+        data_preview = _json.dumps(rows[:25], default=str)
+        synth_prompt = (
+            f"The user asked: {query}\n\n"
+            f"Query returned {total} row(s) (showing first {min(len(rows), 25)}):\n"
+            f"{data_preview}\n\n"
+            "Write a concise, precise analytical response. Include key totals, "
+            "top values, and observations. Use numbers. Be direct."
+        )
+        llm_resp = await get_llm_mini().ainvoke([
+            SystemMessage(content=(
+                "You are an enterprise ERP data analyst. Answer the user's question "
+                "based ONLY on the data provided. Be specific with numbers."
+            )),
+            HumanMessage(content=synth_prompt),
+        ])
+        answer = llm_resp.content if hasattr(llm_resp, "content") else str(llm_resp)
+
+        total_ms = round((time.perf_counter() - pipeline_start) * 1000, 2)
+        chat_logger.info(
+            "planner_path_complete",
+            total_ms=total_ms,
+            rows=len(rows),
+            planning_ms=ep.planning_ms,
+            route="planner",
+        )
+        pipeline_logger.info(
+            "final_answer",
+            query=query,
+            answer=answer,
+            row_count=len(rows),
+            tool_calls=0,
+            route="planner",
+            total_duration_ms=total_ms,
+        )
+
+        chart = infer_chart(answer, rows)
+        return {
+            "answer": answer,
+            "data": rows,
+            "chart": chart,
+            "route": "planner",
+            "row_count": total,
+            "files_used": [f.blob_path for f in ep.files if f.blob_path],
+            "tool_calls": 0,
+        }
+
+    except Exception as exc:
+        chat_logger.warning(
+            "planner_path_error",
+            error=str(exc)[:300],
+            fallback="agent",
+        )
+        return None
 
 # How many files to surface in the prompt shortlist.
 # Reduced from 12 → 7 to cut ~2K tokens of fat per turn. The remaining files
@@ -422,6 +545,7 @@ async def _build_agent_context(
     # lookup_field_definition — standalone tool for explicit semantic lookups.
     # Uses the same pre-loaded dict as inspect_column — zero extra SQL calls.
     all_tools.extend(build_definition_lookup_tool(field_definitions))
+    all_tools.extend(build_relations_tool(db, full_catalog))
     all_tools.extend(build_stats_tool(store))
     # inspect_data_format previews rows. Same full-catalog binding as
     # inspect_column; cached sample_rows for shortlist files, SQL probe
@@ -512,6 +636,14 @@ async def run_agent_query(
         }
     if not ctx:
         return {"answer": _NO_FILES_MSG, "data": [], "chart": None}
+
+    # ── Semantic Planner fast path ────────────────────────────────────────────
+    # For deterministic structured queries (aggregations, time-filtered analytics),
+    # the planner resolves join paths from the ontology layer and generates SQL
+    # directly — bypassing the full LangGraph agent. Falls back automatically.
+    planner_result = await _try_planner(query, ctx, db, pipeline_start)
+    if planner_result:
+        return planner_result
 
     graph = ctx["graph"]
     initial_state = ctx["initial_state"]
@@ -641,6 +773,18 @@ async def run_agent_query_stream(
         "retrieved_files": ctx["catalog_len"],
         "total_files": ctx["total_files"],
     }
+
+    # ── Semantic Planner fast path (streaming) ────────────────────────────────
+    # Try the planner before spinning up the LangGraph agent. If it produces a
+    # high-confidence plan, we execute + synthesize without any agent tool calls.
+    yield {"type": "thinking", "tool": "semantic_planner"}
+    planner_result = await _try_planner(query, ctx, db, pipeline_start)
+    if planner_result:
+        # Stream the answer tokens then emit done
+        for ch in planner_result["answer"].split():
+            yield {"type": "token", "content": ch + " "}
+        yield {"type": "done", "payload": planner_result}
+        return
 
     graph = ctx["graph"]
     initial_state = ctx["initial_state"]

@@ -28,7 +28,9 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import queue as _stdlib_queue
 import re
+import threading
 import time
 
 import pyarrow as pa
@@ -92,6 +94,79 @@ def _silence_datafusion_noise():
 # Capped at 256 entries — evict oldest when full (simple FIFO sufficient here).
 _STORE_CACHE_MAX = 256
 _store_cache: dict[str, MicrosoftAzure] = {}
+
+# ── SessionContext pool ───────────────────────────────────────────────────────
+# Problem: creating SessionContext() registers ~150 UDFs and writes that many
+# lines to stderr (suppressed via _silence_datafusion_noise, but the fd-level
+# redirect has non-trivial overhead). At 100 concurrent queries, every request
+# pays this cost on the hot path.
+#
+# Solution: pre-warm a pool of blank (no tables registered) SessionContexts at
+# startup. Each query borrows one, registers its specific files on it, executes,
+# then discards that context (can't reuse a context with registered tables).
+# After discarding, a fresh blank context is returned to the pool in a background
+# thread — the replenishment cost (UDF registration) is off the critical path.
+#
+# Thread-safety: stdlib queue.Queue is fully thread-safe. The fd-level noise
+# suppressor (_silence_datafusion_noise) is serialized via _noise_lock so two
+# threads never compete for fds 1/2 simultaneously.
+_CTX_POOL_SIZE = 8
+_ctx_pool: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=_CTX_POOL_SIZE)
+_noise_lock = threading.Lock()  # serialize fd-level noise suppression
+
+
+def _new_blank_ctx() -> SessionContext:
+    """Create a blank SessionContext (UDFs registered) with noise suppressed.
+
+    Serialized via _noise_lock — never called from two threads simultaneously.
+    """
+    with _noise_lock:
+        with _silence_datafusion_noise():
+            return SessionContext()
+
+
+def warm_context_pool(n: int = _CTX_POOL_SIZE) -> None:
+    """Pre-warm the context pool. Call once at application startup.
+
+    Pays the UDF-registration cost upfront so the first N concurrent
+    queries borrow a ready context without blocking on fd redirects.
+    """
+    warmed = 0
+    for _ in range(n):
+        try:
+            ctx = _new_blank_ctx()
+            _ctx_pool.put_nowait(ctx)
+            warmed += 1
+        except _stdlib_queue.Full:
+            break
+    chat_logger.info("datafusion_pool_warmed", contexts=warmed)
+
+
+def _borrow_ctx() -> SessionContext:
+    """Borrow a blank context from the pool (non-blocking).
+
+    If the pool is empty (all slots borrowed by concurrent queries),
+    creates a new context inline — guaranteed to work at any concurrency.
+    """
+    try:
+        return _ctx_pool.get_nowait()
+    except _stdlib_queue.Empty:
+        # Pool exhausted — create inline (caller pays UDF cost this time)
+        return _new_blank_ctx()
+
+
+def _replenish_pool() -> None:
+    """Create a fresh blank context and put it back in the pool.
+
+    Runs in a daemon thread started by execute_query_sync after each query,
+    so the replenishment cost never blocks the caller.
+    """
+    try:
+        ctx = _new_blank_ctx()
+        _ctx_pool.put_nowait(ctx)
+    except (_stdlib_queue.Full, Exception):
+        pass  # pool already full or context creation failed — not fatal
+
 
 # ── SQL patterns ──────────────────────────────────────────────────────────────
 # Matches read_parquet('az://...') and read_csv_auto('az://...') with any
@@ -246,29 +321,31 @@ def execute_query_sync(
     rewritten_sql, paths = _rewrite_sql(sql)
 
     try:
-        with _silence_datafusion_noise():
-            # ── Fresh SessionContext per request — ZERO shared state ──────────
-            ctx = SessionContext()
+        # ── Borrow a pre-warmed blank context from the pool ────────────────────
+        # Borrowed context has UDFs already registered — no fd suppression needed.
+        # If pool is empty (high concurrency), _borrow_ctx creates one inline.
+        ctx = _borrow_ctx()
 
-            # ── Register Azure object store once per context ──────────────────
-            store = _get_object_store(connection_string, resolved_container)
-            ctx.register_object_store(f"az://{resolved_container}/", store)
+        # ── Register Azure object store on this context ───────────────────────
+        store = _get_object_store(connection_string, resolved_container)
+        ctx.register_object_store(f"az://{resolved_container}/", store)
 
-            # ── Register each file as a named table ───────────────────────────
-            for i, path in enumerate(paths):
-                alias = f"t{i}"
-                if path.lower().endswith(".parquet"):
-                    ctx.register_parquet(alias, path)
-                else:
-                    # CSV fallback — DataFusion infers schema
-                    ctx.register_csv(alias, path, has_header=True)
+        # ── Register each file as a named table ───────────────────────────────
+        for i, path in enumerate(paths):
+            alias = f"t{i}"
+            if path.lower().endswith(".parquet"):
+                ctx.register_parquet(alias, path)
+            else:
+                ctx.register_csv(alias, path, has_header=True)
 
-        # Silence scope ends here — query execution stderr is NOT suppressed
-        # so genuine DataFusion error messages survive.
-        # ── Execute SQL ───────────────────────────────────────────────────
+        # ── Execute SQL ───────────────────────────────────────────────────────
         t_exec = time.perf_counter()
         result_batches = ctx.sql(rewritten_sql).collect()
         exec_ms = _ms(t_exec)
+
+        # ctx now has registered tables — cannot return to pool.
+        # Start a daemon thread to create a fresh blank context for the pool.
+        threading.Thread(target=_replenish_pool, daemon=True).start()
 
         # ── Convert Arrow RecordBatches → Python dicts ────────────────────────
         t_conv = time.perf_counter()

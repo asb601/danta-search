@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import async_session, get_db
 from app.core.logger import upload_logger, blob_logger, db_logger, ingest_logger
 from app.dependencies import get_current_user, require_admin, require_developer
-from app.services.ingestion_service import ingest_file
+from app.worker.ingest_tasks import run_ingest_pipeline
 from app.models.background_job import BackgroundJob
 from app.models.container import ContainerConfig
 from app.models.file import File
@@ -243,26 +243,14 @@ async def confirm_upload(
 
     upload_logger.info("confirm_complete", file_id=body.file_id, filename=body.filename, duration_ms=round((time.perf_counter() - start) * 1000, 2))
 
-    # Auto-ingest CSV/TXT files in the background
+    # Auto-ingest CSV/TXT files — dispatched to a Celery worker process.
+    # Returns immediately; the worker runs preprocess + DuckDB + AI + parquet
+    # in isolation from this event loop.
     ext = (body.filename or "").rsplit(".", 1)[-1].lower()
     if ext in ("csv", "txt", "tsv"):
-        asyncio.create_task(_background_ingest(body.file_id))
+        run_ingest_pipeline.delay(body.file_id)
 
     return _file_to_out(db_file)
-
-
-async def _background_ingest(file_id: str) -> None:
-    """Run file ingestion in a background task with its own DB session."""
-    trace_id = f"ingest-{uuid.uuid4().hex[:12]}"
-    structlog.contextvars.clear_contextvars()
-    structlog.contextvars.bind_contextvars(trace_id=trace_id, pipeline="ingest", file_id=file_id)
-    try:
-        async with async_session() as db:
-            await ingest_file(file_id, db)
-    except Exception as exc:
-        ingest_logger.exception("background_ingest_crashed", error=str(exc)[:500])
-    finally:
-        structlog.contextvars.clear_contextvars()
 
 
 @router.get("/{file_id}/signed-url")

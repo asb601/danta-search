@@ -20,7 +20,16 @@ class FileRelationship(Base):
     file_a_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     file_b_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     shared_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    related_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The resolved typed semantic role that makes this join valid.
+    # Example: "custom:entity_key:business_entity".
+    # Without this, the planner cannot distinguish a real join key from a
+    # coincidental column name match (two files both having a column called "id").
+    semantic_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # How the role was resolved: "glossary" | "heuristic" | "llm"
+    role_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
+    value_overlap_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     join_type: Mapped[str] = mapped_column(String(20), default="LEFT JOIN")
 
     __table_args__ = (

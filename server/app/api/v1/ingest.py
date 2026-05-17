@@ -1,41 +1,25 @@
 from __future__ import annotations
 
-import uuid
-
-import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.chat_common import IngestRequest
-from app.core.database import async_session, get_db
+from app.core.database import get_db
 from app.core.logger import ingest_logger
-from app.dependencies import get_current_user, require_admin, require_developer
+from app.dependencies import get_current_user, require_developer  # noqa: F401 (get_current_user used in ingest_status)
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
 from app.models.user import User
-from app.services.ingestion_service import ingest_file
+from app.worker.ingest_tasks import run_ingest_pipeline
 
 router = APIRouter()
-
-
-async def _run_ingest(file_id: str) -> None:
-    """Run ingestion in a background task with its own DB session."""
-    trace_id = f"ingest-{uuid.uuid4().hex[:12]}"
-    structlog.contextvars.clear_contextvars()
-    structlog.contextvars.bind_contextvars(trace_id=trace_id, pipeline="ingest", file_id=file_id)
-    try:
-        async with async_session() as db:
-            await ingest_file(file_id, db)
-    finally:
-        structlog.contextvars.clear_contextvars()
 
 
 @router.post("/ingest")
 async def ingest_files(
     body: IngestRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_developer),
 ):
@@ -61,11 +45,23 @@ async def ingest_files(
     if not valid_ids:
         raise HTTPException(status_code=400, detail="No valid CSV/TXT files found.")
 
+    # Dispatch each file to a Celery worker — isolated from the API event loop.
+    # The worker runs preprocessing + DuckDB sample + AI description + parquet
+    # conversion in a separate process. API returns immediately.
+    task_ids: list[str] = []
     for fid in valid_ids:
-        background_tasks.add_task(_run_ingest, fid)
+        result = run_ingest_pipeline.delay(fid)
+        task_ids.append(result.id)
 
-    ingest_logger.info("ingest_queued", admin_id=admin.id, file_count=len(valid_ids), file_ids=valid_ids)
-    return {"queued": len(valid_ids), "file_ids": valid_ids}
+    ingest_logger.info(
+        "ingest_queued",
+        admin_id=admin.id,
+        file_count=len(valid_ids),
+        file_ids=valid_ids,
+        task_ids=task_ids,
+        backend="celery",
+    )
+    return {"queued": len(valid_ids), "file_ids": valid_ids, "task_ids": task_ids}
 
 
 @router.get("/ingest-status/{file_id}")

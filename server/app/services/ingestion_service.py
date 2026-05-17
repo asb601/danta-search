@@ -184,6 +184,8 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
 
     # Tracked so we can cancel on error
     preprocess_task: "asyncio.Task | None" = None
+    # Holds the latest PreprocessResult regardless of which code path ran it
+    _prep_result = None
 
     try:
         file = await db.get(File, file_id)
@@ -235,7 +237,9 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                         blob_path=raw_blob_path, file_name=file.name, file_id=file_id,
                         connection_string=container.connection_string,
                         container_name=container.container_name,
+                        cleaning_config=container.cleaning_config,
                     )
+                    _prep_result = prep
                     file.blob_path = prep.clean_blob_path
                     file.is_preprocessed = True
                     await db.commit()
@@ -279,6 +283,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                             blob_path=raw_blob_path, file_name=file.name, file_id=file_id,
                             connection_string=container.connection_string,
                             container_name=container.container_name,
+                            cleaning_config=container.cleaning_config,
                         )
                     )
                 else:
@@ -292,7 +297,9 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                             blob_path=raw_blob_path, file_name=file.name, file_id=file_id,
                             connection_string=container.connection_string,
                             container_name=container.container_name,
+                            cleaning_config=container.cleaning_config,
                         )
+                        _prep_result = prep
                         file.blob_path = prep.clean_blob_path
                         file.is_preprocessed = True
                         await db.commit()
@@ -476,6 +483,32 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                            action="created" if is_new else "updated",
                            duration_ms=_ms(step_start))
 
+        # ── Step 3b/6 · Resolve column semantic roles (ontology layer) ────────
+        # Paid once at ingest time. Stored forever. Zero LLM cost at query time.
+        # Order: Tier 0 (glossary) → Tier 1 (heuristic) → Tier 2 (LLM fallback)
+        step_start = time.perf_counter()
+        ingest_logger.info("step", step="3b/6", name="resolve_roles", status="started")
+        try:
+            from app.services.column_role_resolver import resolve_column_roles  # noqa: PLC0415
+            col_roles, role_src = await resolve_column_roles(
+                columns_info=sample["columns_info"],
+                filename=file.name,
+                glossary=column_glossary or None,
+            )
+            metadata.column_semantic_roles = col_roles or None
+            metadata.role_source = role_src
+            await db.commit()
+            ingest_logger.info("step", step="3b/6", name="resolve_roles", status="done",
+                               resolved=len(col_roles),
+                               source=role_src,
+                               duration_ms=_ms(step_start))
+        except Exception as role_exc:
+            # Non-fatal — file remains fully usable, relationships just won't be
+            # role-indexed for this file until re-ingested with a better glossary.
+            ingest_logger.warning("step", step="3b/6", name="resolve_roles", status="failed",
+                                  error=str(role_exc)[:200],
+                                  duration_ms=_ms(step_start))
+
         # ── Step 4/6 · Build search text + embed ─────────────────────────────
         step_start = time.perf_counter()
         ingest_logger.info("step", step="4/6", name="embed_metadata", status="started")
@@ -485,6 +518,15 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
             metadata.search_text = search_text
             metadata.description_embedding = await embed_text(search_text)
             await db.commit()
+            try:
+                from app.retrieval.opensearch_indexer import index_metadata_document  # noqa: PLC0415
+                await index_metadata_document(metadata, db)
+            except Exception as os_exc:
+                ingest_logger.warning(
+                    "opensearch_index_step_failed",
+                    file_id=file_id,
+                    error=str(os_exc)[:300],
+                )
             ingest_logger.info("step", step="4/6", name="embed_metadata", status="done",
                                search_text_len=len(search_text),
                                has_embedding=metadata.description_embedding is not None
@@ -509,6 +551,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
             try:
                 prep = await preprocess_task
                 preprocess_task = None
+                _prep_result = prep
                 clean_blob_path = prep.clean_blob_path
                 file.blob_path = clean_blob_path
                 file.is_preprocessed = True
@@ -545,6 +588,26 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
             ingest_logger.info("step", step="5/5", name="compute_analytics", status="done",
                                row_count=analytics.row_count,
                                duration_ms=_ms(step_start))
+            # Persist cleaning audit data from the preprocessing step.
+            # Stored on the FileAnalytics row so ops can audit dropped rows without
+            # reprocessing the file.
+            if _prep_result is not None:
+                analytics.quarantine_count  = _prep_result.quarantine_count
+                analytics.quarantine_sample = _prep_result.quarantine_sample
+                analytics.cleaning_audit    = _prep_result.cleaning_audit
+                async with _async_session() as qa_db:
+                    qa_row = await qa_db.get(type(analytics), analytics.id)
+                    if qa_row:
+                        qa_row.quarantine_count  = _prep_result.quarantine_count
+                        qa_row.quarantine_sample = _prep_result.quarantine_sample
+                        qa_row.cleaning_audit    = _prep_result.cleaning_audit
+                        await qa_db.commit()
+                ingest_logger.info(
+                    "step", step="5/5", name="cleaning_audit",
+                    quarantine_count=_prep_result.quarantine_count,
+                    sample_size=len(_prep_result.quarantine_sample),
+                    cleaning_audit=_prep_result.cleaning_audit,
+                )
             # Trigger parquet conversion whenever the parquet file is missing —
             # regardless of whether the CSV was already preprocessed.  This covers:
             #   • First ingest of a new file
@@ -617,6 +680,30 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
         except Exception as analytics_exc:
             ingest_logger.warning("step", step="5/5", name="compute_analytics", status="failed",
                                   error=str(analytics_exc)[:300],
+                                  duration_ms=_ms(step_start))
+
+        # ── Step 6/6 · Relationship detection ────────────────────────────────
+        # Runs AFTER role resolution (step 3b) and analytics (step 5) so
+        # column_semantic_roles is committed before the GIN query fires.
+        step_start = time.perf_counter()
+        ingest_logger.info("step", step="6/6", name="detect_relationships", status="started")
+        try:
+            from app.services.relationship_detector import detect_relationships  # noqa: PLC0415
+            async with _async_session() as rel_db:
+                n_rels = await detect_relationships(
+                    file_id=file_id,
+                    blob_path=clean_blob_path,
+                    columns_info=sample["columns_info"],
+                    db=rel_db,
+                )
+            ingest_logger.info("step", step="6/6", name="detect_relationships",
+                               status="done",
+                               relationships_created=n_rels,
+                               duration_ms=_ms(step_start))
+        except Exception as rel_exc:
+            ingest_logger.warning("step", step="6/6", name="detect_relationships",
+                                  status="failed",
+                                  error=str(rel_exc)[:300],
                                   duration_ms=_ms(step_start))
 
         ingest_logger.info("chain_end", outcome="success",

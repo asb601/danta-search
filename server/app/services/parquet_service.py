@@ -404,8 +404,9 @@ def _run_conversion(
                     batch.schema,
                     compression="zstd",
                     compression_level=3,
-                    write_statistics=True,
-                    use_dictionary=True,
+                    write_statistics=True,    # row-group min/max → DataFusion predicate pushdown
+                    write_page_index=True,    # page-level stats → finer pruning than row-group
+                    use_dictionary=True,      # dictionary encoding for low-cardinality string cols
                 )
             parquet_writer.write_batch(batch)
             total_rows += len(batch)

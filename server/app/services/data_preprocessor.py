@@ -13,13 +13,14 @@ CSV / text  ZERO  — probe bytes via HTTP range   one chunk  (~200 MB)
             write clean blocks directly back      file size
             to Azure. No local file ever written.
 
-Excel       ONE temp file (the .xlsx download). Openpyxl needs a seekable
-            file. Rows are streamed via openpyxl read_only=True and written
-            directly to Azure block blob — no second local copy of clean CSV.
+Excel       ONE temp file (the workbook download). Openpyxl/xlrd need a
+            seekable file. Excel jobs are single-flight per worker process and
+            fail before download if tmp free space is below the safety margin.
+            Rows are streamed to Azure block blob — no second local clean file.
 
 Memory model
 ────────────
-Large files (> 50 MB) are streamed 100 000 rows at a time. Small files
+Large files (> 50 MB) are streamed 50 000 rows at a time. Small files
 (<= 50 MB) are kept in RAM to allow exact-duplicate removal.
 
 Cleaning stages (per-chunk for large files, once for small)
@@ -39,7 +40,7 @@ Cleaning stages (per-chunk for large files, once for small)
 
 Output: clean UTF-8 CSV.
         - CSV / text  →  same blob path, overwritten in place (Azure atomic block commit).
-        - Excel       →  sibling .csv blob next to the .xlsx (Excel can't be overwritten).
+    - Excel       →  sibling .cleaned-<file_id>.csv blob next to the workbook.
 """
 from __future__ import annotations
 
@@ -49,6 +50,7 @@ import csv
 import io
 import os
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -60,6 +62,7 @@ import pandas as pd
 from azure.storage.blob import BlobClient, BlobServiceClient
 
 from app.core.logger import ingest_logger
+from app.services.preprocessor.cleaning_rules import CleaningProfile, get_cleaning_profile
 
 
 # ── Tunable constants ─────────────────────────────────────────────────────────
@@ -70,6 +73,8 @@ HEADER_SCAN_ROWS        = 15            # max rows to scan for the real header
 TYPE_DETECT_SAMPLE_ROWS = 1_000         # rows used for column-type detection
 PROBE_BYTES             = 256 * 1024    # bytes range-read from Azure for probing
 BLOCK_SIZE              = 4 * 1024 * 1024  # 4 MB per Azure block blob block
+MIN_EXCEL_TMP_FREE_BYTES = 2 * 1024 * 1024 * 1024  # keep 2 GB free after download
+EXCEL_TMP_FREE_MULTIPLIER = 2.0  # require free tmp space >= max(2 GB, file_size * 2)
 
 
 # ── Supported file-type groups ────────────────────────────────────────────────
@@ -150,19 +155,18 @@ _MULTI_SPACE_RE = re.compile(r" {2,}")
 # ── Concurrency guard ─────────────────────────────────────────────────────────
 # Preprocessing is CPU + I/O heavy. On an 8 GB VM, allow at most 2 concurrent
 # preprocessing jobs so pandas string ops don't saturate all cores / exhaust RAM.
-_PREPROCESS_SEMAPHORE: asyncio.Semaphore | None = None  # lazily initialised
+_PREPROCESS_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(2)
+_EXCEL_PREPROCESS_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(1)
 
 
 def _get_preprocess_semaphore() -> asyncio.Semaphore:
-    """Return the process-wide semaphore, creating it on first call.
-
-    Must be called inside an async context so the semaphore is bound to the
-    correct event loop.
-    """
-    global _PREPROCESS_SEMAPHORE
-    if _PREPROCESS_SEMAPHORE is None:
-        _PREPROCESS_SEMAPHORE = asyncio.Semaphore(2)
+    """Return the process-wide semaphore used to cap preprocessing RAM."""
     return _PREPROCESS_SEMAPHORE
+
+
+def _get_excel_preprocess_semaphore() -> asyncio.Semaphore:
+    """Return the process-wide semaphore used to cap local Excel temp disk."""
+    return _EXCEL_PREPROCESS_SEMAPHORE
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -179,6 +183,13 @@ class PreprocessResult:
     file_type:       str  = "csv"
     used_streaming:  bool = False
     already_clean:   bool = False  # True = probe showed no changes needed, full scan skipped
+    # ── Cleaning audit — populated by the pluggable cleaning-rule registry ──
+    # Total rows removed during garbage/empty/separator detection.
+    quarantine_count:  int  = 0
+    # First MAX_QUARANTINE_SAMPLE dropped rows with their reason — stored in
+    # FileAnalytics.quarantine_sample for ops audit without reprocessing the file.
+    quarantine_sample: list = field(default_factory=list)
+    cleaning_audit: dict = field(default_factory=dict)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -354,9 +365,15 @@ async def preprocess_file(
     file_id:           str,
     connection_string: str,
     container_name:    str,
+    cleaning_config:   dict | None = None,
 ) -> PreprocessResult:
     """
     Clean a raw file and write clean CSV output back to Azure Blob Storage.
+
+    cleaning_config: optional dict from ContainerConfig.cleaning_config.  When
+        supplied, per-container null patterns and garbage row patterns are merged
+        with the built-in registry — no code change or redeploy needed.
+        Schema: {"extra_null_patterns": [...], "extra_garbage_patterns": [...]}
 
     Disk usage:
         CSV / text : ZERO disk.  Probe bytes via HTTP range-read (256 KB),
@@ -396,6 +413,12 @@ async def preprocess_file(
     ingest_logger.info("preprocess", status="probed",
                        size_mb=round(size_mb, 1), streaming=is_large)
 
+    # ── Build CleaningProfile from built-in rules + per-container extras ─────────────
+    cfg             = cleaning_config or {}
+    cleaning_profile = get_cleaning_profile(
+        extra_null_patterns=cfg.get("extra_null_patterns", []),
+        extra_garbage_re_patterns=cfg.get("extra_garbage_patterns", []),
+    )
     # ── Output blob path: NEW INDUSTRY DESIGN ─────────────────────────────────
     # CSV / text → overwrite the SAME blob path in place.
     #              Azure block blob commit_block_list is atomic — readers continue
@@ -405,8 +428,9 @@ async def preprocess_file(
     #              overwritten with CSV; different format).  blob_path will
     #              be updated by the caller to point to the new .csv.
     if ext in EXCEL_EXTS:
-        # report.xlsx → report.csv  (same folder)
-        clean_blob_path = blob_path[: -len(ext)] + ".csv"
+        # report.xlsx → report.cleaned-<file_id>.csv (same folder)
+        # Never write to report.csv: that may be a real user-uploaded file.
+        clean_blob_path = blob_path[: -len(ext)] + f".cleaned-{file_id[:8]}.csv"
     else:
         # billing.csv → billing.csv  (overwritten in place, atomic)
         clean_blob_path = blob_path
@@ -417,28 +441,38 @@ async def preprocess_file(
     _sem = _get_preprocess_semaphore()
     async with _sem:
         if ext in EXCEL_EXTS:
-            # Excel still needs one local temp file (openpyxl requires seekable I/O)
-            with tempfile.TemporaryDirectory() as tmpdir:
-                raw_path = os.path.join(tmpdir, f"raw{ext}")
-                await asyncio.to_thread(
-                    _download_blob_to_file,
-                    src_bc, raw_path,
-                )
-                result = await asyncio.to_thread(
-                    _process_excel_to_blob, raw_path, block_writer, ext, is_large, warns,
-                )
+            # Excel still needs one local temp file because openpyxl/xlrd need
+            # seekable input. Cap Excel concurrency separately and verify tmp
+            # space before download so archived workbooks cannot fill the VM disk.
+            _excel_sem = _get_excel_preprocess_semaphore()
+            async with _excel_sem:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    _ensure_excel_tmp_capacity(tmpdir, file_size)
+                    raw_path = os.path.join(tmpdir, f"raw{ext}")
+                    await asyncio.to_thread(
+                        _download_blob_to_file,
+                        src_bc, raw_path,
+                    )
+                    result = await asyncio.to_thread(
+                        _process_excel_to_blob, raw_path, block_writer, ext, is_large, warns,
+                        cleaning_profile,
+                    )
+                    result["temp_disk_bytes"] = file_size
             # tmpdir (and the only temp file) is deleted here; block_writer still in RAM
         else:
             # CSV/text: fully streaming, zero disk
             result = await asyncio.to_thread(
                 _process_text_stream,
                 src_bc, block_writer, ext, file_size, is_large, warns,
+                cleaning_profile,
             )
 
     ingest_logger.info("preprocess", status="cleaned",
                        original_rows=result["original_rows"],
                        clean_rows=result["clean_rows"],
                        rows_dropped=result["original_rows"] - result["clean_rows"],
+                       quarantine_count=result.get("quarantine_count", 0),
+                       cleaning_audit=result.get("cleaning_audit", {}),
                        streaming=is_large,
                        already_clean=result.get("already_clean", False))
 
@@ -458,6 +492,15 @@ async def preprocess_file(
         file_type=file_type,
         used_streaming=is_large,
         already_clean=already_clean,
+        quarantine_count=result.get("quarantine_count", 0),
+        quarantine_sample=result.get("quarantine_sample", []),
+        cleaning_audit={
+            **(result.get("cleaning_audit") or {}),
+            "file_type": file_type,
+            "used_streaming": is_large,
+            "temp_disk_bytes": result.get("temp_disk_bytes", 0),
+            "clean_blob_path": clean_blob_path,
+        },
     )
 
 
@@ -483,6 +526,21 @@ def _download_blob_to_file(bc: BlobClient, dest: str) -> None:
         bc.download_blob().readinto(fh)
 
 
+def _ensure_excel_tmp_capacity(tmpdir: str, file_size: int) -> None:
+    """Fail before downloading Excel if tmp disk cannot safely hold the file."""
+    usage = shutil.disk_usage(tmpdir)
+    required_free = max(
+        MIN_EXCEL_TMP_FREE_BYTES,
+        int(file_size * EXCEL_TMP_FREE_MULTIPLIER),
+    )
+    if usage.free < required_free:
+        raise RuntimeError(
+            "Insufficient temporary disk for Excel preprocessing: "
+            f"free={usage.free} bytes, required={required_free} bytes, "
+            f"file_size={file_size} bytes"
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CSV / text — fully streaming, zero disk
 # ══════════════════════════════════════════════════════════════════════════════
@@ -494,6 +552,7 @@ def _process_text_stream(
     file_size:    int,
     is_large:     bool,
     warns:        list[str],
+    profile:      CleaningProfile | None = None,
 ) -> dict:
     """
     CSV/text processing: Azure -> RAM chunks -> Azure block blob.
@@ -575,30 +634,67 @@ def _process_text_stream(
                     "cols_renamed":  cols_renamed,
                     "encoding":      encoding,
                     "already_clean": True,
+                    "cleaning_audit": {
+                        "header_row_idx": header_row_idx,
+                        "delimiter": delimiter,
+                        "dedup_skipped": False,
+                        "rewrite_skipped": True,
+                    },
                 }
 
     # ── Pass 2: full streaming read ────────────────────────────────────────────
+    _active_profile = profile if profile is not None else get_cleaning_profile()
+
+    # Count malformed CSV rows (wrong column count) via on_bad_lines callable
+    # (pandas >= 1.3) so we have an audit trail without a second file pass.
+    _malformed_count: list[int] = [0]
+    _malformed_sample: list[dict] = []
+
+    def _handle_bad_line(bad_line: list) -> None:  # type: ignore[return]
+        _malformed_count[0] += 1
+        if len(_malformed_sample) < 5:
+            _malformed_sample.append({
+                "reason": "malformed_csv_row",
+                "row": {"_raw": ",".join(str(x) for x in bad_line[:20])},
+            })
+        return None  # skip the row
+
     downloader = src_bc.download_blob()
     raw_stream = io.BufferedReader(_AzureRawStream(downloader), buffer_size=8 * 1024 * 1024)
 
-    reader = pd.read_csv(
-        raw_stream, sep=delimiter, header=None, dtype=str, names=headers,
-        encoding=encoding, encoding_errors="replace",
-        keep_default_na=False, skiprows=skip_rows,
-        chunksize=CHUNK_ROWS, on_bad_lines="skip",
-    )
+    try:
+        reader = pd.read_csv(
+            raw_stream, sep=delimiter, header=None, dtype=str, names=headers,
+            encoding=encoding, encoding_errors="replace",
+            keep_default_na=False, skiprows=skip_rows,
+            chunksize=CHUNK_ROWS, on_bad_lines=_handle_bad_line,
+        )
+    except TypeError:
+        # pandas < 1.3 — on_bad_lines callable not supported; fall back silently
+        raw_stream.seek(0)
+        reader = pd.read_csv(
+            raw_stream, sep=delimiter, header=None, dtype=str, names=headers,
+            encoding=encoding, encoding_errors="replace",
+            keep_default_na=False, skiprows=skip_rows,
+            chunksize=CHUNK_ROWS, on_bad_lines="skip",
+        )
 
     # Write CSV header row as the first block
     header_bytes = (",".join(headers) + "\n").encode("utf-8")
     block_writer.write(header_bytes)
 
-    original_rows = 0
-    clean_rows    = 0
+    original_rows     = 0
+    clean_rows        = 0
+    total_quarantine  = 0
+    quarantine_sample: list[dict] = []
     small_chunks: list[pd.DataFrame] = []
 
     for chunk in reader:
         original_rows += len(chunk)
-        chunk = _clean_chunk(chunk, converters)
+        chunk, q_rows  = _clean_chunk(chunk, converters, _active_profile)
+        total_quarantine += len(q_rows)
+        if len(quarantine_sample) < 20:
+            quarantine_sample.extend(q_rows[:20 - len(quarantine_sample)])
 
         if is_large:
             buf = io.StringIO()
@@ -620,30 +716,57 @@ def _process_text_stream(
         full.to_csv(buf, index=False, header=False)
         block_writer.write(buf.getvalue().encode("utf-8"))
         clean_rows = len(full)
+    elif is_large:
+        warns.append("Deduplication skipped for large file to keep memory bounded")
 
     block_writer.commit()
 
+    # Merge malformed CSV rows into the quarantine audit
+    if _malformed_count[0]:
+        warns.append(f"Skipped {_malformed_count[0]} malformed CSV row(s) (wrong column count)")
+        total_quarantine += _malformed_count[0]
+        if len(quarantine_sample) < 20:
+            quarantine_sample.extend(_malformed_sample[:20 - len(quarantine_sample)])
+
     return {
-        "original_rows": original_rows,
-        "clean_rows":    clean_rows,
-        "cols_renamed":  cols_renamed,
-        "encoding":      encoding,
-        "already_clean": False,
+        "original_rows":     original_rows,
+        "clean_rows":        clean_rows,
+        "cols_renamed":      cols_renamed,
+        "encoding":          encoding,
+        "already_clean":     False,
+        "quarantine_count":  total_quarantine,
+        "quarantine_sample": quarantine_sample,
+        "cleaning_audit": {
+            "header_row_idx": header_row_idx,
+            "delimiter": delimiter,
+            "dedup_skipped": is_large,
+            "rewrite_skipped": False,
+        },
     }
 
 
-def _clean_chunk(chunk: pd.DataFrame, converters: dict) -> pd.DataFrame:
-    """Apply all per-row / per-cell cleaning to a single chunk."""
-    chunk = chunk.apply(_clean_str_series).apply(_nullify_series)
+def _clean_chunk(
+    chunk: pd.DataFrame,
+    converters: dict,
+    profile: CleaningProfile,
+) -> tuple[pd.DataFrame, list[dict]]:
+    """Apply all per-row / per-cell cleaning to a single chunk.
+
+    Returns (clean_chunk, quarantine_sample).
+    quarantine_sample: list of dicts [{reason, row}] for dropped rows.
+    """
+    # Cell-level: string normalisation then null-pattern replacement via registry
+    chunk = chunk.apply(_clean_str_series).apply(profile.nullify_series)
     chunk = chunk.dropna(how="all")
-    chunk, _ = _drop_garbage_rows(chunk)
+    # Row-level: garbage / empty / separator detection via pluggable registry
+    chunk, quarantine = profile.clean_rows(chunk)
     for col, fn in converters.items():
         if col in chunk.columns:
             try:
                 chunk[col] = chunk[col].apply(fn)
             except Exception:
                 pass
-    return chunk.fillna("")
+    return chunk.fillna(""), quarantine
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -656,10 +779,11 @@ def _process_excel_to_blob(
     ext:          str,
     is_large:     bool,
     warns:        list[str],
+    profile:      CleaningProfile | None = None,
 ) -> dict:
     if ext in (".xlsx", ".xlsm"):
-        return _process_xlsx_to_blob(raw_path, block_writer, is_large, warns)
-    return _process_xls_to_blob(raw_path, block_writer, warns)
+        return _process_xlsx_to_blob(raw_path, block_writer, is_large, warns, profile)
+    return _process_xls_to_blob(raw_path, block_writer, warns, profile)
 
 
 def _process_xlsx_to_blob(
@@ -667,6 +791,7 @@ def _process_xlsx_to_blob(
     block_writer: _BlockBlobWriter,
     is_large:     bool,
     warns:        list[str],
+    profile:      CleaningProfile | None = None,
 ) -> dict:
     """
     Stream .xlsx via openpyxl read_only=True, write directly to Azure block blob.
@@ -724,7 +849,13 @@ def _process_xlsx_to_blob(
         warns.append("Excel file appears empty")
         block_writer.write(b"")
         block_writer.commit()
-        return {"original_rows": 0, "clean_rows": 0, "cols_renamed": {}, "encoding": "binary"}
+        return {
+            "original_rows": 0,
+            "clean_rows": 0,
+            "cols_renamed": {},
+            "encoding": "binary",
+            "cleaning_audit": {"empty_excel": True},
+        }
 
     head_df        = pd.DataFrame(head_buf).astype(str)
     head_df        = head_df.apply(_clean_str_series).apply(_nullify_series)
@@ -778,18 +909,25 @@ def _process_xlsx_to_blob(
     sample_df  = sample_df.apply(_clean_str_series).apply(_nullify_series)
     converters = _build_converters(sample_df, headers, warns)
 
+    _active_profile = profile if profile is not None else get_cleaning_profile()
+
     # Write header to block blob
     block_writer.write((",".join(headers) + "\n").encode("utf-8"))
 
-    original_rows = len(sample_rows)
-    clean_rows    = 0
+    original_rows    = len(sample_rows)
+    clean_rows       = 0
+    total_quarantine = 0
+    quarantine_sample: list[dict] = []
     small_chunks: list[pd.DataFrame] = []
 
-    def _make_chunk(rows: list[list[str]]) -> pd.DataFrame:
+    def _make_chunk(rows: list[list[str]]) -> tuple[pd.DataFrame, list[dict]]:
         df = pd.DataFrame(rows, columns=headers).astype(str)
-        return _clean_chunk(df, converters)
+        return _clean_chunk(df, converters, _active_profile)
 
-    sample_clean = _make_chunk(sample_rows)
+    sample_clean, q_rows = _make_chunk(sample_rows)
+    total_quarantine += len(q_rows)
+    if len(quarantine_sample) < 20:
+        quarantine_sample.extend(q_rows[:20 - len(quarantine_sample)])
     if is_large:
         buf = io.StringIO()
         sample_clean.to_csv(buf, index=False, header=False)
@@ -803,7 +941,10 @@ def _process_xlsx_to_blob(
         original_rows += 1
         batch.append(row)
         if len(batch) >= CHUNK_ROWS:
-            chunk = _make_chunk(batch)
+            chunk, q_rows = _make_chunk(batch)
+            total_quarantine += len(q_rows)
+            if len(quarantine_sample) < 20:
+                quarantine_sample.extend(q_rows[:20 - len(quarantine_sample)])
             if is_large:
                 buf = io.StringIO()
                 chunk.to_csv(buf, index=False, header=False)
@@ -814,7 +955,10 @@ def _process_xlsx_to_blob(
             batch = []
 
     if batch:
-        chunk = _make_chunk(batch)
+        chunk, q_rows = _make_chunk(batch)
+        total_quarantine += len(q_rows)
+        if len(quarantine_sample) < 20:
+            quarantine_sample.extend(q_rows[:20 - len(quarantine_sample)])
         if is_large:
             buf = io.StringIO()
             chunk.to_csv(buf, index=False, header=False)
@@ -835,15 +979,25 @@ def _process_xlsx_to_blob(
         full.to_csv(buf, index=False, header=False)
         block_writer.write(buf.getvalue().encode("utf-8"))
         clean_rows = len(full)
+    elif is_large:
+        warns.append("Deduplication skipped for large Excel file to keep memory bounded")
 
     block_writer.commit()
     wb2.close()
 
     return {
-        "original_rows": original_rows,
-        "clean_rows":    clean_rows,
-        "cols_renamed":  cols_renamed,
-        "encoding":      "binary",
+        "original_rows":     original_rows,
+        "clean_rows":        clean_rows,
+        "cols_renamed":      cols_renamed,
+        "encoding":          "binary",
+        "quarantine_count":  total_quarantine,
+        "quarantine_sample": quarantine_sample,
+        "cleaning_audit": {
+            "sheet": best_sheet_title,
+            "header_row_idx": header_row_idx,
+            "dedup_skipped": is_large,
+            "rewrite_skipped": False,
+        },
     }
 
 
@@ -851,6 +1005,7 @@ def _process_xls_to_blob(
     raw_path:     str,
     block_writer: _BlockBlobWriter,
     warns:        list[str],
+    profile:      CleaningProfile | None = None,
 ) -> dict:
     """
     .xls legacy format via xlrd + pandas.
@@ -862,14 +1017,27 @@ def _process_xls_to_blob(
     except ImportError:
         warns.append("xlrd not installed; .xls support unavailable")
         block_writer.commit()
-        return {"original_rows": 0, "clean_rows": 0, "cols_renamed": {}, "encoding": "binary"}
+        return {
+            "original_rows": 0,
+            "clean_rows": 0,
+            "cols_renamed": {},
+            "encoding": "binary",
+            "cleaning_audit": {"xls_read_failed": "xlrd_missing"},
+        }
     except Exception as ex:
         warns.append(f".xls read failed: {ex}")
         block_writer.commit()
-        return {"original_rows": 0, "clean_rows": 0, "cols_renamed": {}, "encoding": "binary"}
+        return {
+            "original_rows": 0,
+            "clean_rows": 0,
+            "cols_renamed": {},
+            "encoding": "binary",
+            "cleaning_audit": {"xls_read_failed": str(ex)[:300]},
+        }
 
     original_rows  = len(df)
-    df = df.astype(str).apply(_clean_str_series).apply(_nullify_series)
+    _active_profile = profile if profile is not None else get_cleaning_profile()
+    df = df.astype(str).apply(_clean_str_series).apply(_active_profile.nullify_series)
 
     header_row_idx = _find_header_row(df.iloc[:HEADER_SCAN_ROWS])
     raw_headers    = [
@@ -882,7 +1050,7 @@ def _process_xls_to_blob(
     ncols = len(df.columns)
     df.columns = headers[:ncols] + [f"col_{i}" for i in range(ncols - len(headers))]
     converters = _build_converters(df.iloc[:TYPE_DETECT_SAMPLE_ROWS], headers, warns)
-    df = _clean_chunk(df, converters)
+    df, q_rows = _clean_chunk(df, converters, _active_profile)
 
     before = len(df)
     df = df.drop_duplicates()
@@ -896,10 +1064,17 @@ def _process_xls_to_blob(
     block_writer.commit()
 
     return {
-        "original_rows": original_rows,
-        "clean_rows":    len(df),
-        "cols_renamed":  cols_renamed,
-        "encoding":      "binary",
+        "original_rows":     original_rows,
+        "clean_rows":        len(df),
+        "cols_renamed":      cols_renamed,
+        "encoding":          "binary",
+        "quarantine_count":  len(q_rows),
+        "quarantine_sample": q_rows,
+        "cleaning_audit": {
+            "header_row_idx": header_row_idx,
+            "dedup_skipped": False,
+            "rewrite_skipped": False,
+        },
     }
 
 

@@ -13,8 +13,9 @@ Pipeline stages
   Stage 6  vector_search    — HNSW cosine similarity (pgvector)
            (stages 4-6 run sequentially on the shared AsyncSession — SQLAlchemy
             async sessions do not support concurrent operations on one connection)
-  Stage 7  rrf_fuse         — Reciprocal Rank Fusion across all three rank lists
-  Stage 8  top-K            — return top_k FileMetadata rows (default 20)
+    Stage 7  graph_expand     — one-hop expansion through approved semantic joins
+    Stage 8  rrf_fuse         — Reciprocal Rank Fusion across all rank lists
+    Stage 9  top-K            — return top_k FileMetadata rows (default 20)
 
 Public API
 ----------
@@ -49,6 +50,8 @@ from app.models.file_metadata import FileMetadata
 from app.retrieval.bm25 import bm25_search
 from app.retrieval.embeddings_search import vector_search
 from app.retrieval.fuzzy import fuzzy_search
+from app.retrieval.graph_expand import graph_expand
+from app.retrieval.opensearch_search import opensearch_retrieve_with_scores
 from app.retrieval.rrf import rrf_fuse
 from app.retrieval.temporal import parse_temporal
 
@@ -91,6 +94,39 @@ async def retrieve_with_scores(
     date_to: date | None
     date_from, date_to = parse_temporal(query)
 
+    # ── Production path: OpenSearch metadata retrieval ───────────────────────
+    # OpenSearch handles BM25 + fuzzy + vector over per-container indices. Use
+    # it only when scope is explicit. Plain non-admin ownership filtering still
+    # falls back to PostgreSQL because that logic joins files/folders in SQL.
+    can_use_opensearch = bool(container_id) and (is_admin or bool(allowed_domains))
+    if can_use_opensearch:
+        os_results = await opensearch_retrieve_with_scores(
+            query=query,
+            user_id=user_id,
+            is_admin=is_admin,
+            db=db,
+            top_k=top_k,
+            container_id=container_id,
+            allowed_domains=allowed_domains,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if os_results:
+            try:
+                graph_results = await graph_expand(
+                    seed_file_ids=[meta.file_id for meta, _ in os_results],
+                    user_id=user_id,
+                    is_admin=is_admin,
+                    db=db,
+                    limit=_STAGE_LIMIT,
+                    allowed_domains=allowed_domains,
+                    container_id=container_id,
+                )
+            except Exception as exc:
+                chat_logger.warning("retrieval_graph_expand_error", error=str(exc)[:200])
+                graph_results = []
+            return rrf_fuse([os_results, graph_results], top_k=top_k)
+
     # ── Stages 4-6: sequential retrieval ─────────────────────────────────────
     # SQLAlchemy async sessions share one connection and do not support
     # concurrent operations. Run BM25, fuzzy, vector sequentially.
@@ -132,9 +168,29 @@ async def retrieve_with_scores(
         chat_logger.warning("retrieval_vector_error", error=str(exc)[:200])
         vector_results = []
 
-    # ── Stage 7: RRF fusion ───────────────────────────────────────────────────
+    # ── Stage 7: approved semantic graph expansion ────────────────────────────
+    try:
+        seed_results = rrf_fuse(
+            [bm25_results, fuzzy_results, vector_results],
+            top_k=min(_STAGE_LIMIT, max(top_k, 1)),
+        )
+        seed_file_ids = [meta.file_id for meta, _ in seed_results]
+        graph_results = await graph_expand(
+            seed_file_ids=seed_file_ids,
+            user_id=user_id,
+            is_admin=is_admin,
+            db=db,
+            limit=_STAGE_LIMIT,
+            allowed_domains=allowed_domains,
+            container_id=container_id,
+        )
+    except Exception as exc:
+        chat_logger.warning("retrieval_graph_expand_error", error=str(exc)[:200])
+        graph_results = []
+
+    # ── Stage 8: RRF fusion ───────────────────────────────────────────────────
     fused = rrf_fuse(
-        [bm25_results, fuzzy_results, vector_results],
+        [bm25_results, fuzzy_results, vector_results, graph_results],
         top_k=top_k,
     )
 
@@ -144,6 +200,7 @@ async def retrieve_with_scores(
         bm25=len(bm25_results),
         fuzzy=len(fuzzy_results),
         vector=len(vector_results),
+        graph=len(graph_results),
         fused=len(fused),
         date_from=str(date_from) if date_from else None,
         date_to=str(date_to) if date_to else None,

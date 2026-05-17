@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import async_session, get_db
 from app.core.logger import container_logger, blob_logger, db_logger, ingest_logger
 from app.dependencies import require_admin, require_developer, get_current_user
-from app.services.ingestion_service import ingest_file
+from app.worker.ingest_tasks import run_ingest_pipeline, run_semantic_rebuild_container
 from app.models.background_job import BackgroundJob
 from app.models.container import ContainerConfig
 from app.models.file import File
@@ -21,7 +21,15 @@ from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
 from app.models.user import User
-from app.schemas.container import ContainerCreate, ContainerOut, ContainerSyncResponse
+from app.schemas.container import (
+    ContainerCreate,
+    ContainerOut,
+    ContainerSemanticConfigUpdate,
+    ContainerSemanticRebuildRequest,
+    ContainerSyncResponse,
+)
+from app.services.semantic_rebuild import evaluate_container_semantics
+from app.services.semantic_roles import ROLE_KINDS, is_dynamic_role, role_catalog
 
 router = APIRouter(prefix="/containers", tags=["containers"])
 
@@ -65,6 +73,36 @@ async def _get_or_create_folder_path(
 def _guess_mime(filename: str) -> str:
     mime, _ = mimetypes.guess_type(filename)
     return mime or "application/octet-stream"
+
+
+def _validate_semantic_config(config: dict | None) -> dict | None:
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=422, detail="semantic_config must be a JSON object")
+    roles = config.get("roles", [])
+    if roles is None:
+        roles = []
+    if not isinstance(roles, list):
+        raise HTTPException(status_code=422, detail="semantic_config.roles must be a list")
+    for idx, role in enumerate(roles):
+        if not isinstance(role, dict):
+            raise HTTPException(status_code=422, detail=f"semantic_config.roles[{idx}] must be an object")
+        if not role.get("role") or not role.get("kind"):
+            raise HTTPException(status_code=422, detail=f"semantic_config.roles[{idx}] requires role and kind")
+        if role.get("kind") not in ROLE_KINDS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"semantic_config.roles[{idx}].kind must be one of {list(ROLE_KINDS)}",
+            )
+        role_id = str(role.get("role") or "")
+        if role_id.startswith("custom:") and not is_dynamic_role(role_id):
+            raise HTTPException(
+                status_code=422,
+                detail=f"semantic_config.roles[{idx}].role is not a valid custom role id",
+            )
+    role_catalog(config)
+    return config
 
 
 async def sync_container(container_id: str, user_id: str) -> None:
@@ -169,6 +207,9 @@ async def sync_container(container_id: str, user_id: str) -> None:
             container_logger.info("sync_complete", container_id=container_id, added=synced, removed=removed, duration_ms=round((time.perf_counter() - start) * 1000, 2))
 
             # ── Auto-ingest un-ingested CSV/TXT files ──
+            # Dispatch each file to a Celery worker — completely isolated from
+            # this event loop. The sync endpoint returns in milliseconds;
+            # workers process files concurrently across all worker processes.
             ingestable_result = await db.execute(
                 select(File).where(
                     File.container_id == container_id,
@@ -180,65 +221,18 @@ async def sync_container(container_id: str, user_id: str) -> None:
                 if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv")
             ]
             if ingestable:
-                ingest_logger.info("sync_auto_ingest", container_id=container_id, file_count=len(ingestable))
-                asyncio.create_task(_batch_ingest_from_sync(
-                    [f.id for f in ingestable], container_id
-                ))
+                task_ids = [run_ingest_pipeline.delay(f.id).id for f in ingestable]
+                ingest_logger.info(
+                    "sync_auto_ingest_queued",
+                    container_id=container_id,
+                    file_count=len(ingestable),
+                    task_ids=task_ids,
+                    backend="celery",
+                )
 
         except Exception as exc:
             container_logger.exception("sync_failed", container_id=container_id, error=str(exc))
             await db.rollback()
-
-
-async def _background_ingest_from_sync(file_id: str) -> None:
-    """Run ingestion for a single file in its own DB session after sync."""
-    trace_id = f"ingest-{uuid.uuid4().hex[:12]}"
-    structlog.contextvars.clear_contextvars()
-    structlog.contextvars.bind_contextvars(trace_id=trace_id, pipeline="ingest", file_id=file_id)
-    try:
-        async with async_session() as db:
-            await ingest_file(file_id, db)
-    except Exception as exc:
-        ingest_logger.exception("sync_ingest_crashed", error=str(exc)[:500])
-    finally:
-        structlog.contextvars.clear_contextvars()
-
-
-# Max concurrent ingests during a sync — prevents RAM saturation and Azure OpenAI rate limits.
-# 3 = one file reading from Azure, one running AI description, one doing Parquet conversion.
-_INGEST_SEMAPHORE = asyncio.Semaphore(3)
-
-
-async def _batch_ingest_from_sync(file_ids: list[str], container_id: str) -> None:
-    """Process file IDs with concurrency capped at 3. Replaces fire-all-at-once."""
-    ingest_logger.info("batch_ingest_started", container_id=container_id, total=len(file_ids))
-    done = 0
-    failed = 0
-
-    async def _one(file_id: str) -> None:
-        nonlocal done, failed
-        async with _INGEST_SEMAPHORE:
-            trace_id = f"ingest-{uuid.uuid4().hex[:12]}"
-            structlog.contextvars.clear_contextvars()
-            structlog.contextvars.bind_contextvars(
-                trace_id=trace_id, pipeline="ingest", file_id=file_id
-            )
-            try:
-                async with async_session() as db:
-                    await ingest_file(file_id, db)
-                done += 1
-                ingest_logger.info("batch_ingest_progress", container_id=container_id,
-                                   done=done, failed=failed,
-                                   remaining=len(file_ids) - done - failed)
-            except Exception as exc:
-                failed += 1
-                ingest_logger.exception("sync_ingest_crashed", error=str(exc)[:500])
-            finally:
-                structlog.contextvars.clear_contextvars()
-
-    await asyncio.gather(*[_one(fid) for fid in file_ids])
-    ingest_logger.info("batch_ingest_complete", container_id=container_id,
-                       done=done, failed=failed)
 
 
 # ── endpoints ────────────────────────────────────────────────────────────────
@@ -270,6 +264,7 @@ async def list_containers(
             last_synced_at=config.last_synced_at,
             file_count=file_count,
             created_at=config.created_at,
+            semantic_config=config.semantic_config,
         )
         for config, file_count in rows
     ]
@@ -303,6 +298,7 @@ async def get_container(
         last_synced_at=config.last_synced_at,
         file_count=file_count,
         created_at=config.created_at,
+        semantic_config=config.semantic_config,
     )
 
 
@@ -339,6 +335,7 @@ async def create_container(
         container_name=body.container_name,
         connection_string=body.connection_string,
         created_by=admin.id,
+        semantic_config=_validate_semantic_config(body.semantic_config),
     )
     db.add(config)
     await db.commit()
@@ -356,7 +353,84 @@ async def create_container(
         last_synced_at=config.last_synced_at,
         file_count=0,
         created_at=config.created_at,
+        semantic_config=config.semantic_config,
     )
+
+
+@router.patch("/{container_id}/semantic-config", response_model=ContainerOut)
+async def update_semantic_config(
+    container_id: str,
+    body: ContainerSemanticConfigUpdate,
+    admin: User = Depends(require_developer),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(ContainerConfig).where(ContainerConfig.id == container_id))
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail="Container not found")
+
+    config.semantic_config = _validate_semantic_config(body.semantic_config)
+    await db.commit()
+    await db.refresh(config)
+
+    file_count = (
+        await db.execute(select(func.count(File.id)).where(File.container_id == container_id))
+    ).scalar_one()
+    return ContainerOut(
+        id=config.id,
+        name=config.name,
+        container_name=config.container_name,
+        last_synced_at=config.last_synced_at,
+        file_count=file_count,
+        created_at=config.created_at,
+        semantic_config=config.semantic_config,
+    )
+
+
+@router.post("/{container_id}/semantic-rebuild")
+async def trigger_semantic_rebuild(
+    container_id: str,
+    body: ContainerSemanticRebuildRequest | None = None,
+    admin: User = Depends(require_developer),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(ContainerConfig.id).where(ContainerConfig.id == container_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Container not found")
+
+    options = body or ContainerSemanticRebuildRequest()
+    task = run_semantic_rebuild_container.delay(
+        container_id,
+        options.re_resolve_roles,
+        options.batch_size,
+    )
+    ingest_logger.info(
+        "semantic_rebuild_queued",
+        admin_id=admin.id,
+        container_id=container_id,
+        task_id=task.id,
+        re_resolve_roles=options.re_resolve_roles,
+        batch_size=options.batch_size,
+    )
+    return {
+        "message": "Semantic rebuild queued",
+        "container_id": container_id,
+        "task_id": task.id,
+        "re_resolve_roles": options.re_resolve_roles,
+        "batch_size": options.batch_size,
+    }
+
+
+@router.get("/{container_id}/semantic-evaluation")
+async def get_semantic_evaluation(
+    container_id: str,
+    _admin: User = Depends(require_developer),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await evaluate_container_semantics(container_id, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{container_id}/sync", response_model=ContainerSyncResponse)

@@ -52,6 +52,23 @@ class Settings(BaseSettings):
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     STORAGE_ENCRYPTION_KEY: str = ""
 
+    # Redis — broker + result backend for Celery workers
+    # Separate DBs: db=0 broker, db=1 results, db=2 response cache (future)
+    # Azure Cache for Redis: use rediss:// (TLS) with the primary key as password
+    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_URL_RESULTS: str = "redis://localhost:6379/1"
+
+    # OpenSearch — production metadata retrieval (BM25 + fuzzy + vector)
+    # Empty URL disables OpenSearch and keeps PostgreSQL retrieval fallback active.
+    OPENSEARCH_URL: str = ""
+    OPENSEARCH_USERNAME: str = ""
+    OPENSEARCH_PASSWORD: str = ""
+    OPENSEARCH_API_KEY: str = ""
+    OPENSEARCH_INDEX_PREFIX: str = "gchat-files"
+    OPENSEARCH_TIMEOUT_SECONDS: float = 5.0
+    OPENSEARCH_SHARDS: int = 1
+    OPENSEARCH_REPLICAS: int = 0
+
     model_config = {"env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"), "extra": "ignore"}
 
 

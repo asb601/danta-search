@@ -1,0 +1,563 @@
+"""Staged ingestion operations used by Celery.
+
+Each function is one durable ingestion stage. Celery owns orchestration and
+retry; this module owns database and artifact mutations for that stage.
+"""
+from __future__ import annotations
+
+import time
+import uuid
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.ai_client import generate_file_description
+from app.core.database import async_session as _async_session
+from app.core.duckdb_client import sample_file
+from app.core.logger import ingest_logger
+from app.models.container import ContainerConfig
+from app.models.file import File
+from app.models.file_analytics import FileAnalytics
+from app.models.file_metadata import FileMetadata
+from app.models.folder import Folder
+from app.retrieval.embeddings import build_search_text, embed_text
+from app.services.analytics_service import compute_and_store_analytics, trigger_parquet_conversion
+from app.services.data_preprocessor import ALL_EXTS as _PREPROCESS_EXTS, preprocess_file
+from app.services.ingestion_service import _is_schema_file, _load_schema_glossary
+
+Payload = dict[str, Any]
+_EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
+_CSV_LIKE_EXTS = {".csv", ".tsv", ".txt"}
+
+
+def _ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 2)
+
+
+def _file_ext(file: File) -> str:
+    return Path(file.name).suffix.lower()
+
+
+def _blob_ext(file: File) -> str:
+    return Path(file.blob_path or file.name).suffix.lower()
+
+
+def _next(payload: Payload, *, stage: str, **extra: Any) -> Payload:
+    merged = dict(payload)
+    merged.update(extra)
+    merged["stage"] = stage
+    return merged
+
+
+async def _load_file_and_container(db: AsyncSession, file_id: str) -> tuple[File, ContainerConfig]:
+    file = await db.get(File, file_id)
+    if not file or not file.blob_path:
+        raise RuntimeError("file or blob_path missing")
+
+    container = await db.get(ContainerConfig, file.container_id)
+    if not container:
+        raise RuntimeError("container not found")
+
+    return file, container
+
+
+async def _blob_exists(connection_string: str, container_name: str, blob_path: str) -> bool:
+    def _check() -> bool:
+        try:
+            from azure.storage.blob import BlobServiceClient  # noqa: PLC0415
+
+            client = BlobServiceClient.from_connection_string(connection_string)
+            return client.get_blob_client(container=container_name, blob=blob_path).exists()
+        except Exception:
+            return False
+
+    import asyncio
+
+    return await asyncio.to_thread(_check)
+
+
+async def prepare_pipeline(file_id: str) -> Payload:
+    """Mark a file as queued for staged ingestion.
+
+    This is intentionally small and fast. It prevents duplicate UI clicks from
+    queuing a second chain while a file is already pending.
+    """
+    async with _async_session() as db:
+        file = await db.get(File, file_id)
+        if not file or not file.blob_path:
+            return {"file_id": file_id, "status": "skipped", "reason": "file or blob_path missing"}
+
+        if file.ingest_status == "pending":
+            return {"file_id": file_id, "status": "already_running"}
+
+        file.ingest_status = "pending"
+        await db.commit()
+        return {"file_id": file_id, "status": "queued"}
+
+
+async def clean_file_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        file, container = await _load_file_and_container(db, file_id)
+        ext = _file_ext(file)
+
+        ingest_logger.info("ingest_stage", stage="clean", status="started", file_id=file_id)
+
+        if ext in _PREPROCESS_EXTS and not file.is_preprocessed:
+            analytics_row = (
+                await db.execute(select(FileAnalytics).where(FileAnalytics.file_id == file_id))
+            ).scalar_one_or_none()
+            if analytics_row and analytics_row.parquet_blob_path:
+                analytics_row.parquet_blob_path = None
+                analytics_row.parquet_size_bytes = None
+                await db.commit()
+
+            prep = await preprocess_file(
+                blob_path=file.blob_path,
+                file_name=file.name,
+                file_id=file_id,
+                connection_string=container.connection_string,
+                container_name=container.container_name,
+                cleaning_config=container.cleaning_config,
+            )
+            file.blob_path = prep.clean_blob_path
+            file.is_preprocessed = True
+
+            analytics_row = (
+                await db.execute(select(FileAnalytics).where(FileAnalytics.file_id == file_id))
+            ).scalar_one_or_none()
+            if not analytics_row:
+                analytics_row = FileAnalytics(id=str(uuid.uuid4()), file_id=file_id)
+                db.add(analytics_row)
+            analytics_row.quarantine_count = prep.quarantine_count
+            analytics_row.quarantine_sample = prep.quarantine_sample
+            analytics_row.cleaning_audit = prep.cleaning_audit
+            await db.commit()
+
+            ingest_logger.info(
+                "ingest_stage",
+                stage="clean",
+                status="done",
+                file_id=file_id,
+                clean_blob_path=prep.clean_blob_path,
+                original_rows=prep.original_rows,
+                clean_rows=prep.clean_rows,
+                duration_ms=_ms(start),
+            )
+            return _next(payload, stage="clean", clean_blob_path=prep.clean_blob_path)
+
+        if not await _blob_exists(container.connection_string, container.container_name, file.blob_path):
+            file.ingest_status = "not_ingested"
+            await db.commit()
+            raise RuntimeError(f"source blob missing in Azure: {file.blob_path}")
+
+        ingest_logger.info(
+            "ingest_stage",
+            stage="clean",
+            status="skipped",
+            reason="already_preprocessed_or_not_supported",
+            file_id=file_id,
+            duration_ms=_ms(start),
+        )
+        return _next(payload, stage="clean", clean_blob_path=file.blob_path)
+
+
+async def parquet_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        file, container = await _load_file_and_container(db, file_id)
+        blob_path = file.blob_path
+        if not blob_path:
+            raise RuntimeError("blob_path missing before parquet stage")
+
+        ingest_logger.info("ingest_stage", stage="parquet", status="started", file_id=file_id)
+
+        analytics = (
+            await db.execute(select(FileAnalytics).where(FileAnalytics.file_id == file_id))
+        ).scalar_one_or_none()
+        if analytics and analytics.parquet_blob_path:
+            ingest_logger.info(
+                "ingest_stage",
+                stage="parquet",
+                status="skipped",
+                reason="parquet_already_exists",
+                file_id=file_id,
+            )
+            return _next(payload, stage="parquet", parquet_blob_path=analytics.parquet_blob_path)
+
+        if _blob_ext(file) not in _CSV_LIKE_EXTS:
+            ingest_logger.info(
+                "ingest_stage",
+                stage="parquet",
+                status="skipped",
+                reason="not_csv_like",
+                file_id=file_id,
+            )
+            return _next(payload, stage="parquet", parquet_blob_path=None)
+
+    await trigger_parquet_conversion(
+        file_id=file_id,
+        blob_path=blob_path,
+        connection_string=container.connection_string,
+        container_name=container.container_name,
+    )
+
+    async with _async_session() as db:
+        analytics = (
+            await db.execute(select(FileAnalytics).where(FileAnalytics.file_id == file_id))
+        ).scalar_one_or_none()
+        parquet_blob_path = analytics.parquet_blob_path if analytics else None
+
+    ingest_logger.info(
+        "ingest_stage",
+        stage="parquet",
+        status="done",
+        file_id=file_id,
+        parquet_blob_path=parquet_blob_path,
+        duration_ms=_ms(start),
+    )
+    return _next(payload, stage="parquet", parquet_blob_path=parquet_blob_path)
+
+
+async def metadata_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        file, container = await _load_file_and_container(db, file_id)
+        ingest_logger.info("ingest_stage", stage="metadata", status="started", file_id=file_id)
+
+        sample = await sample_file(
+            blob_path=file.blob_path,
+            connection_string=container.connection_string,
+            container_name=container.container_name,
+        )
+
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if not metadata:
+            metadata = FileMetadata(id=str(uuid.uuid4()), file_id=file_id)
+            db.add(metadata)
+
+        metadata.blob_path = file.blob_path
+        metadata.container_id = file.container_id
+        metadata.columns_info = sample["columns_info"]
+        metadata.row_count = sample["row_count"]
+        metadata.sample_rows = sample["sample_rows"]
+        metadata.ingest_error = None
+        metadata.ingested_at = datetime.now(timezone.utc)
+        await db.commit()
+
+        ingest_logger.info(
+            "ingest_stage",
+            stage="metadata",
+            status="done",
+            file_id=file_id,
+            columns=len(sample["columns_info"]),
+            row_count=sample["row_count"],
+            duration_ms=_ms(start),
+        )
+        return _next(payload, stage="metadata")
+
+
+async def ai_description_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        file, container = await _load_file_and_container(db, file_id)
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if not metadata:
+            raise RuntimeError("metadata missing before AI description stage")
+
+        domain_tag: str | None = None
+        column_glossary: dict[str, str] = {}
+        if file.folder_id:
+            folder = await db.get(Folder, file.folder_id)
+            if folder:
+                domain_tag = folder.domain_tag
+                if not _is_schema_file(file.name):
+                    column_glossary = await _load_schema_glossary(
+                        folder_id=file.folder_id,
+                        db=db,
+                        connection_string=container.connection_string,
+                        container_name=container.container_name,
+                    )
+
+        ingest_logger.info("ingest_stage", stage="ai_description", status="started", file_id=file_id)
+        description = await generate_file_description(
+            columns_info=metadata.columns_info or [],
+            sample_rows=metadata.sample_rows or [],
+            filename=file.name,
+            domain_tag=domain_tag,
+            column_glossary=column_glossary or None,
+        )
+
+        metadata.ai_description = description.get("summary", "")
+        metadata.good_for = description.get("good_for", [])
+        metadata.key_metrics = description.get("key_metrics", [])
+        metadata.key_dimensions = description.get("key_dimensions", [])
+
+        if description.get("date_range_start"):
+            try:
+                metadata.date_range_start = date.fromisoformat(description["date_range_start"])
+            except (ValueError, TypeError):
+                pass
+        if description.get("date_range_end"):
+            try:
+                metadata.date_range_end = date.fromisoformat(description["date_range_end"])
+            except (ValueError, TypeError):
+                pass
+
+        await db.commit()
+
+        ingest_logger.info(
+            "ingest_stage",
+            stage="ai_description",
+            status="done",
+            file_id=file_id,
+            duration_ms=_ms(start),
+        )
+        return _next(payload, stage="ai_description")
+
+
+async def ontology_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        file, container = await _load_file_and_container(db, file_id)
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if not metadata:
+            raise RuntimeError("metadata missing before ontology stage")
+
+        column_glossary: dict[str, str] = {}
+        if file.folder_id and not _is_schema_file(file.name):
+            column_glossary = await _load_schema_glossary(
+                folder_id=file.folder_id,
+                db=db,
+                connection_string=container.connection_string,
+                container_name=container.container_name,
+            )
+
+        from app.services.column_role_resolver import resolve_column_roles  # noqa: PLC0415
+
+        ingest_logger.info("ingest_stage", stage="ontology", status="started", file_id=file_id)
+        col_roles, role_src = await resolve_column_roles(
+            columns_info=metadata.columns_info or [],
+            filename=file.name,
+            glossary=column_glossary or None,
+            semantic_config=container.semantic_config or None,
+        )
+        metadata.column_semantic_roles = col_roles or None
+        metadata.role_source = role_src
+        await db.commit()
+
+        ingest_logger.info(
+            "ingest_stage",
+            stage="ontology",
+            status="done",
+            file_id=file_id,
+            resolved=len(col_roles),
+            source=role_src,
+            duration_ms=_ms(start),
+        )
+        return _next(payload, stage="ontology")
+
+
+async def embedding_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if not metadata:
+            raise RuntimeError("metadata missing before embedding stage")
+
+        ingest_logger.info("ingest_stage", stage="embedding", status="started", file_id=file_id)
+        search_text = build_search_text(metadata)
+        metadata.search_text = search_text
+        metadata.description_embedding = await embed_text(search_text)
+        await db.commit()
+
+        ingest_logger.info(
+            "ingest_stage",
+            stage="embedding",
+            status="done",
+            file_id=file_id,
+            search_text_len=len(search_text),
+            duration_ms=_ms(start),
+        )
+        return _next(payload, stage="embedding")
+
+
+async def opensearch_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if not metadata:
+            raise RuntimeError("metadata missing before OpenSearch stage")
+
+        from app.retrieval.opensearch_indexer import index_metadata_document  # noqa: PLC0415
+
+        ingest_logger.info("ingest_stage", stage="opensearch", status="started", file_id=file_id)
+        await index_metadata_document(metadata, db)
+
+    ingest_logger.info(
+        "ingest_stage",
+        stage="opensearch",
+        status="done",
+        file_id=file_id,
+        duration_ms=_ms(start),
+    )
+    return _next(payload, stage="opensearch")
+
+
+async def analytics_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        file, container = await _load_file_and_container(db, file_id)
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if not metadata:
+            raise RuntimeError("metadata missing before analytics stage")
+
+        ingest_logger.info("ingest_stage", stage="analytics", status="started", file_id=file_id)
+        analytics = await compute_and_store_analytics(
+            file_id=file_id,
+            blob_path=file.blob_path,
+            connection_string=container.connection_string,
+            container_name=container.container_name,
+            columns_info=metadata.columns_info or [],
+            db=db,
+        )
+
+        ingest_logger.info(
+            "ingest_stage",
+            stage="analytics",
+            status="done",
+            file_id=file_id,
+            row_count=analytics.row_count,
+            duration_ms=_ms(start),
+        )
+        return _next(payload, stage="analytics")
+
+
+async def relationship_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        file = await db.get(File, file_id)
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if not file or not metadata:
+            raise RuntimeError("file or metadata missing before relationship stage")
+
+        from app.services.relationship_detector import detect_relationships  # noqa: PLC0415
+
+        ingest_logger.info("ingest_stage", stage="relationships", status="started", file_id=file_id)
+        relationship_count = await detect_relationships(
+            file_id=file_id,
+            blob_path=file.blob_path or metadata.blob_path,
+            columns_info=metadata.columns_info or [],
+            db=db,
+        )
+
+        ingest_logger.info(
+            "ingest_stage",
+            stage="relationships",
+            status="done",
+            file_id=file_id,
+            relationships_created=relationship_count,
+            duration_ms=_ms(start),
+        )
+        return _next(payload, stage="relationships", relationships_created=relationship_count)
+
+
+async def semantic_layer_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+
+    async with _async_session() as db:
+        from app.services.semantic_layer_builder import build_semantic_layer_for_file  # noqa: PLC0415
+
+        ingest_logger.info("ingest_stage", stage="semantic_layer", status="started", file_id=file_id)
+        result = await build_semantic_layer_for_file(file_id, db)
+
+    ingest_logger.info(
+        "ingest_stage",
+        stage="semantic_layer",
+        status="done",
+        file_id=file_id,
+        entity=result.get("entity"),
+        relationships=result.get("relationships"),
+        duration_ms=_ms(start),
+    )
+    return _next(payload, stage="semantic_layer", semantic_layer=result)
+
+
+async def complete_ingestion_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+
+    async with _async_session() as db:
+        file = await db.get(File, file_id)
+        if file:
+            file.ingest_status = "ingested"
+            await db.commit()
+
+    try:
+        from app.agent.catalog_cache import invalidate_catalog_cache  # noqa: PLC0415
+
+        invalidate_catalog_cache()
+    except Exception as exc:
+        ingest_logger.warning("catalog_invalidate_failed", file_id=file_id, error=str(exc)[:200])
+
+    ingest_logger.info("ingest_stage", stage="complete", status="done", file_id=file_id)
+    return _next(payload, stage="complete", status="done")
+
+
+async def mark_ingestion_failed(file_id: str, stage: str, exc: BaseException) -> None:
+    error = f"Ingestion stage {stage} failed: {exc}"[:1000]
+    async with _async_session() as db:
+        file = await db.get(File, file_id)
+        if file:
+            file.ingest_status = "failed"
+
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if metadata:
+            metadata.ingest_error = error
+        elif file:
+            db.add(FileMetadata(
+                id=str(uuid.uuid4()),
+                file_id=file_id,
+                blob_path=file.blob_path,
+                container_id=file.container_id,
+                ingest_error=error,
+            ))
+
+        await db.commit()

@@ -33,6 +33,14 @@ class FileMetadata(Base):
     sample_rows: Mapped[list | None] = mapped_column(JSONB, default=list)
     ingest_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Ontology layer — column semantic role map (ingestion-time, permanent)
+    # Schema: {"source_col": "custom:<kind>:<label>", ...}
+    # Populated by column_role_resolver at ingest time.
+    # At query time the planner reads this — zero LLM calls for join resolution.
+    # role_source: "llm" | "llm_dynamic" | future resolver source labels
+    column_semantic_roles: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
+    role_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     # Retrieval-engine columns (PHASE 1)
     search_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_embedding: Mapped[list[float] | None] = mapped_column(
