@@ -8,9 +8,8 @@ Strategy
 * Storage: plain dict with an asyncio.Lock — no Redis, no extra infrastructure.
 * TTL: 10 minutes (configurable via RESPONSE_CACHE_TTL_SECONDS in settings).
 * Max entries: 500 (oldest evicted first — simple FIFO).
-* Cache key normalisation strips punctuation variance so
-  "What is total invoice amount?" and "what is the total invoice amount"
-  map to the same key.
+* Cache key normalisation strips punctuation variance so minor casing and
+    punctuation differences map to the same key.
 * Fuzzy fallback: if no exact match, check for a key with Levenshtein ratio > 0.92
   among the last 50 entries (fast, bounded).  Handles minor rephrasings.
 

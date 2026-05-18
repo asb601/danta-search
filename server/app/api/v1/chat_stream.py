@@ -24,6 +24,7 @@ from app.dependencies import get_db, get_current_user
 from app.models.conversation import Conversation, Message
 from app.models.user import User
 from app.services.context_service import build_conversation_context, count_tokens, get_recent_files_used
+from app.services.audit_log import record_audit_event_safe
 
 router = APIRouter()
 
@@ -116,6 +117,25 @@ async def chat_message_stream(
             detail="Server is busy. Please retry in a few seconds.",
             headers={"Retry-After": str(_RETRY_AFTER_SECONDS)},
         )
+
+    try:
+        await record_audit_event_safe(
+            actor=user,
+            action="chat.message_stream",
+            event_type="action",
+            status_code=200,
+            path="/api/chat/message/stream",
+            route_template="/api/chat/message/stream",
+            container_id=effective_container_id,
+            details={
+                "conversation_id": conv_id,
+                "query_preview": query[:500],
+                "allowed_domains": user_allowed_domains,
+            },
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
 
     # ── Response cache: return immediately for recently-seen identical queries ─
     cache_key = (effective_container_id or "default", query)

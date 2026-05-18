@@ -37,6 +37,7 @@ import pyarrow as pa
 from datafusion import SessionContext
 from datafusion.object_store import MicrosoftAzure
 
+from app.core.config import get_settings
 from app.core.logger import chat_logger
 from app.core import metrics
 
@@ -281,7 +282,7 @@ def _json_safe(rows: list[dict]) -> list[dict]:
 def execute_query_sync(
     sql: str,
     connection_string: str,
-    max_rows: int = 1000,
+    max_rows: int | None = None,
     container_name: str | None = None,
 ) -> tuple[list[dict], int]:
     """Execute SQL using DataFusion. Drop-in replacement for duckdb_client.execute_query_sync.
@@ -298,6 +299,7 @@ def execute_query_sync(
     Returns:
         (rows, total_row_count) — rows is a list of dicts, capped at max_rows.
     """
+    resolved_max_rows = max(1, int(max_rows or get_settings().INGEST_DUCKDB_QUERY_MAX_ROWS))
     start = time.perf_counter()
     metrics.inc("query_queue_depth")
     metrics.inc("query_total")
@@ -356,7 +358,7 @@ def execute_query_sync(
 
         total = len(table)
         rows = _json_safe(
-            table.slice(0, max_rows).to_pylist()
+            table.slice(0, resolved_max_rows).to_pylist()
         )
         conv_ms = _ms(t_conv)
 
@@ -371,7 +373,7 @@ def execute_query_sync(
             status="done",
             row_count=len(rows),
             total_rows=total,
-            truncated=total > max_rows,
+            truncated=total > resolved_max_rows,
             exec_ms=exec_ms,
             convert_ms=conv_ms,
             total_ms=total_ms,

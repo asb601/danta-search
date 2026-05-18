@@ -293,7 +293,7 @@ def parse_temporal(
     Parameters
     ----------
     query : str
-        Raw user query, e.g. "show me invoice data from last quarter"
+        Raw user query, e.g. "show me records from last quarter"
     today : date, optional
         Override for deterministic unit tests. Defaults to date.today().
 

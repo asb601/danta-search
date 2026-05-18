@@ -31,7 +31,9 @@ import json
 import time
 from typing import Any
 
+from app.core.config import get_settings
 from app.core.logger import ingest_logger
+from app.services.ingestion_config import null_tokens_lower
 from app.services.semantic_roles import (
     ROLE_KINDS,
     is_dynamic_role,
@@ -61,6 +63,8 @@ async def resolve_column_roles(
     if not columns_info:
         return {}, "llm"
 
+    settings = get_settings()
+    preview_items = max(0, int(settings.INGEST_ROLE_RESOLVER_PREVIEW_ITEMS))
     roles = await _call_llm(columns_info, filename, glossary, semantic_config)
     source = "llm_dynamic" if any(is_dynamic_role(role) for role in roles.values()) else "llm"
 
@@ -70,7 +74,7 @@ async def resolve_column_roles(
         total_columns=len(columns_info),
         resolved=len(roles),
         coverage_pct=round(len(roles) / len(columns_info) * 100, 1) if columns_info else 0,
-        roles_preview={k: v for k, v in list(roles.items())[:10]},
+        roles_preview={k: v for k, v in list(roles.items())[:preview_items]},
     )
 
     return roles, source
@@ -86,14 +90,19 @@ async def _call_llm(
     from app.core.openai_client import get_client  # local to avoid circular
     from app.core.token_counter import count_tokens, elapsed_ms, track_and_log
 
-    # Build column profile: name + type + up to 10 unique non-null sample values
+    settings = get_settings()
+    max_columns = max(1, int(settings.INGEST_ROLE_RESOLVER_MAX_COLUMNS))
+    sample_values = max(0, int(settings.INGEST_ROLE_RESOLVER_SAMPLE_VALUES))
+    glossary_items = max(0, int(settings.INGEST_ROLE_RESOLVER_GLOSSARY_ITEMS))
+    null_values = null_tokens_lower()
+
     col_profiles = []
-    for c in columns_info[:60]:  # cap at 60 columns to stay within token budget
+    for c in columns_info[:max_columns]:
         name = c.get("name", "")
         if not name:
             continue
         samples = c.get("unique_values") or c.get("sample_values") or []
-        samples = [str(v) for v in samples if v not in ("", None, "None")][:10]
+        samples = [str(v) for v in samples if v is not None and str(v).strip().lower() not in null_values][:sample_values]
         col_profiles.append({
             "name": name,
             "type": c.get("type", ""),
@@ -103,7 +112,7 @@ async def _call_llm(
     # Glossary section — translates opaque ERP codes for the LLM
     glossary_section = ""
     if glossary:
-        lines = [f"  {code} = {meaning}" for code, meaning in list(glossary.items())[:80]]
+        lines = [f"  {code} = {meaning}" for code, meaning in list(glossary.items())[:glossary_items]]
         glossary_section = (
             "\nSchema glossary (admin-provided mapping of column codes to business meanings):\n"
             + "\n".join(lines)
@@ -137,12 +146,12 @@ custom:<kind>:<short_snake_case_label>
 
 Allowed dynamic kinds: {allowed_kinds}
 Examples:
-- custom:entity_key:claim identifies a claim record.
-- custom:reference_key:policy_type identifies a reusable reference code.
-- custom:additive_measure:premium is safe to sum.
-- custom:non_additive_measure:exchange_rate is numeric but not safe to sum.
-- custom:date:service_date is a date field.
-- custom:attribute:coverage_tier is a descriptive grouping/filter field.
+- custom:entity_key:record identifies the row grain.
+- custom:reference_key:record_type identifies a reusable reference code.
+- custom:additive_measure:amount is safe to sum.
+- custom:non_additive_measure:rate is numeric but not safe to sum.
+- custom:date:event_date is a date field.
+- custom:attribute:category is a descriptive grouping/filter field.
 
 Rules:
 - Return ONLY a JSON object: {{"column_name": "role", ...}}

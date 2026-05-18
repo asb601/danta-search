@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ai_client import generate_file_description
+from app.core.config import get_settings
 from app.core.database import async_session as _async_session
 from app.core.duckdb_client import sample_file
 from app.core.logger import ingest_logger
@@ -19,13 +20,16 @@ from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
 from app.services.analytics_service import compute_and_store_analytics, trigger_parquet_conversion
-from app.services.data_preprocessor import ALL_EXTS as _PREPROCESS_EXTS, preprocess_file, probe_raw_csv
+from app.services.data_preprocessor import preprocess_file, probe_raw_csv
+from app.services.ingestion_config import (
+    IngestStatus,
+    glossary_filename_tokens,
+    is_excel_ingest_file,
+    parquet_extension,
+    preprocess_extensions,
+)
 
-# Filename patterns that mark a file as a column-name schema/glossary.
-# Any file whose name (lowercased) contains one of these tokens is treated as
-# a schema file and skipped from normal ingest — its content is used instead
-# to enrich the AI description of sibling data files in the same folder.
-_SCHEMA_NAME_TOKENS = ("schema", "glossary", "column_map", "field_def", "mapping", "data_dict")
+_PREPROCESS_EXTS = preprocess_extensions(dotted=True)
 
 
 def _ms(start: float) -> float:
@@ -35,7 +39,7 @@ def _ms(start: float) -> float:
 def _is_schema_file(filename: str) -> bool:
     """Return True if the filename signals a column glossary / schema file."""
     stem = Path(filename).stem.lower()
-    return any(token in stem for token in _SCHEMA_NAME_TOKENS)
+    return any(token in stem for token in glossary_filename_tokens())
 
 
 async def _load_schema_glossary(
@@ -101,10 +105,11 @@ async def _load_schema_glossary(
             safe_cs = connection_string.replace("'", "''")
             conn.execute(f"SET azure_storage_connection_string='{safe_cs}';")
 
-            url = f"azure://{container_name}/{blob_path}"
+            sample_rows = max(1, int(get_settings().INGEST_DUCKDB_SAMPLE_ROWS))
+            url = f"azure://{container_name}/{blob_path}".replace("'", "''")
             rows = conn.execute(
                 f"SELECT * FROM read_csv_auto('{url}', header=true, "
-                f"ignore_errors=true, sample_size=500) LIMIT 500"
+                f"ignore_errors=true, sample_size={sample_rows}) LIMIT {sample_rows}"
             ).fetchall()
             cols = [d[0] for d in conn.description]
 
@@ -134,7 +139,7 @@ async def _load_schema_glossary(
     ingest_logger.info(
         "schema_glossary_loaded",
         entry_count=len(glossary),
-        sample=dict(list(glossary.items())[:5]),
+        sample=dict(list(glossary.items())[:max(0, int(get_settings().INGEST_LOG_SAMPLE_ITEMS))]),
     )
     return glossary
 
@@ -186,6 +191,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
     preprocess_task: "asyncio.Task | None" = None
     # Holds the latest PreprocessResult regardless of which code path ran it
     _prep_result = None
+    log_sample_items = max(0, int(get_settings().INGEST_LOG_SAMPLE_ITEMS))
 
     try:
         file = await db.get(File, file_id)
@@ -201,12 +207,12 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
         ingest_logger.info("chain_start", filename=file.name, blob_path=file.blob_path,
                            container=container.container_name)
 
-        file.ingest_status = "pending"
+        file.ingest_status = IngestStatus.PENDING.value
         await db.commit()
 
         ext = Path(file.name).suffix.lower()
         raw_blob_path = file.blob_path
-        is_excel = ext in {".xlsx", ".xls", ".xlsm", ".xlsb"}
+        is_excel = is_excel_ingest_file(file.name)
         already_preprocessed = bool(file.is_preprocessed)
 
         # ── Pre-flight: clear stale parquet path on retry/reingest ───────────
@@ -353,7 +359,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                 if stale_analytics:
                     await db.delete(stale_analytics)
                 file.is_preprocessed = False
-                file.ingest_status = "not_ingested"
+                file.ingest_status = IngestStatus.NOT_INGESTED.value
                 await db.commit()
                 return
 
@@ -540,7 +546,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
 
         # ── Mark ingested — file is now AI-described and searchable ──────────
         # Preprocessing (if still running) finishes below before Parquet conversion.
-        file.ingest_status = "ingested"
+        file.ingest_status = IngestStatus.INGESTED.value
         await db.commit()
 
         # ── Await background preprocessing to get the clean CSV path ─────────
@@ -563,7 +569,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                                    clean_rows=prep.clean_rows,
                                    rows_dropped=prep.rows_dropped,
                                    cols_renamed=len(prep.cols_renamed),
-                                   warnings=prep.warnings[:5],
+                                   warnings=prep.warnings[:log_sample_items],
                                    duration_ms=_ms(step_start))
             except Exception as prep_exc:
                 # Non-fatal: Parquet conversion will use the raw CSV (DuckDB handles it)
@@ -630,7 +636,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
             # A file uploaded as `.parquet` skips that step entirely, so without
             # this branch its definitions would NEVER reach the agent.  Detect
             # and register here using the sample's column profile.
-            if ext == ".parquet":
+            if ext == parquet_extension(dotted=True):
                 try:
                     from app.services.parquet_service import detect_schema_dictionary
                     from app.models.schema_dictionary import SchemaDictionary
@@ -729,7 +735,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
             await db.rollback()
             file = await db.get(File, file_id)
             if file:
-                file.ingest_status = "failed"
+                file.ingest_status = IngestStatus.FAILED.value
                 # Store error in metadata too so the UI can show it
                 result = await db.execute(
                     select(FileMetadata).where(FileMetadata.file_id == file_id)

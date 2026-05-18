@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.logger import auth_logger
 from app.dependencies import get_current_user, require_admin
+from app.services.audit_log import record_audit_event_safe
 from app.models.file import File
 from app.models.folder import Folder
 from app.models.organization import Organization
@@ -16,7 +17,7 @@ from app.schemas.user import UserOut
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-_VALID_ROLES = {"admin", "developer", "user"}
+_VALID_ROLES = {"admin", "developer", "manager", "user"}
 
 
 class _MeDomainsBody(BaseModel):
@@ -24,7 +25,7 @@ class _MeDomainsBody(BaseModel):
 
 
 class _RoleBody(BaseModel):
-    role: str  # "admin" | "developer" | "user"
+    role: str  # "admin" | "developer" | "manager" | "user"
 
 
 class _OrgAssignBody(BaseModel):
@@ -111,10 +112,35 @@ async def toggle_admin(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    old_is_admin = user.is_admin
     user.is_admin = not user.is_admin
     await db.commit()
 
-    auth_logger.info("admin_toggled", user_id=user_id, is_admin=user.is_admin)
+    auth_logger.info(
+        "admin_toggled",
+        user_id=user_id,
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        old_is_admin=old_is_admin,
+        is_admin=user.is_admin,
+    )
+    try:
+        await record_audit_event_safe(
+            actor=current_user,
+            action="users.toggle_admin",
+            event_type="action",
+            status_code=200,
+            path=f"/api/users/{user_id}/toggle-admin",
+            route_template="/api/users/{user_id}/toggle-admin",
+            target_user_id=user.id,
+            target_user_email=user.email,
+            target_user_name=user.name,
+            details={"old_is_admin": old_is_admin, "new_is_admin": user.is_admin},
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        auth_logger.warning("admin_toggle_audit_failed", user_id=user_id, error=str(exc)[:300])
     return {"id": user.id, "is_admin": user.is_admin}
 
 
@@ -125,7 +151,7 @@ async def set_user_role(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Set a user's role (admin / developer / user). Syncs is_admin flag."""
+    """Set a user's role (admin / developer / manager / user). Syncs is_admin flag."""
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot change your own role")
 
@@ -136,11 +162,44 @@ async def set_user_role(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    old_role = user.role
+    old_is_admin = user.is_admin
     user.role = body.role
     user.is_admin = body.role == "admin"
     await db.commit()
 
-    auth_logger.info("role_changed", user_id=user_id, role=body.role, is_admin=user.is_admin)
+    auth_logger.info(
+        "role_changed",
+        user_id=user_id,
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        old_role=old_role,
+        role=body.role,
+        old_is_admin=old_is_admin,
+        is_admin=user.is_admin,
+    )
+    try:
+        await record_audit_event_safe(
+            actor=current_user,
+            action="users.set_role",
+            event_type="action",
+            status_code=200,
+            path=f"/api/users/{user_id}/role",
+            route_template="/api/users/{user_id}/role",
+            target_user_id=user.id,
+            target_user_email=user.email,
+            target_user_name=user.name,
+            details={
+                "old_role": old_role,
+                "new_role": body.role,
+                "old_is_admin": old_is_admin,
+                "new_is_admin": user.is_admin,
+            },
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        auth_logger.warning("role_change_audit_failed", user_id=user_id, error=str(exc)[:300])
     return {"id": user.id, "role": user.role, "is_admin": user.is_admin}
 
 
@@ -158,10 +217,34 @@ async def delete_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    deleted_email = user.email
+    deleted_name = user.name
     await db.delete(user)
     await db.commit()
 
-    auth_logger.info("user_deleted", deleted_user_id=user_id, by_admin=current_user.id)
+    auth_logger.info(
+        "user_deleted",
+        deleted_user_id=user_id,
+        deleted_email=deleted_email,
+        by_admin=current_user.id,
+        admin_email=current_user.email,
+    )
+    try:
+        await record_audit_event_safe(
+            actor=current_user,
+            action="users.delete",
+            event_type="action",
+            status_code=200,
+            path=f"/api/users/{user_id}",
+            route_template="/api/users/{user_id}",
+            target_user_id=user_id,
+            target_user_email=deleted_email,
+            target_user_name=deleted_name,
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        auth_logger.warning("user_delete_audit_failed", user_id=user_id, error=str(exc)[:300])
     return {"deleted": True}
 
 

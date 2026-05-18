@@ -16,6 +16,7 @@ _AI_LOGGERS = {"chat", "ingest"}
 _LLM_LOGGERS = {"llm"}
 _COST_LOGGERS = {"cost"}
 _PIPELINE_LOGGERS = {"pipeline"}  # deep trace: full prompts, SQL, tool I/O, LLM outputs
+_AUDIT_LOGGERS = {"audit"}
 
 
 # ── Routing filter: only accept specific logger names ────────────────────────
@@ -487,6 +488,10 @@ _cost_handler = _make_json_handler("costs.log", _COST_LOGGERS)
 # Contains: full prompts, full SQL, full LLM tool-call args, full tool outputs
 _pipeline_handler = _make_json_handler("pipeline.log", _PIPELINE_LOGGERS)
 
+# Audit logs → logs/audit.log
+# Contains: every API request/action with actor identity and target context.
+_audit_handler = _make_json_handler("audit.log", _AUDIT_LOGGERS)
+
 # Console (non-pipeline) — raw JSON, no filter except exclude pipeline
 _console_handler = logging.StreamHandler()
 _console_handler.setLevel(logging.DEBUG)
@@ -510,6 +515,7 @@ logging.basicConfig(
         _llm_handler,
         _cost_handler,
         _pipeline_handler,
+        _audit_handler,
     ],
     force=True,
 )
@@ -561,3 +567,6 @@ cost_logger = structlog.get_logger("cost")
 
 # Pipeline deep-trace logger (full prompts, SQL, tool I/O → pipeline.log)
 pipeline_logger = structlog.get_logger("pipeline")
+
+# Audit logger (API requests/actions with actor email/name → audit.log)
+audit_logger = structlog.get_logger("audit")

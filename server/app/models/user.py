@@ -19,7 +19,7 @@ class User(Base):
     picture: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     # Role label exposed to the client so the UI can adapt.
-    # Allowed values: "user" | "developer" | "admin".
+    # Allowed values: "user" | "manager" | "developer" | "admin".
     # `is_admin` remains the source of truth for backend permission checks;
     # `role` is mostly informational (e.g. to label external API consumers
     # as "developer" so the UI hides admin pages).

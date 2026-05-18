@@ -25,10 +25,13 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cost_tracker import get_session_summary
+from app.core.config import get_settings
 from app.core.database import async_session, get_db
 from app.core.logger import ingest_logger
 from app.dependencies import get_current_user, require_admin
 from app.agent.graph.graph import invalidate_catalog_cache
+from app.services.audit_log import record_audit_event_safe
+from app.services.ingestion_config import IngestStatus, is_parquet_source_file, is_supported_ingest_file
 from app.models.background_job import BackgroundJob
 from app.models.file import File
 from app.models.file_analytics import FileAnalytics
@@ -39,6 +42,14 @@ from app.models.user import User
 from app.worker.ingest_tasks import run_ingest_pipeline
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def _reingest_batch_size() -> int:
+    return max(1, int(get_settings().REINGEST_BATCH_SIZE))
+
+
+def _reingest_batch_delay_seconds() -> int:
+    return max(0, int(get_settings().REINGEST_BATCH_DELAY_SECONDS))
 
 
 @router.get("/cost-summary")
@@ -69,17 +80,14 @@ async def reingest_all(
     # Find all ingestable files
     result = await db.execute(select(File))
     all_files = list(result.scalars().all())
-    ingestable = [
-        f for f in all_files
-        if (f.name or "").rsplit(".", 1)[-1].lower()
-        in ("csv", "txt", "tsv", "tab", "xlsx", "xls", "xlsm")
-    ]
+    ingestable = [f for f in all_files if is_supported_ingest_file(f.name)]
     if not ingestable:
         raise HTTPException(status_code=400, detail="No ingestable files found.")
 
     # Exclude files that are currently being processed by another reingest.
-    in_flight = [f.id for f in ingestable if f.ingest_status in ("pending", "running")]
-    file_ids = [f.id for f in ingestable if f.ingest_status not in ("pending", "running")]
+    in_flight_statuses = {IngestStatus.PENDING.value, IngestStatus.RUNNING.value}
+    in_flight = [f.id for f in ingestable if f.ingest_status in in_flight_statuses]
+    file_ids = [f.id for f in ingestable if f.ingest_status not in in_flight_statuses]
     if in_flight:
         ingest_logger.info(
             "reingest_all_skipping_in_flight",
@@ -106,29 +114,63 @@ async def reingest_all(
     await db.execute(
         update(File)
         .where(File.id.in_(file_ids))
-        .values(ingest_status="not_ingested", is_preprocessed=False)
+        .values(ingest_status=IngestStatus.NOT_INGESTED.value, is_preprocessed=False)
     )
     await db.commit()
     invalidate_catalog_cache()
 
-    # Dispatch each file to a Celery worker — isolated from the API event loop.
-    # Worker concurrency (-c flag) is the throttle; no in-process semaphore needed.
-    # The endpoint returns immediately after queuing.
-    task_ids = [run_ingest_pipeline.delay(fid).id for fid in file_ids]
+    # Dispatch each file to Celery in small waves. This keeps the API responsive
+    # on small VMs when someone clicks "ingest all" for many large files.
+    batch_size = _reingest_batch_size()
+    batch_delay_seconds = _reingest_batch_delay_seconds()
+    task_ids = []
+    schedule = []
+    for idx, fid in enumerate(file_ids):
+        countdown = (idx // batch_size) * batch_delay_seconds
+        task = run_ingest_pipeline.apply_async(args=[fid], countdown=countdown)
+        task_ids.append(task.id)
+        schedule.append({"file_id": fid, "task_id": task.id, "countdown": countdown})
 
     ingest_logger.info(
         "reingest_all_queued",
         admin_id=admin.id,
+        admin_email=admin.email,
+        admin_name=admin.name,
         file_count=len(file_ids),
         in_flight_count=len(in_flight),
+        batch_size=batch_size,
+        batch_delay_seconds=batch_delay_seconds,
         task_ids=task_ids,
         backend="celery",
     )
+
+    try:
+        await record_audit_event_safe(
+            actor=admin,
+            event_type="action",
+            action="admin.reingest_all",
+            status_code=200,
+            path="/api/admin/reingest-all",
+            route_template="/api/admin/reingest-all",
+            details={
+                "file_count": len(file_ids),
+                "in_flight_count": len(in_flight),
+                "batch_size": batch_size,
+                "batch_delay_seconds": batch_delay_seconds,
+                "scheduled_tasks": schedule,
+            },
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        ingest_logger.warning("reingest_all_audit_failed", error=str(exc)[:300])
 
     return {
         "message": "Re-ingestion queued",
         "file_count": len(file_ids),
         "in_flight_count": len(in_flight),
+        "batch_size": batch_size,
+        "batch_delay_seconds": batch_delay_seconds,
         "task_ids": task_ids,
     }
 
@@ -194,6 +236,23 @@ async def create_domain(
     # Invalidate catalog so this new domain folder is reflected in chat scope
     # immediately (default 5-min TTL would otherwise hide it from users).
     invalidate_catalog_cache()
+    try:
+        await record_audit_event_safe(
+            actor=admin,
+            action="admin.create_domain",
+            event_type="action",
+            status_code=200,
+            path="/api/admin/domains",
+            route_template="/api/admin/domains",
+            domain_tag=name,
+            folder_id=folder.id,
+            folder_name=folder.name,
+            details={"domain": name},
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        ingest_logger.warning("create_domain_audit_failed", domain=name, error=str(exc)[:300])
     return {"domain": name, "folder_id": folder.id}
 
 
@@ -212,6 +271,7 @@ async def set_user_domains(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     # Normalise: empty list → None (unrestricted)
+    old_domains = user.allowed_domains
     domains = body.allowed_domains if body.allowed_domains else None
     await db.execute(
         update(User).where(User.id == user_id).values(allowed_domains=domains)
@@ -221,6 +281,23 @@ async def set_user_domains(
     # Without this, the user keeps seeing the previous (broader) catalog for up
     # to the cache TTL window.
     invalidate_catalog_cache()
+    try:
+        await record_audit_event_safe(
+            actor=admin,
+            action="admin.set_user_domains",
+            event_type="action",
+            status_code=200,
+            path=f"/api/admin/users/{user_id}/domains",
+            route_template="/api/admin/users/{user_id}/domains",
+            target_user_id=user.id,
+            target_user_email=user.email,
+            target_user_name=user.name,
+            details={"old_allowed_domains": old_domains, "new_allowed_domains": domains},
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        ingest_logger.warning("set_user_domains_audit_failed", user_id=user_id, error=str(exc)[:300])
     return {"user_id": user_id, "allowed_domains": domains}
 
 
@@ -238,6 +315,7 @@ async def set_folder_domain(
     folder = await db.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
+    old_domain = folder.domain_tag
     await db.execute(
         update(Folder).where(Folder.id == folder_id).values(domain_tag=body.domain_tag or None)
     )
@@ -246,6 +324,23 @@ async def set_folder_domain(
     # scope immediately. Without this, files in the folder remain visible to
     # users outside the new domain for up to 5 minutes (the cache TTL).
     invalidate_catalog_cache()
+    try:
+        await record_audit_event_safe(
+            actor=admin,
+            action="admin.set_folder_domain",
+            event_type="action",
+            status_code=200,
+            path=f"/api/admin/folders/{folder_id}/domain",
+            route_template="/api/admin/folders/{folder_id}/domain",
+            domain_tag=body.domain_tag or None,
+            folder_id=folder.id,
+            folder_name=folder.name,
+            details={"old_domain_tag": old_domain, "new_domain_tag": body.domain_tag or None},
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        ingest_logger.warning("set_folder_domain_audit_failed", folder_id=folder_id, error=str(exc)[:300])
     return {"folder_id": folder_id, "domain_tag": body.domain_tag or None}
 
 
@@ -495,14 +590,13 @@ async def list_missing_parquet(
     rows = (await db.execute(
         select(File, FileAnalytics)
         .join(FileAnalytics, FileAnalytics.file_id == File.id, isouter=True)
-        .where(File.ingest_status == "ingested")
+        .where(File.ingest_status == IngestStatus.INGESTED.value)
     )).all()
 
     # Collect file_ids that are missing parquet
     candidates = []
     for file, analytics in rows:
-        ext = (file.name or "").rsplit(".", 1)[-1].lower()
-        if ext not in ("csv", "txt", "tsv"):
+        if not is_parquet_source_file(file.blob_path or file.name):
             continue
         if analytics is None or not analytics.parquet_blob_path:
             candidates.append((file, analytics))
@@ -574,7 +668,7 @@ async def retry_missing_parquet(
         .join(FileAnalytics, FileAnalytics.file_id == File.id, isouter=True)
         .join(ContainerConfig, ContainerConfig.id == File.container_id, isouter=True)
         .where(
-            File.ingest_status == "ingested",
+            File.ingest_status == IngestStatus.INGESTED.value,
             File.blob_path.isnot(None),
         )
     )).all()
@@ -582,7 +676,7 @@ async def retry_missing_parquet(
     parquet_tasks = []
     no_parquet_count = 0
     for f, fa, container in no_parquet_rows:
-        if (f.name or "").rsplit(".", 1)[-1].lower() not in ("csv", "txt", "tsv"):
+        if not is_parquet_source_file(f.blob_path or f.name):
             continue
         if fa is not None and fa.parquet_blob_path:
             continue

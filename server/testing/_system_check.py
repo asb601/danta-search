@@ -49,6 +49,7 @@ _modules = [
     "app.models.file_analytics",
     "app.models.conversation",
     "app.models.background_job",
+    "app.models.audit_log",
     "app.retrieval.filters",
     "app.retrieval.temporal",
     "app.retrieval.bm25",
@@ -67,6 +68,8 @@ _modules = [
     "app.migrations.retrieval_schema_upgrade",
     "app.migrations.domain_schema_upgrade",
     "app.migrations.backfill_embeddings",
+    "app.migrations.audit_log_schema_upgrade",
+    "app.services.audit_log",
     "app.main",
 ]
 
@@ -100,6 +103,8 @@ try:
         "/api/admin/domains",
         "/api/admin/users/{user_id}/domains",
         "/api/admin/folders/{folder_id}/domain",
+        "/api/logs/audit",
+        "/api/logs/audit/users",
         "/api/health",
     ]
     for r in _expected_routes:
@@ -116,6 +121,7 @@ try:
     from app.models.user import User
     from app.models.folder import Folder
     from app.models.file_metadata import FileMetadata
+    from app.models.audit_log import AuditLog
 
     for attr in ("id", "email", "is_admin", "allowed_domains"):
         if hasattr(User, attr):
@@ -134,6 +140,12 @@ try:
             ok(f"FileMetadata.{attr}")
         else:
             fail(f"FileMetadata.{attr} missing")
+
+    for attr in ("actor_email", "actor_name", "actor_allowed_domains", "action", "domain_tag"):
+        if hasattr(AuditLog, attr):
+            ok(f"AuditLog.{attr}")
+        else:
+            fail(f"AuditLog.{attr} missing")
 except Exception as e:
     fail("Model check", str(e)[:120])
 
@@ -181,12 +193,18 @@ try:
         else:
             fail(f"{fn.__name__} missing {param}")
 
-    # orchestrator external signatures unchanged
+    # orchestrator external signatures include optional container scoping.
     sig_rws = inspect.signature(retrieve_with_scores)
-    if list(sig_rws.parameters.keys()) == ["query", "user_id", "is_admin", "db", "top_k"]:
+    if list(sig_rws.parameters.keys()) == ["query", "user_id", "is_admin", "db", "top_k", "container_id"]:
         ok("retrieve_with_scores signature stable")
     else:
         fail("retrieve_with_scores signature changed", str(list(sig_rws.parameters.keys())))
+
+    sig_r = inspect.signature(retrieve)
+    if list(sig_r.parameters.keys()) == ["query", "user_id", "is_admin", "db", "top_k", "container_id"]:
+        ok("retrieve signature stable")
+    else:
+        fail("retrieve signature changed", str(list(sig_r.parameters.keys())))
 except Exception as e:
     fail("Retrieval signatures", str(e)[:200])
 

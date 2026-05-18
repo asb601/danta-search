@@ -5,7 +5,7 @@ Adds two things:
 1. container_configs.cleaning_config (JSONB, nullable)
    Per-container cleaning rules loaded at ingest time.
    Schema: {"extra_null_patterns": [...], "extra_garbage_patterns": [...]}
-   Allows adding client-specific null patterns (e.g. "k.a." for German SAP)
+    Allows adding source-specific null patterns
    without a code change or redeployment.
 
 2. file_analytics.quarantine_count (BIGINT, default 0)

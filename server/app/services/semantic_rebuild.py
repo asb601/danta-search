@@ -14,6 +14,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core.config import get_settings
 from app.core.database import async_session
 from app.core.logger import ingest_logger
 from app.models.column_key_registry import ColumnKeyRegistry
@@ -23,8 +24,6 @@ from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
 from app.models.semantic_layer import SemanticEntity, SemanticRelationship
 from app.services.semantic_roles import is_dynamic_role, role_kind
-
-DEFAULT_BATCH_SIZE = 250
 
 
 def _ms(start: float) -> float:
@@ -156,7 +155,7 @@ async def rebuild_container_semantics(
     container_id: str,
     *,
     re_resolve_roles: bool = True,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int | None = None,
 ) -> dict[str, Any]:
     """Rebuild semantic roles, key registry, relationships, and semantic layer.
 
@@ -164,7 +163,9 @@ async def rebuild_container_semantics(
     and stored files; it does not touch preprocessing/parquet/analytics output.
     """
     start = time.perf_counter()
-    batch_size = max(1, batch_size)
+    settings = get_settings()
+    batch_size = max(1, int(batch_size or settings.INGEST_SEMANTIC_REBUILD_BATCH_SIZE))
+    failure_sample_limit = max(0, int(settings.INGEST_FAILURE_SAMPLE_LIMIT))
 
     async with async_session() as db:
         await _require_container(container_id, db)
@@ -194,7 +195,7 @@ async def rebuild_container_semantics(
                     counters["roles_re_resolved"] += 1
                 except Exception as exc:
                     counters["role_resolution_failed"] += 1
-                    if len(counters["file_failures"]) < 20:
+                    if len(counters["file_failures"]) < failure_sample_limit:
                         counters["file_failures"].append({"file_id": file_id, "stage": "ontology", "error": str(exc)[:300]})
                     ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="ontology", error=str(exc)[:300])
 
@@ -210,7 +211,7 @@ async def rebuild_container_semantics(
             try:
                 counters["key_registry_rows"] += await _register_keys_for_file(file_id)
             except Exception as exc:
-                if len(counters["file_failures"]) < 20:
+                if len(counters["file_failures"]) < failure_sample_limit:
                     counters["file_failures"].append({"file_id": file_id, "stage": "key_registry", "error": str(exc)[:300]})
                 ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="key_registry", error=str(exc)[:300])
 
@@ -224,7 +225,7 @@ async def rebuild_container_semantics(
             try:
                 counters["relationship_rows_created"] += await _detect_relationships_for_file(file_id)
             except Exception as exc:
-                if len(counters["file_failures"]) < 20:
+                if len(counters["file_failures"]) < failure_sample_limit:
                     counters["file_failures"].append({"file_id": file_id, "stage": "relationships", "error": str(exc)[:300]})
                 ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="relationships", error=str(exc)[:300])
 
@@ -238,7 +239,7 @@ async def rebuild_container_semantics(
             try:
                 counters["semantic_relationships_upserted"] += await _build_semantic_layer_for_file(file_id)
             except Exception as exc:
-                if len(counters["file_failures"]) < 20:
+                if len(counters["file_failures"]) < failure_sample_limit:
                     counters["file_failures"].append({"file_id": file_id, "stage": "semantic_layer", "error": str(exc)[:300]})
                 ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="semantic_layer", error=str(exc)[:300])
 
@@ -262,11 +263,11 @@ async def evaluate_container_semantics(
     container_id: str,
     db: AsyncSession,
     *,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int | None = None,
 ) -> dict[str, Any]:
     """Return generic semantic quality metrics for a container."""
     await _require_container(container_id, db)
-    batch_size = max(1, batch_size)
+    batch_size = max(1, int(batch_size or get_settings().INGEST_SEMANTIC_REBUILD_BATCH_SIZE))
 
     total_columns = 0
     resolved_columns = 0

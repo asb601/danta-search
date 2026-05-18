@@ -18,12 +18,13 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logger import LOG_DIR, format_pipeline_line
-from app.dependencies import require_admin
+from app.dependencies import get_current_user, require_admin
+from app.models.audit_log import AuditLog
 from app.models.background_job import BackgroundJob
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
@@ -32,7 +33,7 @@ from app.models.user import User
 router = APIRouter(prefix="/logs", tags=["logs"])
 
 # Only allow reading known log files — prevent path traversal
-_ALLOWED_FILES = {"system.log", "ai_pipeline.log", "llm_calls.log", "costs.log", "pipeline.log"}
+_ALLOWED_FILES = {"system.log", "ai_pipeline.log", "llm_calls.log", "costs.log", "pipeline.log", "audit.log"}
 
 
 def _safe_log_path(filename: str) -> Path:
@@ -264,6 +265,180 @@ async def file_timings(
         })
 
     return {"files": rows}
+
+
+# ── Scoped audit log endpoints ───────────────────────────────────────────────
+
+_DOMAIN_LOG_ROLES = {"developer", "manager"}
+
+
+def _has_admin_log_scope(user: User) -> bool:
+    return bool(user.is_admin or user.role == "admin")
+
+
+def _has_domain_log_scope(user: User) -> bool:
+    return user.role in _DOMAIN_LOG_ROLES
+
+
+def _audit_scope_clause(user: User):
+    """Return the row-level visibility predicate for the requesting user."""
+    if _has_admin_log_scope(user):
+        return None
+
+    if _has_domain_log_scope(user):
+        domains = list(user.allowed_domains or [])
+        if not domains:
+            return None
+        return or_(
+            AuditLog.actor_user_id == user.id,
+            AuditLog.domain_tag.in_(domains),
+            AuditLog.actor_allowed_domains.op("&&")(domains),
+        )
+
+    return AuditLog.actor_user_id == user.id
+
+
+def _apply_audit_scope(stmt, user: User):
+    scope = _audit_scope_clause(user)
+    return stmt.where(scope) if scope is not None else stmt
+
+
+def _audit_row(row: AuditLog) -> dict:
+    return {
+        "id": row.id,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "event_type": row.event_type,
+        "action": row.action,
+        "actor": {
+            "user_id": row.actor_user_id,
+            "email": row.actor_email,
+            "name": row.actor_name,
+            "role": row.actor_role,
+            "is_admin": row.actor_is_admin,
+            "allowed_domains": row.actor_allowed_domains,
+            "organization_id": row.actor_organization_id,
+        },
+        "request": {
+            "method": row.method,
+            "path": row.path,
+            "route_template": row.route_template,
+            "status_code": row.status_code,
+            "duration_ms": row.duration_ms,
+            "ip_address": row.ip_address,
+            "user_agent": row.user_agent,
+        },
+        "context": {
+            "domain_tag": row.domain_tag,
+            "container_id": row.container_id,
+            "file_id": row.file_id,
+            "file_name": row.file_name,
+            "folder_id": row.folder_id,
+            "folder_name": row.folder_name,
+            "target_user_id": row.target_user_id,
+            "target_user_email": row.target_user_email,
+            "target_user_name": row.target_user_name,
+        },
+        "details": row.details,
+        "error": row.error,
+    }
+
+
+@router.get("/audit/users")
+async def audit_users(
+    q: str | None = Query(default=None, min_length=1, max_length=120),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return visible actors for the audit user/name filter."""
+    stmt = select(
+        AuditLog.actor_user_id,
+        AuditLog.actor_email,
+        AuditLog.actor_name,
+        AuditLog.actor_role,
+    ).where(AuditLog.actor_user_id.isnot(None)).distinct()
+    stmt = _apply_audit_scope(stmt, current_user)
+
+    if q:
+        term = f"%{q.lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(AuditLog.actor_email).like(term),
+                func.lower(AuditLog.actor_name).like(term),
+            )
+        )
+
+    rows = (await db.execute(stmt.order_by(AuditLog.actor_email).limit(limit))).all()
+    return {
+        "users": [
+            {
+                "user_id": row.actor_user_id,
+                "email": row.actor_email,
+                "name": row.actor_name,
+                "role": row.actor_role,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/audit")
+async def audit_log(
+    lines: int = Query(default=100, ge=1, le=2000),
+    user: str | None = Query(default=None, min_length=1, max_length=120),
+    email: str | None = Query(default=None, min_length=1, max_length=320),
+    name: str | None = Query(default=None, min_length=1, max_length=255),
+    role: str | None = Query(default=None, min_length=1, max_length=40),
+    domain: str | None = Query(default=None, min_length=1, max_length=120),
+    action: str | None = Query(default=None, min_length=1, max_length=160),
+    path: str | None = Query(default=None, min_length=1, max_length=240),
+    status_code: int | None = Query(default=None, ge=100, le=599),
+    event_type: str | None = Query(default=None, min_length=1, max_length=40),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return scoped structured audit logs.
+
+    Visibility:
+      * admin: every row
+      * developer/manager with unrestricted domains: every row
+      * developer/manager with allowed_domains: own rows + matching domains
+      * regular user: own rows only
+    """
+    stmt = select(AuditLog)
+    stmt = _apply_audit_scope(stmt, current_user)
+
+    if user:
+        term = f"%{user.lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(AuditLog.actor_email).like(term),
+                func.lower(AuditLog.actor_name).like(term),
+            )
+        )
+    if email:
+        stmt = stmt.where(func.lower(AuditLog.actor_email).like(f"%{email.lower()}%"))
+    if name:
+        stmt = stmt.where(func.lower(AuditLog.actor_name).like(f"%{name.lower()}%"))
+    if role:
+        stmt = stmt.where(func.lower(AuditLog.actor_role) == role.lower())
+    if domain:
+        stmt = stmt.where(func.lower(AuditLog.domain_tag) == domain.lower())
+    if action:
+        stmt = stmt.where(func.lower(AuditLog.action).like(f"%{action.lower()}%"))
+    if path:
+        stmt = stmt.where(func.lower(AuditLog.path).like(f"%{path.lower()}%"))
+    if status_code is not None:
+        stmt = stmt.where(AuditLog.status_code == status_code)
+    if event_type:
+        stmt = stmt.where(func.lower(AuditLog.event_type) == event_type.lower())
+
+    rows = (await db.execute(stmt.order_by(AuditLog.created_at.desc()).limit(lines))).scalars().all()
+    return {
+        "scope": "admin" if _has_admin_log_scope(current_user) else "domain" if _has_domain_log_scope(current_user) else "self",
+        "returned": len(rows),
+        "lines": [_audit_row(row) for row in rows],
+    }
 
 
 @router.get("/{filename}")

@@ -27,9 +27,18 @@ import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 from azure.storage.blob import BlobServiceClient
 
+from app.core.config import get_settings
 from app.core.cost_tracker import track_azure_blob
 from app.core.logger import ingest_logger
 from app.core import metrics
+from app.services.ingestion_config import (
+    null_tokens,
+    parquet_blob_path_for,
+    schema_description_tokens,
+    schema_field_name_tokens,
+    schema_filename_tokens,
+    schema_notes_tokens,
+)
 
 # ── Azure streaming helpers ──────────────────────────────────────────────────
 
@@ -74,7 +83,7 @@ class _ParquetBlobWriter(io.RawIOBase):
     No disk.  ~8 MB RAM overhead.
     """
 
-    _MIN_BLOCK = 8 * 1024 * 1024  # 8 MB per staged block
+    _MIN_BLOCK = max(1, int(get_settings().INGEST_PARQUET_BLOCK_BYTES))
 
     def __init__(self, blob_client) -> None:
         super().__init__()
@@ -133,33 +142,16 @@ def _ms(start: float) -> float:
 
 # ── Schema dictionary detection ───────────────────────────────────────────────
 # A file is treated as a data-dictionary ONLY when its filename contains the
-# word "schema" (e.g. schema.csv, schema_fbl3n.csv, fbl3n_schema.csv,
-# schema-bseg-fields.parquet). This is an explicit, opt-in convention — we
+# word "schema" (for example schema.csv or fields_schema.csv).
+# This is an explicit, opt-in convention — we
 # do NOT scan random files looking for dictionary-shaped column names because
-# that produces false positives on ordinary lookup/master tables (e.g. a
-# vendor master that happens to have name + description columns).
+# that produces false positives on ordinary lookup tables with name and
+# description columns.
 
 # Once a file is identified as a schema by filename, we map its columns to:
 #   - field_name_col: the column listing technical field names (e.g. SHKZG)
 #   - description_col: the column with the human description
 #   - notes_col: optional secondary long-text column
-_FIELD_NAME_TOKENS = frozenset({
-    "field", "fieldname", "field_name", "column", "column_name", "col_name",
-    "attribute", "technical_name", "tabname", "dataelem", "rollname",
-    "element", "fieldid", "field_id", "colname",
-})
-_DESCRIPTION_TOKENS = frozenset({
-    "description", "desc", "short_text", "long_text", "scrtext_m",
-    "scrtext_l", "ddtext", "reptext", "label", "meaning",
-    "definition", "documentation", "help_text", "medium_text",
-    "descr", "description_text", "explanation",
-})
-_NOTES_TOKENS = frozenset({
-    "long_text", "scrtext_l", "documentation", "notes", "remark",
-    "extended_description", "detail", "comment",
-})
-
-
 def _norm_col(name: str) -> str:
     """Normalise a column name for pattern matching."""
     return name.lower().replace("-", "_").replace(" ", "_")
@@ -171,9 +163,9 @@ def _filename_marks_schema(blob_path: str) -> bool:
     Match rule: the basename (without directories or extension), tokenised
     on common separators, contains the literal token "schema". This catches:
       - schema.csv
-      - schema_fbl3n.csv
-      - fbl3n_schema.csv
-      - schema-bseg-fields.parquet
+    - schema_fields.csv
+    - fields_schema.csv
+    - schema-column-map.parquet
       - 2024.10.01_schema_v2.csv
     But NOT a column called "schema_id" inside a regular data file, since
     we never look at columns to decide.
@@ -184,7 +176,7 @@ def _filename_marks_schema(blob_path: str) -> bool:
     base = blob_path.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
     # Tokenise on _, -, ., space.
     tokens = re.split(r"[_\-.\s]+", base)
-    return "schema" in tokens
+    return bool(set(tokens) & schema_filename_tokens())
 
 
 def detect_schema_dictionary(blob_path: str, profiles: list[dict]) -> dict | None:
@@ -207,7 +199,7 @@ def detect_schema_dictionary(blob_path: str, profiles: list[dict]) -> dict | Non
     col_names = [p["name"] for p in profiles]
     normed = {n: _norm_col(n) for n in col_names}
 
-    def _pick(tokens: frozenset, exclude: set[str]) -> str | None:
+    def _pick(tokens: frozenset[str], exclude: set[str]) -> str | None:
         # Exact match first.
         for original, norm in normed.items():
             if original in exclude:
@@ -222,8 +214,8 @@ def detect_schema_dictionary(blob_path: str, profiles: list[dict]) -> dict | Non
                 return original
         return None
 
-    field_name_col = _pick(_FIELD_NAME_TOKENS, set())
-    description_col = _pick(_DESCRIPTION_TOKENS, {field_name_col} if field_name_col else set())
+    field_name_col = _pick(schema_field_name_tokens(), set())
+    description_col = _pick(schema_description_tokens(), {field_name_col} if field_name_col else set())
 
     if not field_name_col or not description_col:
         ingest_logger.warning(
@@ -239,7 +231,7 @@ def detect_schema_dictionary(blob_path: str, profiles: list[dict]) -> dict | Non
         )
         return None
 
-    notes_col = _pick(_NOTES_TOKENS, {field_name_col, description_col})
+    notes_col = _pick(schema_notes_tokens(), {field_name_col, description_col})
 
     return {
         "field_name_col": field_name_col,
@@ -257,9 +249,13 @@ def _profile_from_batch(batch: pa.RecordBatch) -> list[dict]:
        "min"?, "max"?, "distinct_count"?, "top_values"?}
 
     Called on the first streaming batch from the CSV reader, which is a
-    representative sample (64 MB of CSV = ~500K–1M rows for typical SAP files).
+    representative sample controlled by INGEST_PARQUET_READ_BLOCK_BYTES.
     """
     num_rows = len(batch)
+    settings = get_settings()
+    top_values_limit = max(0, int(settings.INGEST_PARQUET_TOP_VALUES))
+    category_max_ratio = max(0.0, float(settings.INGEST_PARQUET_CATEGORY_MAX_RATIO))
+    category_max_distinct = max(1, int(settings.INGEST_PARQUET_CATEGORY_MAX_DISTINCT))
     profiles: list[dict] = []
 
     for col_name in batch.schema.names:
@@ -307,7 +303,7 @@ def _profile_from_batch(batch: pa.RecordBatch) -> list[dict]:
                 dictionary = col.dictionary
                 distinct_count = len(dictionary)
                 profile["distinct_count"] = distinct_count
-                profile["top_values"] = dictionary[:10].to_pylist()
+                profile["top_values"] = dictionary[:top_values_limit].to_pylist()
             except Exception:
                 pass
         elif pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
@@ -317,11 +313,11 @@ def _profile_from_batch(batch: pa.RecordBatch) -> list[dict]:
                     distinct_count = pc.count_distinct(non_null).as_py()
                     profile["distinct_count"] = distinct_count
                     cardinality_ratio = distinct_count / len(non_null)
-                    if cardinality_ratio < 0.05 and distinct_count < 5000:
+                    if cardinality_ratio < category_max_ratio and distinct_count < category_max_distinct:
                         profile["semantic_type"] = "category"
                         vc = non_null.value_counts()
                         sorted_vc = vc.sort_by([("counts", "descending")])
-                        profile["top_values"] = sorted_vc["values"][:10].to_pylist()
+                        profile["top_values"] = sorted_vc["values"][:top_values_limit].to_pylist()
             except Exception:
                 pass
 
@@ -368,24 +364,28 @@ def _run_conversion(
     if job_id:
         _PROGRESS[job_id] = {"phase": "converting", "pct": 0}
 
+    settings = get_settings()
+    azure_buffer_bytes = max(1, int(settings.INGEST_PARQUET_AZURE_BUFFER_BYTES))
+    read_block_bytes = max(1, int(settings.INGEST_PARQUET_READ_BLOCK_BYTES))
+    auto_dict_max_cardinality = max(1, int(settings.INGEST_PARQUET_AUTO_DICT_MAX_CARDINALITY))
+    progress_max_pct = max(1, min(100, int(settings.INGEST_PARQUET_PROGRESS_MAX_PCT)))
+    progress_batch_pct = max(1, int(settings.INGEST_PARQUET_PROGRESS_BATCH_PCT))
+
     # ── Stream CSV from Azure ─────────────────────────────────────────────────
     downloader = src_bc.download_blob()
-    azure_stream = io.BufferedReader(_AzureInputStream(downloader), buffer_size=8 * 1024 * 1024)
+    azure_stream = io.BufferedReader(_AzureInputStream(downloader), buffer_size=azure_buffer_bytes)
 
     reader = pa_csv.open_csv(
         azure_stream,
-        read_options=pa_csv.ReadOptions(block_size=64 * 1024 * 1024),
+        read_options=pa_csv.ReadOptions(block_size=read_block_bytes),
         parse_options=pa_csv.ParseOptions(),
         convert_options=pa_csv.ConvertOptions(
-            null_values=[
-                "", "NULL", "null", "N/A", "n/a", "NA", "na",
-                "None", "none", "NaN", "nan", "-", "TBD", "tbd",
-            ],
+            null_values=list(null_tokens()),
             strings_can_be_null=True,
             # Auto-encode low-cardinality string columns as Parquet dictionaries
-            # (ideal for SAP categorical codes like BLART, MWSKZ, WAERS, …)
+            # Useful for low-cardinality categorical codes.
             auto_dict_encode=True,
-            auto_dict_max_cardinality=500,
+            auto_dict_max_cardinality=auto_dict_max_cardinality,
         ),
     )
 
@@ -402,8 +402,8 @@ def _run_conversion(
                 parquet_writer = pq.ParquetWriter(
                     blob_writer,
                     batch.schema,
-                    compression="zstd",
-                    compression_level=3,
+                    compression=settings.INGEST_PARQUET_COMPRESSION,
+                    compression_level=max(1, int(settings.INGEST_PARQUET_COMPRESSION_LEVEL)),
                     write_statistics=True,    # row-group min/max → DataFusion predicate pushdown
                     write_page_index=True,    # page-level stats → finer pruning than row-group
                     use_dictionary=True,      # dictionary encoding for low-cardinality string cols
@@ -412,7 +412,10 @@ def _run_conversion(
             total_rows += len(batch)
             if job_id:
                 # Rough progress estimate — each 64 MB batch ≈ 5% of a 1.2 GB CSV
-                _PROGRESS[job_id] = {"phase": "converting", "pct": min(95, batch_idx * 5)}
+                _PROGRESS[job_id] = {
+                    "phase": "converting",
+                    "pct": min(progress_max_pct, batch_idx * progress_batch_pct),
+                }
 
         if parquet_writer is not None:
             parquet_writer.close()   # writes Parquet footer into blob_writer buffer
@@ -489,7 +492,7 @@ async def convert_csv_to_parquet(
     Returns {"parquet_blob_path": str, "size_bytes": int}
     Raises on any failure — caller is responsible for catching and recording the error.
     """
-    parquet_blob_path = blob_path.rsplit(".", 1)[0] + ".parquet"
+    parquet_blob_path = parquet_blob_path_for(blob_path)
 
     start = time.perf_counter()
     ingest_logger.info("parquet_service", operation="convert_csv_to_parquet",

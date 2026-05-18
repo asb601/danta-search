@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import async_session, get_db
 from app.core.logger import upload_logger, blob_logger, db_logger, ingest_logger
 from app.dependencies import get_current_user, require_admin, require_developer
+from app.services.audit_log import record_audit_event_safe
+from app.services.ingestion_config import IngestStatus, is_auto_ingest_file, parquet_blob_path_for
 from app.worker.ingest_tasks import run_ingest_pipeline
 from app.models.background_job import BackgroundJob
 from app.models.container import ContainerConfig
@@ -229,7 +231,7 @@ async def confirm_upload(
         owner_id=admin.id,
         uploaded_by_id=admin.id,
         blob_path=body.blob_name,
-        ingest_status="not_ingested",
+        ingest_status=IngestStatus.NOT_INGESTED.value,
         upload_duration_secs=body.upload_duration_secs,
     )
 
@@ -241,13 +243,47 @@ async def confirm_upload(
     await db.refresh(db_file)
     db_logger.info("query_complete", query="insert_file", duration_ms=round((time.perf_counter() - db_start) * 1000, 2))
 
-    upload_logger.info("confirm_complete", file_id=body.file_id, filename=body.filename, duration_ms=round((time.perf_counter() - start) * 1000, 2))
+    auto_ingest = is_auto_ingest_file(body.filename)
+
+    upload_logger.info(
+        "confirm_complete",
+        file_id=body.file_id,
+        filename=body.filename,
+        user_id=admin.id,
+        user_email=admin.email,
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+    )
+
+    try:
+        await record_audit_event_safe(
+            actor=admin,
+            action="files.confirm_upload",
+            event_type="action",
+            status_code=200,
+            path="/api/files/confirm-upload",
+            route_template="/api/files/confirm-upload",
+            domain_tag=parent_domain_tag,
+            container_id=body.container_id,
+            file_id=db_file.id,
+            file_name=db_file.name,
+            folder_id=target_folder_id,
+            details={
+                "size": body.size,
+                "content_type": mime,
+                "blob_name": body.blob_name,
+                "relative_path": body.relative_path,
+                "auto_ingest": auto_ingest,
+            },
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        upload_logger.warning("confirm_upload_audit_failed", file_id=body.file_id, error=str(exc)[:300])
 
     # Auto-ingest CSV/TXT files — dispatched to a Celery worker process.
     # Returns immediately; the worker runs preprocess + DuckDB + AI + parquet
     # in isolation from this event loop.
-    ext = (body.filename or "").rsplit(".", 1)[-1].lower()
-    if ext in ("csv", "txt", "tsv"):
+    if auto_ingest:
         run_ingest_pipeline.delay(body.file_id)
 
     return _file_to_out(db_file)
@@ -358,7 +394,7 @@ async def delete_file(
 
     # Remove original + parquet blobs from Azure Blob Storage
     blob_name = file.blob_path or file.id
-    parquet_blob_name = blob_name.rsplit(".", 1)[0] + ".parquet"
+    parquet_blob_name = parquet_blob_path_for(blob_name)
 
     if file.container_id:
         try:

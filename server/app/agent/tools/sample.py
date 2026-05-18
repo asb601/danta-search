@@ -28,9 +28,10 @@ def _execute(sql: str, connection_string: str, container_name: str | None, max_r
 def _sql_path(blob_path: str, parquet_paths: dict[str, str], container: str) -> str:
     if parquet_paths and blob_path in parquet_paths:
         return f"read_parquet('az://{container}/{parquet_paths[blob_path]}')"
+    sample_rows = max(1, int(get_settings().INGEST_DUCKDB_SAMPLE_ROWS))
     return (
         f"read_csv_auto('az://{container}/{blob_path}', "
-        f"sample_size=500, null_padding=true, ignore_errors=true)"
+        f"sample_size={sample_rows}, null_padding=true, ignore_errors=true)"
     )
 
 

@@ -41,8 +41,8 @@ class ContainerConfig(Base):
     # Schema:
     #   {
     #       "roles": [
-    #           {"role": "claim", "kind": "entity_key", "description": "insurance claim id"},
-    #           {"role": "loss_amount", "kind": "additive_measure", "default_aggregation": "SUM"}
+    #           {"role": "record", "kind": "entity_key", "description": "row grain id"},
+    #           {"role": "amount", "kind": "additive_measure", "default_aggregation": "SUM"}
     #       ]
     #   }
     semantic_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)

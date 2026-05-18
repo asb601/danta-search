@@ -25,12 +25,18 @@ from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
 from app.retrieval.embeddings import build_search_text, embed_text
 from app.services.analytics_service import compute_and_store_analytics, trigger_parquet_conversion
-from app.services.data_preprocessor import ALL_EXTS as _PREPROCESS_EXTS, preprocess_file
+from app.services.data_preprocessor import preprocess_file
+from app.services.ingestion_config import (
+    IngestStatus,
+    PayloadStatus,
+    StageName,
+    is_parquet_source_file,
+    preprocess_extensions,
+)
 from app.services.ingestion_service import _is_schema_file, _load_schema_glossary
 
 Payload = dict[str, Any]
-_EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
-_CSV_LIKE_EXTS = {".csv", ".tsv", ".txt"}
+_PREPROCESS_EXTS = preprocess_extensions(dotted=True)
 
 
 def _ms(start: float) -> float:
@@ -39,10 +45,6 @@ def _ms(start: float) -> float:
 
 def _file_ext(file: File) -> str:
     return Path(file.name).suffix.lower()
-
-
-def _blob_ext(file: File) -> str:
-    return Path(file.blob_path or file.name).suffix.lower()
 
 
 def _next(payload: Payload, *, stage: str, **extra: Any) -> Payload:
@@ -88,25 +90,26 @@ async def prepare_pipeline(file_id: str) -> Payload:
     async with _async_session() as db:
         file = await db.get(File, file_id)
         if not file or not file.blob_path:
-            return {"file_id": file_id, "status": "skipped", "reason": "file or blob_path missing"}
+            return {"file_id": file_id, "status": PayloadStatus.SKIPPED.value, "reason": "file or blob_path missing"}
 
-        if file.ingest_status == "pending":
-            return {"file_id": file_id, "status": "already_running"}
+        if file.ingest_status == IngestStatus.PENDING.value:
+            return {"file_id": file_id, "status": PayloadStatus.ALREADY_RUNNING.value}
 
-        file.ingest_status = "pending"
+        file.ingest_status = IngestStatus.PENDING.value
         await db.commit()
-        return {"file_id": file_id, "status": "queued"}
+        return {"file_id": file_id, "status": PayloadStatus.QUEUED.value}
 
 
 async def clean_file_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.CLEAN.value
 
     async with _async_session() as db:
         file, container = await _load_file_and_container(db, file_id)
         ext = _file_ext(file)
 
-        ingest_logger.info("ingest_stage", stage="clean", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
 
         if ext in _PREPROCESS_EXTS and not file.is_preprocessed:
             analytics_row = (
@@ -141,7 +144,7 @@ async def clean_file_stage(payload: Payload) -> Payload:
 
             ingest_logger.info(
                 "ingest_stage",
-                stage="clean",
+                stage=stage,
                 status="done",
                 file_id=file_id,
                 clean_blob_path=prep.clean_blob_path,
@@ -149,27 +152,28 @@ async def clean_file_stage(payload: Payload) -> Payload:
                 clean_rows=prep.clean_rows,
                 duration_ms=_ms(start),
             )
-            return _next(payload, stage="clean", clean_blob_path=prep.clean_blob_path)
+            return _next(payload, stage=stage, clean_blob_path=prep.clean_blob_path)
 
         if not await _blob_exists(container.connection_string, container.container_name, file.blob_path):
-            file.ingest_status = "not_ingested"
+            file.ingest_status = IngestStatus.NOT_INGESTED.value
             await db.commit()
             raise RuntimeError(f"source blob missing in Azure: {file.blob_path}")
 
         ingest_logger.info(
             "ingest_stage",
-            stage="clean",
+            stage=stage,
             status="skipped",
             reason="already_preprocessed_or_not_supported",
             file_id=file_id,
             duration_ms=_ms(start),
         )
-        return _next(payload, stage="clean", clean_blob_path=file.blob_path)
+        return _next(payload, stage=stage, clean_blob_path=file.blob_path)
 
 
 async def parquet_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.PARQUET.value
 
     async with _async_session() as db:
         file, container = await _load_file_and_container(db, file_id)
@@ -177,7 +181,7 @@ async def parquet_stage(payload: Payload) -> Payload:
         if not blob_path:
             raise RuntimeError("blob_path missing before parquet stage")
 
-        ingest_logger.info("ingest_stage", stage="parquet", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
 
         analytics = (
             await db.execute(select(FileAnalytics).where(FileAnalytics.file_id == file_id))
@@ -185,22 +189,22 @@ async def parquet_stage(payload: Payload) -> Payload:
         if analytics and analytics.parquet_blob_path:
             ingest_logger.info(
                 "ingest_stage",
-                stage="parquet",
+                stage=stage,
                 status="skipped",
                 reason="parquet_already_exists",
                 file_id=file_id,
             )
-            return _next(payload, stage="parquet", parquet_blob_path=analytics.parquet_blob_path)
+            return _next(payload, stage=stage, parquet_blob_path=analytics.parquet_blob_path)
 
-        if _blob_ext(file) not in _CSV_LIKE_EXTS:
+        if not is_parquet_source_file(file.blob_path or file.name):
             ingest_logger.info(
                 "ingest_stage",
-                stage="parquet",
+                stage=stage,
                 status="skipped",
                 reason="not_csv_like",
                 file_id=file_id,
             )
-            return _next(payload, stage="parquet", parquet_blob_path=None)
+            return _next(payload, stage=stage, parquet_blob_path=None)
 
     await trigger_parquet_conversion(
         file_id=file_id,
@@ -217,22 +221,23 @@ async def parquet_stage(payload: Payload) -> Payload:
 
     ingest_logger.info(
         "ingest_stage",
-        stage="parquet",
+        stage=stage,
         status="done",
         file_id=file_id,
         parquet_blob_path=parquet_blob_path,
         duration_ms=_ms(start),
     )
-    return _next(payload, stage="parquet", parquet_blob_path=parquet_blob_path)
+    return _next(payload, stage=stage, parquet_blob_path=parquet_blob_path)
 
 
 async def metadata_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.METADATA.value
 
     async with _async_session() as db:
         file, container = await _load_file_and_container(db, file_id)
-        ingest_logger.info("ingest_stage", stage="metadata", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
 
         sample = await sample_file(
             blob_path=file.blob_path,
@@ -256,21 +261,37 @@ async def metadata_stage(payload: Payload) -> Payload:
         metadata.ingested_at = datetime.now(timezone.utc)
         await db.commit()
 
+        column_types = {
+            str(col.get("name")): col.get("type")
+            for col in sample["columns_info"]
+            if isinstance(col, dict) and col.get("name")
+        }
+        ingest_logger.info(
+            "metadata_schema_detected",
+            stage=stage,
+            status="done",
+            file_id=file_id,
+            filename=file.name,
+            row_count=sample["row_count"],
+            column_types=column_types,
+        )
+
         ingest_logger.info(
             "ingest_stage",
-            stage="metadata",
+            stage=stage,
             status="done",
             file_id=file_id,
             columns=len(sample["columns_info"]),
             row_count=sample["row_count"],
             duration_ms=_ms(start),
         )
-        return _next(payload, stage="metadata")
+        return _next(payload, stage=stage)
 
 
 async def ai_description_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.AI_DESCRIPTION.value
 
     async with _async_session() as db:
         file, container = await _load_file_and_container(db, file_id)
@@ -294,7 +315,7 @@ async def ai_description_stage(payload: Payload) -> Payload:
                         container_name=container.container_name,
                     )
 
-        ingest_logger.info("ingest_stage", stage="ai_description", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         description = await generate_file_description(
             columns_info=metadata.columns_info or [],
             sample_rows=metadata.sample_rows or [],
@@ -323,17 +344,18 @@ async def ai_description_stage(payload: Payload) -> Payload:
 
         ingest_logger.info(
             "ingest_stage",
-            stage="ai_description",
+            stage=stage,
             status="done",
             file_id=file_id,
             duration_ms=_ms(start),
         )
-        return _next(payload, stage="ai_description")
+        return _next(payload, stage=stage)
 
 
 async def ontology_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.ONTOLOGY.value
 
     async with _async_session() as db:
         file, container = await _load_file_and_container(db, file_id)
@@ -354,7 +376,7 @@ async def ontology_stage(payload: Payload) -> Payload:
 
         from app.services.column_role_resolver import resolve_column_roles  # noqa: PLC0415
 
-        ingest_logger.info("ingest_stage", stage="ontology", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         col_roles, role_src = await resolve_column_roles(
             columns_info=metadata.columns_info or [],
             filename=file.name,
@@ -367,19 +389,20 @@ async def ontology_stage(payload: Payload) -> Payload:
 
         ingest_logger.info(
             "ingest_stage",
-            stage="ontology",
+            stage=stage,
             status="done",
             file_id=file_id,
             resolved=len(col_roles),
             source=role_src,
             duration_ms=_ms(start),
         )
-        return _next(payload, stage="ontology")
+        return _next(payload, stage=stage)
 
 
 async def embedding_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.EMBEDDING.value
 
     async with _async_session() as db:
         metadata = (
@@ -388,7 +411,7 @@ async def embedding_stage(payload: Payload) -> Payload:
         if not metadata:
             raise RuntimeError("metadata missing before embedding stage")
 
-        ingest_logger.info("ingest_stage", stage="embedding", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         search_text = build_search_text(metadata)
         metadata.search_text = search_text
         metadata.description_embedding = await embed_text(search_text)
@@ -396,18 +419,19 @@ async def embedding_stage(payload: Payload) -> Payload:
 
         ingest_logger.info(
             "ingest_stage",
-            stage="embedding",
+            stage=stage,
             status="done",
             file_id=file_id,
             search_text_len=len(search_text),
             duration_ms=_ms(start),
         )
-        return _next(payload, stage="embedding")
+        return _next(payload, stage=stage)
 
 
 async def opensearch_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.OPENSEARCH.value
 
     async with _async_session() as db:
         metadata = (
@@ -418,22 +442,23 @@ async def opensearch_stage(payload: Payload) -> Payload:
 
         from app.retrieval.opensearch_indexer import index_metadata_document  # noqa: PLC0415
 
-        ingest_logger.info("ingest_stage", stage="opensearch", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         await index_metadata_document(metadata, db)
 
     ingest_logger.info(
         "ingest_stage",
-        stage="opensearch",
+        stage=stage,
         status="done",
         file_id=file_id,
         duration_ms=_ms(start),
     )
-    return _next(payload, stage="opensearch")
+    return _next(payload, stage=stage)
 
 
 async def analytics_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.ANALYTICS.value
 
     async with _async_session() as db:
         file, container = await _load_file_and_container(db, file_id)
@@ -443,7 +468,7 @@ async def analytics_stage(payload: Payload) -> Payload:
         if not metadata:
             raise RuntimeError("metadata missing before analytics stage")
 
-        ingest_logger.info("ingest_stage", stage="analytics", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         analytics = await compute_and_store_analytics(
             file_id=file_id,
             blob_path=file.blob_path,
@@ -455,18 +480,19 @@ async def analytics_stage(payload: Payload) -> Payload:
 
         ingest_logger.info(
             "ingest_stage",
-            stage="analytics",
+            stage=stage,
             status="done",
             file_id=file_id,
             row_count=analytics.row_count,
             duration_ms=_ms(start),
         )
-        return _next(payload, stage="analytics")
+        return _next(payload, stage=stage)
 
 
 async def relationship_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.RELATIONSHIPS.value
 
     async with _async_session() as db:
         file = await db.get(File, file_id)
@@ -478,7 +504,7 @@ async def relationship_stage(payload: Payload) -> Payload:
 
         from app.services.relationship_detector import detect_relationships  # noqa: PLC0415
 
-        ingest_logger.info("ingest_stage", stage="relationships", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         relationship_count = await detect_relationships(
             file_id=file_id,
             blob_path=file.blob_path or metadata.blob_path,
@@ -488,44 +514,46 @@ async def relationship_stage(payload: Payload) -> Payload:
 
         ingest_logger.info(
             "ingest_stage",
-            stage="relationships",
+            stage=stage,
             status="done",
             file_id=file_id,
             relationships_created=relationship_count,
             duration_ms=_ms(start),
         )
-        return _next(payload, stage="relationships", relationships_created=relationship_count)
+        return _next(payload, stage=stage, relationships_created=relationship_count)
 
 
 async def semantic_layer_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
+    stage = StageName.SEMANTIC_LAYER.value
 
     async with _async_session() as db:
         from app.services.semantic_layer_builder import build_semantic_layer_for_file  # noqa: PLC0415
 
-        ingest_logger.info("ingest_stage", stage="semantic_layer", status="started", file_id=file_id)
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         result = await build_semantic_layer_for_file(file_id, db)
 
     ingest_logger.info(
         "ingest_stage",
-        stage="semantic_layer",
+        stage=stage,
         status="done",
         file_id=file_id,
         entity=result.get("entity"),
         relationships=result.get("relationships"),
         duration_ms=_ms(start),
     )
-    return _next(payload, stage="semantic_layer", semantic_layer=result)
+    return _next(payload, stage=stage, semantic_layer=result)
 
 
 async def complete_ingestion_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
+    stage = StageName.COMPLETE.value
 
     async with _async_session() as db:
         file = await db.get(File, file_id)
         if file:
-            file.ingest_status = "ingested"
+            file.ingest_status = IngestStatus.INGESTED.value
             await db.commit()
 
     try:
@@ -535,8 +563,8 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
     except Exception as exc:
         ingest_logger.warning("catalog_invalidate_failed", file_id=file_id, error=str(exc)[:200])
 
-    ingest_logger.info("ingest_stage", stage="complete", status="done", file_id=file_id)
-    return _next(payload, stage="complete", status="done")
+    ingest_logger.info("ingest_stage", stage=stage, status="done", file_id=file_id)
+    return _next(payload, stage=stage, status=PayloadStatus.DONE.value)
 
 
 async def mark_ingestion_failed(file_id: str, stage: str, exc: BaseException) -> None:
@@ -544,7 +572,7 @@ async def mark_ingestion_failed(file_id: str, stage: str, exc: BaseException) ->
     async with _async_session() as db:
         file = await db.get(File, file_id)
         if file:
-            file.ingest_status = "failed"
+            file.ingest_status = IngestStatus.FAILED.value
 
         metadata = (
             await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))

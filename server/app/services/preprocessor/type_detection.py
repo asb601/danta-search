@@ -5,7 +5,7 @@ Why this module exists
 Type detection during ingestion used to live inside data_preprocessor.py as a
 ~250-line `_build_converters` function with scattered helpers. That function
 hardcoded every rule for every supported file type, so each new edge case
-(LEDGER_ID being misread as a date, INVOICE_NUM losing leading zeros) added
+with identifier columns being coerced into dates or numbers added
 another patch on top of an unreviewable pile.
 
 This module replaces that pattern with a small, ordered registry of focused
@@ -45,6 +45,8 @@ import numpy as np
 import pandas as pd
 
 from app.core.logger import ingest_logger
+from app.core.config import get_settings
+from app.services.ingestion_config import configured_tokens
 
 
 # ── Public dataclass ─────────────────────────────────────────────────────────
@@ -92,31 +94,15 @@ class TypeDetector(Protocol):
 class IdentifierDetector:
     """Columns that name themselves as identifiers are NEVER coerced.
 
-    Rule: column NAME is the source of truth, not values. A column called
-    LEDGER_ID is an identifier even if its values look like years.
+    Rule: column NAME is the source of truth, not values. Matching names are
+    configured through ingestion settings so new source systems do not require
+    code edits.
 
     The converter is a string-passthrough so leading zeros and exact original
     formatting are preserved verbatim.
     """
 
     name = "identifier"
-
-    # Match by: exact name, suffix, or prefix.
-    # Conservative additions only — when in doubt, omit (false negatives are
-    # safe: numeric/date detector still gets a chance).
-    EXACT_NAMES = frozenset({
-        "id", "uuid", "guid", "sku", "isin", "cusip", "ein", "ssn",
-        "ledger_id", "org_id", "set_of_books_id", "period_name",
-    })
-
-    SUFFIXES = (
-        "_id", "_num", "_number", "_no", "_key", "_code", "_ref", "_uuid",
-    )
-
-    PREFIXES = (
-        "ledger_", "code_combination", "voucher", "invoice_num", "invoice_no",
-        "journal_", "transaction_id", "doc_num", "document_num",
-    )
 
     @staticmethod
     def _identity_converter(value: object) -> object:
@@ -130,10 +116,14 @@ class IdentifierDetector:
         normalized = (col_name or "").strip().lower()
         if not normalized:
             return None
+        settings = get_settings()
+        exact_names = frozenset(configured_tokens(settings.INGEST_IDENTIFIER_EXACT_NAMES))
+        suffixes = configured_tokens(settings.INGEST_IDENTIFIER_SUFFIXES)
+        prefixes = configured_tokens(settings.INGEST_IDENTIFIER_PREFIXES)
         is_identifier = (
-            normalized in self.EXACT_NAMES
-            or normalized.endswith(self.SUFFIXES)
-            or normalized.startswith(self.PREFIXES)
+            normalized in exact_names
+            or normalized.endswith(suffixes)
+            or normalized.startswith(prefixes)
         )
         if not is_identifier:
             return None

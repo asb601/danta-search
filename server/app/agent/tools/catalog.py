@@ -8,6 +8,7 @@ from app.agent.search_normalization import (
     is_lookup_file,
     tokenize_search_query,
 )
+from app.core.config import get_settings
 from app.core.logger import pipeline_logger
 from app.retrieval.embeddings import build_search_text
 
@@ -58,7 +59,8 @@ def build_catalog_tools(
         if parquet_paths and blob_path in parquet_paths:
             return f"read_parquet('az://{container_name}/{parquet_paths[blob_path]}')"
         if container_name and blob_path:
-            return f"read_csv_auto('az://{container_name}/{blob_path}', sample_size=500, null_padding=true, ignore_errors=true)"
+            sample_rows = max(1, int(get_settings().INGEST_DUCKDB_SAMPLE_ROWS))
+            return f"read_csv_auto('az://{container_name}/{blob_path}', sample_size={sample_rows}, null_padding=true, ignore_errors=true)"
         return blob_path
 
     @tool
@@ -195,11 +197,12 @@ def build_catalog_tools(
             })
 
         cols = []
+        sample_preview_count = max(0, int(get_settings().INGEST_LOG_SAMPLE_ITEMS))
         for c in (match.get("columns_info") or []):
             cols.append({
                 "name": c["name"],
                 "type": c.get("type", "unknown"),
-                "sample_values": c.get("sample_values", [])[:5],
+                "sample_values": c.get("sample_values", [])[:sample_preview_count],
                 "unique_count": len(c.get("unique_values", [])),
             })
 

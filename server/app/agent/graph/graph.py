@@ -65,7 +65,7 @@ _stores_lock = threading.Lock()
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
 
 # ── Explicit file-name extractor ─────────────────────────────────────────────
-# When the user writes "on AP_invoices_all.csv" or "use billing_document.csv",
+# When the user writes "on file_a.csv" or "use file_b.csv",
 # we detect that mention and pin the matching catalog entry at the TOP of the
 # shortlist so the retrieval ranking can never override the user's choice.
 _HASH_PREFIX_RE = re.compile(r'^[0-9a-f]{8}_', re.IGNORECASE)
@@ -219,8 +219,7 @@ _SHORTLIST_TOP_K = 7
 
 # How many slots in the shortlist to reserve for "lookup / master" files —
 # generic dimension tables (parties, accounts, masters, dim_*) that almost
-# every entity-lookup query needs but which never rank well on metric tokens
-# like "invoice" / "amount" / "ageing".
+# every entity-lookup query needs but which may not rank well on metric tokens.
 _LOOKUP_RESERVED_SLOTS = 3
 
 # Lookup-file detection lives in search_normalization so the search_catalog
@@ -307,9 +306,8 @@ async def _build_agent_context(
     q_words = tokenize_search_query(query)
 
     # IDF weights — rare tokens (those that appear in few catalog files)
-    # are far more discriminative than common ones. Without this, a query
-    # like "Group by FBL3N line items" treats "items" (in 30 files) the
-    # same as "FBL3N" (in 1 file) and the wrong files win the fallback.
+    # are far more discriminative than common ones. Without this, a unique
+    # filename token and a common descriptive token can receive the same weight.
     # Computed once per request: O(N_files × N_tokens), trivial.
     _N = max(1, len(full_catalog))
     _doc_freq: dict[str, int] = {}
@@ -361,8 +359,8 @@ async def _build_agent_context(
         score = 0.0
         for w in q_words:
             weight = _idf.get(w, 1.0)
-            # Filename / blob_path hit is the strongest signal — a unique
-            # filename token (e.g. "FBL3N") should dominate the ranking.
+            # Filename / blob_path hit is the strongest signal; a unique
+            # filename token should dominate the ranking.
             if w in bp:
                 score += 3.0 * weight
             if w in column_text:
@@ -460,7 +458,7 @@ async def _build_agent_context(
         metrics.inc("catalog_fallback_count")
 
     # ── STEP 2.55: PIN EXPLICITLY-MENTIONED FILES ────────────────────────────
-    # If the user named a specific file (e.g. "on AP_invoices_all.csv"),
+    # If the user named a specific file,
     # force that file to the front of the shortlist regardless of retrieval rank.
     # This is done AFTER all retrieval/lookup logic so nothing can push it out.
     mentioned_entries = _extract_mentioned_files(query, full_catalog)

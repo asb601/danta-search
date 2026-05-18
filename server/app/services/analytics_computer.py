@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+from app.core.config import get_settings
+
 _NUMERIC_TYPES = {
     "int64",
     "float64",
@@ -81,6 +83,13 @@ def round_value(val: Any) -> Any:
 
 def compute_sample_analytics(columns_info: list[dict], sample_rows: list[dict]) -> dict[str, Any]:
     """Compute column stats, value counts and cross-tabs from sample rows."""
+    settings = get_settings()
+    sample_note = f"from {max(1, int(settings.INGEST_DUCKDB_SAMPLE_ROWS))}-row sample"
+    value_count_columns = max(0, int(settings.INGEST_ANALYTICS_VALUE_COUNT_COLUMNS))
+    value_count_top_values = max(0, int(settings.INGEST_ANALYTICS_VALUE_COUNT_TOP_VALUES))
+    crosstab_dimensions = max(0, int(settings.INGEST_ANALYTICS_CROSSTAB_DIMENSIONS))
+    crosstab_metrics = max(0, int(settings.INGEST_ANALYTICS_CROSSTAB_METRICS))
+    crosstab_top_rows = max(0, int(settings.INGEST_ANALYTICS_CROSSTAB_TOP_ROWS))
     df = pd.DataFrame(sample_rows) if sample_rows else pd.DataFrame()
 
     numeric_cols = [c["name"] for c in columns_info if is_numeric(c)]
@@ -102,7 +111,7 @@ def compute_sample_analytics(columns_info: list[dict], sample_rows: list[dict]) 
             "sum": round_value(series.sum()),
             "std": round_value(series.std()),
             "nulls": int(df[col].isna().sum()),
-            "note": "estimated from 500-row sample",
+            "note": f"estimated {sample_note}",
         }
 
     for col in categorical_cols:
@@ -113,23 +122,23 @@ def compute_sample_analytics(columns_info: list[dict], sample_rows: list[dict]) 
             "dtype": "categorical",
             "unique": int(series.nunique()),
             "nulls": int(df[col].isna().sum()),
-            "note": "from 500-row sample",
+            "note": sample_note,
         }
 
     value_counts: dict[str, Any] = {}
-    for col in categorical_cols[:10]:
+    for col in categorical_cols[:value_count_columns]:
         if col not in df.columns:
             continue
-        vc = df[col].dropna().value_counts().head(20)
+        vc = df[col].dropna().value_counts().head(value_count_top_values)
         if not vc.empty:
             value_counts[col] = {str(k): int(v) for k, v in vc.items()}
-            value_counts[f"{col}__note"] = "from 500-row sample"
+            value_counts[f"{col}__note"] = sample_note
 
     cross_tabs: list[dict] = []
-    for dim in categorical_cols[:3]:
+    for dim in categorical_cols[:crosstab_dimensions]:
         if dim not in df.columns:
             continue
-        for metric in numeric_cols[:3]:
+        for metric in numeric_cols[:crosstab_metrics]:
             if metric not in df.columns:
                 continue
             try:
@@ -145,7 +154,7 @@ def compute_sample_analytics(columns_info: list[dict], sample_rows: list[dict]) 
                     .agg(total="sum", avg="mean", count="count")
                     .reset_index()
                     .sort_values("total", ascending=False)
-                    .head(15)
+                    .head(crosstab_top_rows)
                 )
                 cross_tabs.append(
                     {
@@ -155,7 +164,7 @@ def compute_sample_analytics(columns_info: list[dict], sample_rows: list[dict]) 
                         "data": json_safe_rows(
                             grouped.rename(columns={dim: "dimension"}).to_dict("records")
                         ),
-                        "note": "from 500-row sample",
+                        "note": sample_note,
                     }
                 )
             except Exception:

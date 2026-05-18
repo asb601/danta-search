@@ -17,9 +17,23 @@ import structlog
 from celery import chain
 from celery.exceptions import SoftTimeLimitExceeded
 
+from app.core.config import get_settings
+from app.services.ingestion_config import (
+    INGEST_PIPELINE_TASK_NAME,
+    INGEST_STAGE_SPECS,
+    SEMANTIC_REBUILD_TASK_NAME,
+    PayloadStatus,
+    StageName,
+    celery_ingest_task_options,
+    celery_semantic_rebuild_task_options,
+    stage_names,
+    stage_task_name,
+)
 from app.worker.celery_app import celery_app
 
 Payload = dict[str, Any]
+_INGEST_TASK_OPTIONS = celery_ingest_task_options()
+_SEMANTIC_REBUILD_TASK_OPTIONS = celery_semantic_rebuild_task_options()
 
 
 def _file_id_from_payload(payload_or_file_id: Payload | str) -> str:
@@ -31,7 +45,7 @@ def _file_id_from_payload(payload_or_file_id: Payload | str) -> str:
 def _failed_payload(file_id: str, stage: str, exc: BaseException, retries: int) -> Payload:
     return {
         "file_id": file_id,
-        "status": "failed",
+        "status": PayloadStatus.FAILED.value,
         "failed_stage": stage,
         "error": str(exc)[:500],
         "retries": retries,
@@ -44,12 +58,13 @@ def _run_async(coro: Awaitable[Payload]) -> Payload:
 
 def _run_stage(
     task: Any,
-    stage: str,
+    stage: StageName | str,
     payload: Payload | str,
     func: Callable[[Payload], Awaitable[Payload]],
 ) -> Payload:
     """Run one async stage with consistent retry and final failure handling."""
-    if isinstance(payload, dict) and payload.get("status") == "failed":
+    stage_value = stage.value if isinstance(stage, StageName) else str(stage)
+    if isinstance(payload, dict) and payload.get("status") == PayloadStatus.FAILED.value:
         return payload
 
     file_id = _file_id_from_payload(payload)
@@ -59,7 +74,7 @@ def _run_stage(
     structlog.contextvars.bind_contextvars(
         pipeline="ingest",
         file_id=file_id,
-        stage=stage,
+        stage=stage_value,
         worker="celery",
     )
 
@@ -69,8 +84,8 @@ def _run_stage(
         if task.request.retries >= task.max_retries:
             from app.services.ingestion_stages import mark_ingestion_failed
 
-            asyncio.run(mark_ingestion_failed(file_id, stage, exc))
-            return _failed_payload(file_id, stage, exc, task.request.retries)
+            asyncio.run(mark_ingestion_failed(file_id, stage_value, exc))
+            return _failed_payload(file_id, stage_value, exc, task.request.retries)
         raise task.retry(exc=exc)
     finally:
         structlog.contextvars.clear_contextvars()
@@ -78,14 +93,8 @@ def _run_stage(
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest_pipeline",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=INGEST_PIPELINE_TASK_NAME,
+    **_INGEST_TASK_OPTIONS,
 )
 def run_ingest_pipeline(self, file_id: str) -> Payload:
     """Start the staged ingestion graph for one file.
@@ -105,246 +114,169 @@ def run_ingest_pipeline(self, file_id: str) -> Payload:
             return _failed_payload(file_id, "prepare", exc, self.request.retries)
         raise self.retry(exc=exc)
 
-    if prepared.get("status") != "queued":
+    if prepared.get("status") != PayloadStatus.QUEUED.value:
         return prepared
 
+    ordered_tasks = [_TASK_BY_STAGE[spec.stage] for spec in INGEST_STAGE_SPECS]
     workflow = chain(
-        clean_file_task.s({"file_id": file_id}),
-        parquet_task.s(),
-        metadata_task.s(),
-        ai_description_task.s(),
-        ontology_task.s(),
-        embedding_task.s(),
-        opensearch_index_task.s(),
-        analytics_task.s(),
-        relationship_task.s(),
-        semantic_layer_task.s(),
-        complete_ingestion_task.s(),
+        ordered_tasks[0].s({"file_id": file_id}),
+        *(task.s() for task in ordered_tasks[1:]),
     ).apply_async()
 
     return {
         "file_id": file_id,
-        "status": "queued",
+        "status": PayloadStatus.QUEUED.value,
         "workflow_id": workflow.id,
-        "stages": [
-            "clean",
-            "parquet",
-            "metadata",
-            "ai_description",
-            "ontology",
-            "embedding",
-            "opensearch",
-            "analytics",
-            "relationships",
-            "semantic_layer",
-            "complete",
-        ],
+        "stages": stage_names(),
     }
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.clean",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.CLEAN),
+    **_INGEST_TASK_OPTIONS,
 )
 def clean_file_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import clean_file_stage
 
-    return _run_stage(self, "clean", payload, clean_file_stage)
+    return _run_stage(self, StageName.CLEAN, payload, clean_file_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.parquet",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.PARQUET),
+    **_INGEST_TASK_OPTIONS,
 )
 def parquet_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import parquet_stage
 
-    return _run_stage(self, "parquet", payload, parquet_stage)
+    return _run_stage(self, StageName.PARQUET, payload, parquet_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.metadata",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.METADATA),
+    **_INGEST_TASK_OPTIONS,
 )
 def metadata_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import metadata_stage
 
-    return _run_stage(self, "metadata", payload, metadata_stage)
+    return _run_stage(self, StageName.METADATA, payload, metadata_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.ai_description",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.AI_DESCRIPTION),
+    **_INGEST_TASK_OPTIONS,
 )
 def ai_description_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import ai_description_stage
 
-    return _run_stage(self, "ai_description", payload, ai_description_stage)
+    return _run_stage(self, StageName.AI_DESCRIPTION, payload, ai_description_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.ontology",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.ONTOLOGY),
+    **_INGEST_TASK_OPTIONS,
 )
 def ontology_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import ontology_stage
 
-    return _run_stage(self, "ontology", payload, ontology_stage)
+    return _run_stage(self, StageName.ONTOLOGY, payload, ontology_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.embedding",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.EMBEDDING),
+    **_INGEST_TASK_OPTIONS,
 )
 def embedding_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import embedding_stage
 
-    return _run_stage(self, "embedding", payload, embedding_stage)
+    return _run_stage(self, StageName.EMBEDDING, payload, embedding_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.opensearch",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.OPENSEARCH),
+    **_INGEST_TASK_OPTIONS,
 )
 def opensearch_index_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import opensearch_stage
 
-    return _run_stage(self, "opensearch", payload, opensearch_stage)
+    return _run_stage(self, StageName.OPENSEARCH, payload, opensearch_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.analytics",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.ANALYTICS),
+    **_INGEST_TASK_OPTIONS,
 )
 def analytics_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import analytics_stage
 
-    return _run_stage(self, "analytics", payload, analytics_stage)
+    return _run_stage(self, StageName.ANALYTICS, payload, analytics_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.relationships",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.RELATIONSHIPS),
+    **_INGEST_TASK_OPTIONS,
 )
 def relationship_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import relationship_stage
 
-    return _run_stage(self, "relationships", payload, relationship_stage)
+    return _run_stage(self, StageName.RELATIONSHIPS, payload, relationship_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.semantic_layer",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.SEMANTIC_LAYER),
+    **_INGEST_TASK_OPTIONS,
 )
 def semantic_layer_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import semantic_layer_stage
 
-    return _run_stage(self, "semantic_layer", payload, semantic_layer_stage)
+    return _run_stage(self, StageName.SEMANTIC_LAYER, payload, semantic_layer_stage)
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.ingest.complete",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=stage_task_name(StageName.COMPLETE),
+    **_INGEST_TASK_OPTIONS,
 )
 def complete_ingestion_task(self, payload: Payload) -> Payload:
     from app.services.ingestion_stages import complete_ingestion_stage
 
-    return _run_stage(self, "complete", payload, complete_ingestion_stage)
+    return _run_stage(self, StageName.COMPLETE, payload, complete_ingestion_stage)
+
+
+_TASK_BY_STAGE = {
+    StageName.CLEAN: clean_file_task,
+    StageName.PARQUET: parquet_task,
+    StageName.METADATA: metadata_task,
+    StageName.AI_DESCRIPTION: ai_description_task,
+    StageName.ONTOLOGY: ontology_task,
+    StageName.EMBEDDING: embedding_task,
+    StageName.OPENSEARCH: opensearch_index_task,
+    StageName.ANALYTICS: analytics_task,
+    StageName.RELATIONSHIPS: relationship_task,
+    StageName.SEMANTIC_LAYER: semantic_layer_task,
+    StageName.COMPLETE: complete_ingestion_task,
+}
 
 
 @celery_app.task(
     bind=True,
-    name="gchat.semantic.rebuild_container",
-    max_retries=1,
-    default_retry_delay=60,
-    retry_backoff=True,
-    retry_backoff_max=300,
-    acks_late=True,
-    reject_on_worker_lost=True,
-    queue="ingest_normal",
+    name=SEMANTIC_REBUILD_TASK_NAME,
+    **_SEMANTIC_REBUILD_TASK_OPTIONS,
 )
 def run_semantic_rebuild_container(
     self,
     container_id: str,
     re_resolve_roles: bool = True,
-    batch_size: int = 250,
+    batch_size: int | None = None,
 ) -> dict[str, Any]:
     """Run a semantic-only rebuild for one container."""
     try:
@@ -354,14 +286,14 @@ def run_semantic_rebuild_container(
             rebuild_container_semantics(
                 container_id,
                 re_resolve_roles=re_resolve_roles,
-                batch_size=batch_size,
+                batch_size=batch_size or get_settings().INGEST_SEMANTIC_REBUILD_BATCH_SIZE,
             )
         )
     except (SoftTimeLimitExceeded, Exception) as exc:
         if self.request.retries >= self.max_retries:
             return {
                 "container_id": container_id,
-                "status": "failed",
+                "status": PayloadStatus.FAILED.value,
                 "error": str(exc)[:500],
                 "retries": self.request.retries,
             }

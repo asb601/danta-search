@@ -44,11 +44,13 @@ from typing import Protocol, Sequence
 
 import pandas as pd
 
+from app.core.config import get_settings
 from app.core.logger import ingest_logger
+from app.services.ingestion_config import null_tokens_lower
 
 # Maximum number of dropped rows to keep as an audit sample.
 # Stored in FileAnalytics.quarantine_sample — large values add DB write overhead.
-MAX_QUARANTINE_SAMPLE = 20
+MAX_QUARANTINE_SAMPLE = max(0, int(get_settings().INGEST_QUARANTINE_SAMPLE_ROWS))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -94,7 +96,7 @@ class AllEmptyRowRule:
 class GarbageKeywordRule:
     """Drop rows whose first non-empty cell starts with a known summary keyword.
 
-    Covers: English, German (SAP/Oracle), French, Spanish/Portuguese ERP patterns.
+    Covers common exported-report summary patterns across several languages.
 
     To add support for a new language or export format:
         Append regex alternatives to GarbageKeywordRule.PATTERNS.
@@ -125,7 +127,7 @@ class GarbageKeywordRule:
         r"carried\s+forward",
         r"min",
         r"max",
-        # ── German (SAP, Oracle EBS, other German ERP exports) ────────────────
+        # ── German and other exported report formats ─────────────────────────
         r"summe",
         r"gesamtsumme",
         r"gesamt",
@@ -191,7 +193,7 @@ class SeparatorRowRule:
 class NullPatternRule:
     """Recognises null-like cell values and replaces them with None.
 
-    Built-in set covers English, German (SAP/Oracle), French, Spanish/Portuguese,
+    Built-in set covers common placeholders across several languages,
     and common data-quality placeholders.
 
     Extending the universal set:
@@ -203,32 +205,7 @@ class NullPatternRule:
         Source: ContainerConfig.cleaning_config["extra_null_patterns"].
     """
 
-    KNOWN_NULLS: frozenset[str] = frozenset({
-        # ── Standard ─────────────────────────────────────────────────────────
-        "", "null", "none", "na", "n/a", "nan", "nil", "tbd", "n.a.", "n.a",
-        "-", "--", "---", ".", "..", "?", "#", "#n/a", "#na", "#null!",
-        "not available", "not applicable", "not provided", "not assigned",
-        "missing", "unknown", "no data", "no value", "nd", "n.d.",
-        "void", "blank", "empty",
-        # ── Excel error values ────────────────────────────────────────────────
-        "#value!", "#ref!", "#div/0!", "#name?", "#num!", "#error!",
-        # ── SAP / German ERP ─────────────────────────────────────────────────
-        "n/v",           # nicht verfügbar (not available)
-        "k.a.", "k.a",   # keine Angabe (no info)
-        "n.v.", "n.v",   # nicht vorhanden (not present)
-        # ── Spanish / French ERP ──────────────────────────────────────────────
-        "s/o", "s/n",    # sin orden, sin número
-        "n/e",           # not entered / no especificado
-        # ── Misc data-quality placeholders ───────────────────────────────────
-        "tba",           # to be advised
-        "wip",           # work in progress
-        "pending",
-        "n.a.a",
-        "na.",
-        "not entered",
-        "not recorded",
-        "not applicable.",
-    })
+    KNOWN_NULLS: frozenset[str] = null_tokens_lower()
 
     def __init__(self, extra_patterns: Sequence[str] = ()) -> None:
         extras = frozenset(p.strip().lower() for p in extra_patterns if p.strip())

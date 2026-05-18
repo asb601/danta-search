@@ -178,7 +178,7 @@ function ProfileTab() {
       <div className="space-y-3">
         <Field label="Name" value={user.name || "—"} />
         <Field label="Email" value={user.email} />
-        <Field label="Role" value={user.is_admin ? "Admin" : user.role === "developer" ? "Developer" : "Member"} />
+        <Field label="Role" value={user.is_admin ? "Admin" : user.role === "developer" ? "Developer" : user.role === "manager" ? "Manager" : "Member"} />
       </div>
 
       {/* Departments section (non-admin users) */}
@@ -327,6 +327,7 @@ function Field({ label, value }: { label: string; value: string }) {
 const ROLES: { value: string; label: string; color: string }[] = [
   { value: "admin",     label: "Admin",     color: "text-primary" },
   { value: "developer", label: "Developer", color: "text-violet-400" },
+  { value: "manager",   label: "Manager",   color: "text-cyan-400" },
   { value: "user",      label: "Member",    color: "text-muted-foreground" },
 ];
 
@@ -351,7 +352,7 @@ function RoleDropdown({
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const current = ROLES.find((r) => r.value === currentRole) ?? ROLES[2];
+  const current = ROLES.find((r) => r.value === currentRole) ?? ROLES[3];
 
   return (
     <div className="relative" ref={ref}>
@@ -363,6 +364,7 @@ function RoleDropdown({
           "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] font-medium rounded border transition-colors",
           currentRole === "admin"     ? "bg-primary/15 border-primary/30 text-primary" :
           currentRole === "developer" ? "bg-violet-500/15 border-violet-500/30 text-violet-400" :
+          currentRole === "manager"   ? "bg-cyan-500/15 border-cyan-500/30 text-cyan-400" :
           "bg-surface-raised border-border text-muted-foreground",
           disabled && "opacity-50 cursor-not-allowed"
         )}
@@ -571,7 +573,7 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
       {users.map((u) => {
         const isCurrent = u.id === currentUserId;
         const changing = changingRoleId === u.id;
-        const roleLabel = u.role === "admin" ? "Admin" : u.role === "developer" ? "Developer" : "Member";
+        const roleLabel = u.role === "admin" ? "Admin" : u.role === "developer" ? "Developer" : u.role === "manager" ? "Manager" : "Member";
 
         return (
           <div
@@ -610,6 +612,7 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
                   "inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded",
                   u.role === "admin" ? "bg-primary/15 text-primary" :
                   u.role === "developer" ? "bg-violet-500/15 text-violet-400" :
+                  u.role === "manager" ? "bg-cyan-500/15 text-cyan-400" :
                   "bg-surface-raised text-muted-foreground"
                 )}>
                   {u.role === "admin" && <Shield className="w-3 h-3" />}
@@ -1234,7 +1237,7 @@ function FilePickerModal({
       <div className="w-full max-w-lg bg-surface border border-border rounded-2xl shadow-xl flex flex-col max-h-[80vh]">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div>
-            <h2 className="text-sm font-semibold text-foreground">Add Files to "{domain}"</h2>
+            <h2 className="text-sm font-semibold text-foreground">Add Files to {domain}</h2>
             <p className="text-xs text-muted-foreground mt-0.5">
               {selected.size} file{selected.size !== 1 ? "s" : ""} selected
             </p>

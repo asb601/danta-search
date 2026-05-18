@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 
+from app.core.config import get_settings
 from app.core.logger import ingest_logger
 from app.core.openai_client import get_client
 from app.core.token_counter import count_tokens, elapsed_ms, track_and_log
@@ -31,6 +32,16 @@ async def generate_file_description(
     column_glossary: dict[str, str] | None = None,
 ) -> dict:
     def _run() -> dict:
+        settings = get_settings()
+        description_sample_rows = max(0, int(settings.INGEST_FILE_DESCRIPTION_SAMPLE_ROWS))
+        max_completion_tokens = max(1, int(settings.INGEST_FILE_DESCRIPTION_MAX_COMPLETION_TOKENS))
+        raw_retry_delays = settings.INGEST_LLM_RETRY_DELAYS_SECONDS
+        retry_delay_items = raw_retry_delays.split(",") if isinstance(raw_retry_delays, str) else raw_retry_delays
+        retry_delays = [
+            max(0, int(str(raw).strip()))
+            for raw in retry_delay_items
+            if str(raw).strip()
+        ]
         client, deployment = get_client()
         cols_for_prompt = [
             {
@@ -59,7 +70,7 @@ async def generate_file_description(
             ]
             uncovered_clause = ""
             if uncovered:
-                uncovered_preview = ", ".join(uncovered[:20])
+                uncovered_preview = ", ".join(uncovered[:description_sample_rows])
                 uncovered_clause = (
                     "\n\nColumns NOT in the glossary (use the raw column name AS-IS — "
                     "do NOT invent or guess a business meaning for these; if a column's "
@@ -80,7 +91,7 @@ Be SPECIFIC and DISCRIMINATIVE — your description must distinguish this file f
 
 Return ONLY this JSON with no preamble no markdown:
 {{
-    "summary": "2 sentences: (1) what specific business questions this file can support, naming the exact columns that make it useful (e.g. 'AMOUNT_DUE_REMAINING tracks open balance', 'STATUS=OP filters open items'); (2) what this file contains that similar-sounding files do not have. Avoid claiming this is the only, best, or primary source unless that is explicitly present in metadata.",
+    "summary": "2 sentences: (1) what specific business questions this file can support, naming the exact columns that make it useful (e.g. 'AMOUNT_VALUE tracks balance', 'STATUS_CODE filters active records'); (2) what this file contains that similar-sounding files do not have. Avoid claiming this is the only, best, or primary source unless that is explicitly present in metadata.",
     "good_for": ["3-6 exact natural language business question phrases this file can support. Use the actual business domain terms, column names, and metrics specific to this file — do NOT use generic placeholder terms. Make each phrase discriminative: it should clearly distinguish this file from other similar-sounding files in the catalog without claiming exclusivity."],
   "key_metrics": ["numeric columns used for aggregation and SUM/AVG calculations"],
   "key_dimensions": ["categorical, status, and ID columns used for filtering and grouping — include their important values where relevant, e.g. STATUS: OP=open CL=closed"],
@@ -89,27 +100,26 @@ Return ONLY this JSON with no preamble no markdown:
 }}
 
 Columns: {json.dumps(cols_for_prompt, default=str)}
-Sample rows: {json.dumps(sample_rows[:20], default=str)}"""
+Sample rows: {json.dumps(sample_rows[:description_sample_rows], default=str)}"""
 
         prompt_tokens = count_tokens(prompt, deployment)
 
         t = time.perf_counter()
         import openai as _openai  # noqa: PLC0415 — local import to avoid circular
-        _RETRY_DELAYS = [1, 5, 30]
         response = None
-        for _attempt in range(len(_RETRY_DELAYS) + 1):
+        for _attempt in range(len(retry_delays) + 1):
             try:
                 response = client.chat.completions.create(
                     model=deployment,
                     messages=[{"role": "user", "content": prompt}],
-                    max_completion_tokens=600,
+                    max_completion_tokens=max_completion_tokens,
                     temperature=0,
                 )
                 break
             except _openai.RateLimitError:
-                if _attempt >= len(_RETRY_DELAYS):
+                if _attempt >= len(retry_delays):
                     raise
-                _delay = _RETRY_DELAYS[_attempt]
+                _delay = retry_delays[_attempt]
                 ingest_logger.warning(
                     "llm_rate_limited",
                     function="generate_file_description",

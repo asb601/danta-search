@@ -10,7 +10,7 @@ Behaviour
 - Returns FileMetadata rows ranked by ts_rank_cd (cover-density ranking,
   which weights matches that are close together more heavily).
 - Handles multi-word queries, common English stop-words, and stemming
-  automatically — "invoices" matches "invoice."
+    automatically — plural and singular terms can match.
 - Returns at most `limit` rows (default 50 — RRF fusion narrows to 20 later).
 - Returns an empty list (never raises) if no query terms survive stop-word
   removal or if the index has no matches.
@@ -52,10 +52,10 @@ def _to_tsquery(query: str):
     """
     Build a tsquery from user input using websearch_to_tsquery (Postgres ≥ 11).
     websearch_to_tsquery handles:
-      - multi-word phrases ("invoice aging")
-      - quoted phrases ("invoice aging")
+    - multi-word phrases ("record aging")
+    - quoted phrases ("record aging")
       - minus for exclusion (-cancelled)
-      - OR operator (invoice OR receipt)
+    - OR operator (record OR item)
     Falls back to plainto_tsquery for safety.
     """
     return func.websearch_to_tsquery(_TSQUERY_LANG, query)

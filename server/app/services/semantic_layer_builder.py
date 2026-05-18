@@ -17,6 +17,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.logger import ingest_logger
 from app.models.column_key_registry import ColumnKeyRegistry
 from app.models.file import File
@@ -202,7 +203,7 @@ def _compatible_role_components(
             })
 
     components.sort(key=lambda item: (item["role_kind"], item["semantic_role"], item["left_column"]))
-    return components[:10]
+    return components[:max(0, int(get_settings().INGEST_SEMANTIC_COMPONENT_LIMIT))]
 
 
 def _join_rule(

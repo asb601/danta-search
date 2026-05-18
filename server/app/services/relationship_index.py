@@ -20,13 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logger import ingest_logger
 from app.models.column_key_registry import ColumnKeyRegistry
 from app.models.file_metadata import FileMetadata
+from app.services.ingestion_config import null_tokens_lower
 from app.services.semantic_policy import SemanticPolicy, get_semantic_policy
 from app.services.semantic_roles import (
     is_fingerprint_key_role,
     is_never_fingerprint_join_role,
 )
 
-_NULL_LIKE = frozenset({"", "null", "none", "na", "n/a", "nan", "nil", "-", "--", "tbd"})
+_NULL_LIKE = null_tokens_lower()
 _LEADING_ZERO_INT_RE = re.compile(r"^0+(\d+)$")
 
 

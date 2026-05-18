@@ -2,8 +2,8 @@
 
 This file defines role behavior, not a fixed business ontology. Concrete role
 names come from tenant configuration or typed dynamic roles discovered during
-ingestion, such as ``custom:entity_key:claim`` or
-``custom:additive_measure:premium``.
+ingestion, such as ``custom:entity_key:record`` or
+``custom:additive_measure:amount``.
 """
 from __future__ import annotations
 

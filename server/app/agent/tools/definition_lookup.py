@@ -192,8 +192,8 @@ async def load_schema_registry(
                     f"WHERE \"{fn_col}\" IS NOT NULL"
                 )
                 try:
-                    # Cap is intentionally large; SAP DDIC dumps may be ~40k
-                    # fields. If a real dictionary is larger we want to know.
+                    # Cap is intentionally large; source dictionaries may be
+                    # tens of thousands of fields. If one is larger we want to know.
                     _MAX_DICT_ROWS = 50_000
                     if settings.QUERY_ENGINE == "datafusion":
                         load_rows, total = await asyncio.to_thread(

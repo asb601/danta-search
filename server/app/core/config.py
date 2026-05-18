@@ -3,6 +3,16 @@ from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 
+_INGESTION_POLICY_PROXY_NAMES = frozenset({
+    "REINGEST_BATCH_SIZE",
+    "REINGEST_BATCH_DELAY_SECONDS",
+    "PARQUET_CONVERSION_CONCURRENCY",
+    "CELERY_WORKER_CONCURRENCY",
+    "CELERY_WORKER_PREFETCH_MULTIPLIER",
+    "CELERY_RESULT_EXPIRES_SECONDS",
+})
+
+
 class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/genchatbot"
@@ -45,6 +55,13 @@ class Settings(BaseSettings):
     # Switch to "datafusion" once shadow testing confirms correctness.
     QUERY_ENGINE: str = "duckdb"
 
+    # Ingestion behavior is policy, not core application settings. The default
+    # policy is external JSON, and production can replace it with a deployment
+    # file or INGESTION_POLICY_JSON. Individual legacy env vars still override
+    # the policy while the ingestion modules are migrated off direct Settings access.
+    INGESTION_POLICY_FILE: str = "config/ingestion_policy.json"
+    INGESTION_POLICY_JSON: str = ""
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 
@@ -70,6 +87,13 @@ class Settings(BaseSettings):
     OPENSEARCH_REPLICAS: int = 0
 
     model_config = {"env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"), "extra": "ignore"}
+
+    def __getattr__(self, name: str):
+        if name.startswith("INGEST_") or name in _INGESTION_POLICY_PROXY_NAMES:
+            from app.services.ingestion_policy import get_ingestion_policy
+
+            return get_ingestion_policy().legacy_value(name)
+        return super().__getattr__(name)
 
 
 @lru_cache

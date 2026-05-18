@@ -111,15 +111,13 @@ function formatDate(d: Date): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function getIcon(type: FileType) {
-  switch (type) {
-    case "csv": return FileSpreadsheet;
-    case "xlsx": return Table;
-    case "txt": return FileText;
-    case "pdf": return FileText;
-    case "folder": return Folder;
-  }
-}
+const TYPE_ICONS: Record<FileType, typeof FileText> = {
+  csv: FileSpreadsheet,
+  xlsx: Table,
+  txt: FileText,
+  pdf: FileText,
+  folder: Folder,
+};
 
 function getIconColor(type: FileType, domainTag?: string | null): string {
   if (type === "folder" && domainTag) return "text-violet-400";
@@ -348,7 +346,7 @@ function GridCard({
   onContextMenu: (e: MouseEvent) => void;
   onMouseEnter?: () => void;
 }) {
-  const Icon = item.type === "folder" && selected ? FolderOpen : getIcon(item.type);
+  const Icon = item.type === "folder" && selected ? FolderOpen : TYPE_ICONS[item.type];
   const iconColor = getIconColor(item.type);
 
   return (
@@ -404,7 +402,7 @@ function ListRow({
   onContextMenu: (e: MouseEvent) => void;
   onMouseEnter?: () => void;
 }) {
-  const Icon = getIcon(item.type);
+  const Icon = TYPE_ICONS[item.type];
   const iconColor = getIconColor(item.type, item.domainTag);
 
   return (

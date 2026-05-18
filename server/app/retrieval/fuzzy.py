@@ -7,7 +7,7 @@ Uses PostgreSQL's pg_trgm extension against the `search_text` column
 Why trigram fuzzy on top of BM25?
 - BM25 catches exact and stemmed keyword matches.
 - Trigram fuzzy catches typos ("salaery" → "salary"), abbreviations
-  ("inv" matches "invoice"), partial names ("Q1 rev" matches
+    ("acct" matches "account"), partial names ("Q1 rev" matches
   "Q1 revenue forecast"), and camelCase / concatenated words that
   BM25 tokenises differently.
 - They produce different result sets — RRF fusion (PHASE 11) combines both.

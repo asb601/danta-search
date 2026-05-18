@@ -70,7 +70,7 @@ if (hideNav) {
     ...(user.is_admin || user.role === "developer"
       ? [{ href: "/admin/containers", icon: Database, label: "Containers" }]
       : []),
-    ...(user.is_admin
+    ...(user.is_admin || user.role === "developer" || user.role === "manager" || user.role === "user"
       ? [{ href: "/admin/logs", icon: ScrollText, label: "Logs" }]
       : []),
     { href: "/profile", icon: UserCircle, label: "Profile" },
@@ -106,6 +106,11 @@ if (hideNav) {
             {!user.is_admin && user.role === "developer" && (
               <span className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-violet-500/15 text-violet-400">
                 Developer
+              </span>
+            )}
+            {!user.is_admin && user.role === "manager" && (
+              <span className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/15 text-cyan-400">
+                Manager
               </span>
             )}
           </div>

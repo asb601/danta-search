@@ -4,7 +4,7 @@ predicate) for a specific (blob_path, column_name) pair.
 
 This is the discovery primitive that lets us delete swaths of "rules-style"
 prose from the system prompt. Instead of telling the LLM in English how to
-filter Oracle DD-MON-YYYY strings or float64 year columns, the LLM calls
+filter delimited month-name strings or float64 year columns, the LLM calls
 inspect_column and gets back a concrete suggested_predicate it can paste
 into a WHERE clause.
 
@@ -24,6 +24,7 @@ from app.core.duckdb_client import execute_query_sync as _duckdb_execute
 from app.core.datafusion_client import execute_query_sync as _datafusion_execute
 from app.core.config import get_settings
 from app.core.logger import pipeline_logger
+from app.services.ingestion_config import configured_tokens
 
 
 def _execute(sql: str, connection_string: str, container_name: str | None, max_rows: int) -> tuple:
@@ -32,19 +33,15 @@ def _execute(sql: str, connection_string: str, container_name: str | None, max_r
     return _duckdb_execute(sql, connection_string, max_rows=max_rows)
 
 
-# Tokens in column names that strongly imply identifier semantics — used to
-# steer the suggested predicate away from numeric / date coercion.
-_IDENTIFIER_HINTS = ("_id", "_num", "_no", "_key", "_code", "_ref", "_uuid")
-
-
 def _is_identifier_name(name: str) -> bool:
-    n = (name or "").lower()
-    return any(n.endswith(h) for h in _IDENTIFIER_HINTS) or n in {
-        "id", "uuid", "guid", "sku", "isin", "cusip", "ein", "ssn",
-    }
+    settings = get_settings()
+    normalized = (name or "").lower()
+    suffixes = configured_tokens(settings.INGEST_IDENTIFIER_SUFFIXES)
+    exact_names = set(configured_tokens(settings.INGEST_IDENTIFIER_EXACT_NAMES))
+    return any(normalized.endswith(hint) for hint in suffixes) or normalized in exact_names
 
 
-def _looks_like_oracle_date(samples: Iterable) -> bool:
+def _looks_like_delimited_month_date(samples: Iterable) -> bool:
     """True if samples look like '19-MAR-2018' / '21-AUG-2022'."""
     pattern = re.compile(r"^\d{1,2}-[A-Za-z]{3}-\d{2,4}$")
     matched = 0
@@ -65,7 +62,7 @@ def _suggest_predicate(col_name: str, dtype: str, samples: list) -> str:
 
     The agent should treat this as a hint, not a contract. It encodes the
     same knowledge that used to live as English rules in the system prompt
-    (Oracle date strings, float-typed year columns, identifier preservation).
+    (delimited month-name dates, float-typed year columns, identifier preservation).
     """
     name_l = (col_name or "").lower()
     dtype_l = (dtype or "").lower()
@@ -76,10 +73,10 @@ def _suggest_predicate(col_name: str, dtype: str, samples: list) -> str:
             f"-- identifier column; compare as string, never CAST or EXTRACT"
         )
 
-    if _looks_like_oracle_date(samples):
+    if _looks_like_delimited_month_date(samples):
         return (
             f"strptime({col_name}, '%d-%b-%Y') BETWEEN DATE '<start>' AND DATE '<end>'  "
-            f"-- Oracle DD-MON-YYYY string; or use {col_name} LIKE '%-MMM-YYYY' for month filter"
+            f"-- delimited month-name string; or use {col_name} LIKE '%-MMM-YYYY' for month filter"
         )
 
     if "year" in name_l or name_l.endswith("_yr"):
@@ -112,9 +109,10 @@ def _suggest_predicate(col_name: str, dtype: str, samples: list) -> str:
 def _sql_path(blob_path: str, parquet_paths: dict[str, str], container: str) -> str:
     if parquet_paths and blob_path in parquet_paths:
         return f"read_parquet('az://{container}/{parquet_paths[blob_path]}')"
+    sample_rows = max(1, int(get_settings().INGEST_DUCKDB_SAMPLE_ROWS))
     return (
         f"read_csv_auto('az://{container}/{blob_path}', "
-        f"sample_size=500, null_padding=true, ignore_errors=true)"
+        f"sample_size={sample_rows}, null_padding=true, ignore_errors=true)"
     )
 
 
@@ -141,9 +139,9 @@ def build_column_tool(
         optional distinct count, and a one-line suggested WHERE predicate.
 
         Use this BEFORE writing a filter when you are unsure how the
-        column is stored — for example: "is PERIOD_YEAR an int or a float?",
-        "does INVOICE_DATE store ISO dates or '19-MAR-2018' strings?", or
-        "what does ACCOUNT_TYPE look like as a value?"
+        column is stored — for example: "is EVENT_YEAR an int or a float?",
+        "does EVENT_DATE store ISO dates or '19-MAR-2018' strings?", or
+        "what does RECORD_TYPE look like as a value?"
 
         The suggested_predicate is a hint; you may adapt it. Always paste
         the dtype + sample_values into your reasoning before writing SQL.
@@ -183,9 +181,10 @@ def build_column_tool(
         dtype = "unknown"
         samples: list = []
         unique_count = 0
+        sample_preview_count = max(0, int(get_settings().INGEST_LOG_SAMPLE_ITEMS))
         if col_record:
             dtype = col_record.get("type", "unknown")
-            samples = list(col_record.get("sample_values") or [])[:5]
+            samples = list(col_record.get("sample_values") or [])[:sample_preview_count]
             unique_count = len(col_record.get("unique_values") or [])
         else:
             # Column wasn't hydrated; verify it at least exists by name.
@@ -274,8 +273,8 @@ def build_column_tool(
             "suggested_predicate": suggested,
         }
 
-        # Enrich with business meaning from schema dictionary if available.
-        # Key is always UPPER to match SAP-style naming conventions.
+        # Enrich with field meaning from schema dictionary if available.
+        # Key is normalized to UPPER because source dictionaries often use uppercase names.
         defn = _defs.get(column_name.upper())
         if defn:
             result["description"] = defn["description"]

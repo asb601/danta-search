@@ -45,9 +45,8 @@ def tokenize_search_query(text: str, *, min_length: int = 4) -> list[str]:
 # Used by both the prompt shortlist construction (graph.py) and the
 # search_catalog tool (tools/catalog.py) to make sure entity-name-bearing
 # tables stay reachable to the agent even when the user's query vocabulary
-# (e.g. SAP "customer / master / account") does not literally overlap the
-# file's vocabulary (e.g. Oracle EBS "party / parties").  Pure structural
-# heuristic — no query-specific or filename-specific knowledge.
+# does not literally overlap the file's vocabulary. Pure structural heuristic —
+# no query-specific or filename-specific knowledge.
 
 LOOKUP_KEYWORDS: tuple[str, ...] = (
     "master", "masters", "parties", "party", "accounts", "account",

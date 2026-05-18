@@ -19,7 +19,7 @@ Problems:
 NEW APPROACH — registry + fingerprint evidence
 ==============================================
 After role resolution (column_role_resolver.py), each file has typed roles:
-    column_semantic_roles = {"source_col": "custom:entity_key:business_entity"}
+    column_semantic_roles = {"source_col": "custom:entity_key:record"}
 
 Key-like roles are written into column_key_registry with normalized value
 fingerprints. Relationship detection uses the registry's tenant-scoped GIN

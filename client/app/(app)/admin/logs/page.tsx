@@ -25,11 +25,6 @@ import { cn } from "@/lib/utils";
 
 /* ── types ───────────────────────────────────────────────────────────────── */
 
-interface LogFile {
-  name: string;
-  size_kb: number;
-}
-
 interface LogEntry {
   [key: string]: unknown;
   event?: string;
@@ -223,7 +218,7 @@ function LogLine({ entry }: { entry: LogEntry }) {
 
 /* ── main page ───────────────────────────────────────────────────────────── */
 
-type PageView = "logs" | "performance" | "pipeline" | "ingestion";
+type PageView = "audit" | "logs" | "performance" | "pipeline" | "ingestion";
 
 interface FileTiming {
   file_id: string;
@@ -239,6 +234,50 @@ interface FileTiming {
   processing_secs: number | null;
   total_secs: number | null;
   parquet_error: string | null;
+}
+
+interface AuditEntry {
+  id: string;
+  created_at: string | null;
+  event_type: string;
+  action: string;
+  actor: {
+    user_id: string | null;
+    email: string | null;
+    name: string | null;
+    role: string | null;
+    is_admin: boolean;
+    allowed_domains: string[] | null;
+    organization_id: string | null;
+  };
+  request: {
+    method: string | null;
+    path: string | null;
+    route_template: string | null;
+    status_code: number | null;
+    duration_ms: number | null;
+    ip_address: string | null;
+    user_agent: string | null;
+  };
+  context: {
+    domain_tag: string | null;
+    container_id: string | null;
+    file_id: string | null;
+    file_name: string | null;
+    folder_id: string | null;
+    folder_name: string | null;
+    target_user_id: string | null;
+    target_user_email: string | null;
+    target_user_name: string | null;
+  };
+  details: Record<string, unknown> | null;
+  error: string | null;
+}
+
+interface AuditResponse {
+  scope: "admin" | "domain" | "self";
+  returned: number;
+  lines: AuditEntry[];
 }
 
 function formatBytes(bytes: number): string {
@@ -1207,8 +1246,180 @@ function IngestionPanel() {
   );
 }
 
+function statusClass(status: number | null): string {
+  if (!status) return "bg-zinc-500/10 text-zinc-400 border-zinc-500/20";
+  if (status >= 500) return "bg-red-500/10 text-red-400 border-red-500/20";
+  if (status >= 400) return "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
+  return "bg-green-500/10 text-green-400 border-green-500/20";
+}
+
+function AuditRow({ row }: { row: AuditEntry }) {
+  const [expanded, setExpanded] = useState(false);
+  const status = row.request.status_code;
+  const actorName = row.actor.name || row.actor.email || "Anonymous";
+  const domain = row.context.domain_tag || row.actor.allowed_domains?.join(", ") || "—";
+
+  return (
+    <div
+      className={cn(
+        "border-b border-border/50 transition-colors cursor-pointer hover:bg-surface-raised/40",
+        expanded && "bg-surface-raised/30"
+      )}
+      onClick={() => setExpanded(!expanded)}
+    >
+      <div className="grid grid-cols-[84px_180px_1fr_80px_92px_24px] gap-2 items-center px-3 py-2 text-xs">
+        <span className="text-[10px] text-muted-foreground font-mono">
+          {formatTimestamp(row.created_at || undefined)}
+        </span>
+        <div className="min-w-0">
+          <p className="text-foreground truncate">{actorName}</p>
+          <p className="text-[10px] text-muted-foreground truncate">{row.actor.email || "—"}</p>
+        </div>
+        <div className="min-w-0">
+          <p className="font-mono text-foreground truncate">{row.action}</p>
+          <p className="font-mono text-[10px] text-muted-foreground truncate">{row.request.path || "—"}</p>
+        </div>
+        <span className={cn("inline-flex justify-center px-1.5 py-0.5 rounded text-[10px] font-medium border", statusClass(status))}>
+          {status ?? "—"}
+        </span>
+        <span className="text-[10px] text-muted-foreground truncate" title={domain}>{domain}</span>
+        <ChevronDown className={cn("w-3 h-3 text-muted-foreground transition-transform", expanded && "rotate-180")} />
+      </div>
+
+      {expanded && (
+        <div className="px-3 pb-3 pl-[17rem] text-[11px]">
+          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono">
+            <span className="text-muted-foreground">role</span><span className="text-foreground">{row.actor.role || "—"}</span>
+            <span className="text-muted-foreground">method</span><span className="text-foreground">{row.request.method || "—"}</span>
+            <span className="text-muted-foreground">duration</span><span className="text-foreground">{formatDuration(row.request.duration_ms ?? undefined)}</span>
+            <span className="text-muted-foreground">ip</span><span className="text-foreground break-all">{row.request.ip_address || "—"}</span>
+            <span className="text-muted-foreground">file</span><span className="text-foreground break-all">{row.context.file_name || row.context.file_id || "—"}</span>
+            <span className="text-muted-foreground">folder</span><span className="text-foreground break-all">{row.context.folder_name || row.context.folder_id || "—"}</span>
+            <span className="text-muted-foreground">container</span><span className="text-foreground break-all">{row.context.container_id || "—"}</span>
+            <span className="text-muted-foreground">target_user</span><span className="text-foreground break-all">{row.context.target_user_email || row.context.target_user_id || "—"}</span>
+            {row.error && <><span className="text-muted-foreground">error</span><span className="text-red-400 break-all">{row.error}</span></>}
+            {row.details && <><span className="text-muted-foreground">details</span><span className="text-foreground break-all">{JSON.stringify(row.details)}</span></>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AuditPanel() {
+  const [rows, setRows] = useState<AuditEntry[]>([]);
+  const [scope, setScope] = useState<AuditResponse["scope"]>("self");
+  const [lines, setLines] = useState(200);
+  const [userFilter, setUserFilter] = useState("");
+  const [domainFilter, setDomainFilter] = useState("");
+  const [actionFilter, setActionFilter] = useState("");
+  const [pathFilter, setPathFilter] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchAudit = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams({ lines: String(lines) });
+      if (userFilter.trim()) params.set("user", userFilter.trim());
+      if (domainFilter.trim()) params.set("domain", domainFilter.trim());
+      if (actionFilter.trim()) params.set("action", actionFilter.trim());
+      if (pathFilter.trim()) params.set("path", pathFilter.trim());
+      const res = await apiFetch(`/api/logs/audit?${params.toString()}`);
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+      const data: AuditResponse = await res.json();
+      setRows(data.lines || []);
+      setScope(data.scope);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to fetch audit logs");
+    } finally {
+      setLoading(false);
+    }
+  }, [actionFilter, domainFilter, lines, pathFilter, userFilter]);
+
+  useEffect(() => { fetchAudit(); }, [fetchAudit]);
+  useEffect(() => {
+    if (autoRefresh) intervalRef.current = setInterval(fetchAudit, 5000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, [autoRefresh, fetchAudit]);
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="border-b border-border px-4 py-2 flex flex-wrap items-center gap-2 shrink-0">
+        <div className="relative min-w-[180px] max-w-xs flex-1">
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          <input
+            value={userFilter}
+            onChange={(e) => setUserFilter(e.target.value)}
+            placeholder="User name or email"
+            className="w-full pl-7 pr-2 py-1 rounded bg-surface-raised border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+        </div>
+        <input
+          value={domainFilter}
+          onChange={(e) => setDomainFilter(e.target.value)}
+          placeholder="Domain"
+          className="w-32 px-2 py-1 rounded bg-surface-raised border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        />
+        <input
+          value={actionFilter}
+          onChange={(e) => setActionFilter(e.target.value)}
+          placeholder="Action"
+          className="w-40 px-2 py-1 rounded bg-surface-raised border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        />
+        <input
+          value={pathFilter}
+          onChange={(e) => setPathFilter(e.target.value)}
+          placeholder="Path"
+          className="w-40 px-2 py-1 rounded bg-surface-raised border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        />
+        <select value={lines} onChange={(e) => setLines(Number(e.target.value))}
+          className="px-2 py-1 rounded bg-surface-raised border border-border text-xs text-foreground">
+          <option value={100}>100 rows</option>
+          <option value={200}>200 rows</option>
+          <option value={500}>500 rows</option>
+          <option value={1000}>1000 rows</option>
+        </select>
+        <button onClick={() => setAutoRefresh(!autoRefresh)}
+          className={cn("px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1",
+            autoRefresh ? "bg-green-500/15 text-green-400 border border-green-500/30" : "bg-surface-raised text-muted-foreground hover:text-foreground")}>
+          <RefreshCw className={cn("w-3 h-3", autoRefresh && "animate-spin")} />
+          {autoRefresh ? "Live" : "Auto"}
+        </button>
+        <button onClick={fetchAudit} disabled={loading}
+          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50">
+          <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
+        </button>
+        <span className="text-[10px] text-muted-foreground ml-auto hidden sm:block">
+          {rows.length} rows · {scope}
+        </span>
+      </div>
+
+      {error && (
+        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />{error}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto bg-[#0d1117]">
+        {rows.length === 0 && !loading && (
+          <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
+            <Activity className="w-8 h-8" />
+            <p className="text-sm">No audit events found</p>
+          </div>
+        )}
+        {rows.map((row) => <AuditRow key={row.id} row={row} />)}
+      </div>
+    </div>
+  );
+}
+
 const LOG_FILES = [
   { name: "ai_pipeline.log", label: "AI Pipeline", description: "Ingestion & chat" },
+  { name: "audit.log", label: "Audit", description: "Request/action audit" },
   { name: "system.log", label: "System", description: "Upload, auth, blob" },
   { name: "llm_calls.log", label: "LLM Calls", description: "Token usage & timing" },
   { name: "costs.log", label: "Costs", description: "Billing events" },
@@ -1216,7 +1427,7 @@ const LOG_FILES = [
 
 export default function AdminLogsPage() {
   const { user } = useAuth();
-  const [pageView, setPageView] = useState<PageView>("pipeline");
+  const [pageView, setPageView] = useState<PageView>("audit");
   const [activeFile, setActiveFile] = useState("ai_pipeline.log");
   const [lines, setLines] = useState<LogEntry[]>([]);
   const [totalLines, setTotalLines] = useState(0);
@@ -1227,6 +1438,10 @@ export default function AdminLogsPage() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (user && !user.is_admin && pageView !== "audit") setPageView("audit");
+  }, [pageView, user]);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
@@ -1244,7 +1459,11 @@ export default function AdminLogsPage() {
         throw new Error(`${res.status}: ${body}`);
       }
       const data: LogResponse = await res.json();
-      setLines(searchQuery.trim() ? data.lines.map((l: any) => l.data || l) : data.lines);
+      setLines(
+        searchQuery.trim()
+          ? data.lines.map((line) => (line as { data?: LogEntry }).data || line)
+          : data.lines
+      );
       setTotalLines(data.total_lines);
 
       // Scroll to bottom
@@ -1275,10 +1494,10 @@ export default function AdminLogsPage() {
     };
   }, [autoRefresh, fetchLogs]);
 
-  if (!user?.is_admin) {
+  if (!user) {
     return (
       <div className="flex items-center justify-center h-full">
-        <p className="text-muted-foreground">Admin access required</p>
+        <p className="text-muted-foreground">Loading logs…</p>
       </div>
     );
   }
@@ -1290,11 +1509,23 @@ export default function AdminLogsPage() {
         <div>
           <h1 className="text-lg font-semibold text-foreground">Server Logs</h1>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Real-time server logs — ingestion pipeline, LLM calls, system events
+            Activity, ingestion, LLM, and system events
           </p>
         </div>
         <div className="flex gap-1">
           <button
+            onClick={() => setPageView("audit")}
+            className={cn(
+              "px-3 py-1.5 rounded text-xs font-medium transition-colors",
+              pageView === "audit"
+                ? "bg-primary text-primary-foreground"
+                : "bg-surface-raised text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <Activity className="w-3.5 h-3.5 inline mr-1" />
+            Audit
+          </button>
+          {user.is_admin && <button
             onClick={() => setPageView("pipeline")}
             className={cn(
               "px-3 py-1.5 rounded text-xs font-medium transition-colors",
@@ -1305,8 +1536,8 @@ export default function AdminLogsPage() {
           >
             <Activity className="w-3.5 h-3.5 inline mr-1" />
             AI Pipeline
-          </button>
-          <button
+          </button>}
+          {user.is_admin && <button
             onClick={() => setPageView("ingestion")}
             className={cn(
               "px-3 py-1.5 rounded text-xs font-medium transition-colors",
@@ -1317,8 +1548,8 @@ export default function AdminLogsPage() {
           >
             <Upload className="w-3.5 h-3.5 inline mr-1" />
             Ingestion
-          </button>
-          <button
+          </button>}
+          {user.is_admin && <button
             onClick={() => setPageView("logs")}
             className={cn(
               "px-3 py-1.5 rounded text-xs font-medium transition-colors",
@@ -1329,8 +1560,8 @@ export default function AdminLogsPage() {
           >
             <FileText className="w-3.5 h-3.5 inline mr-1" />
             Logs
-          </button>
-          <button
+          </button>}
+          {user.is_admin && <button
             onClick={() => setPageView("performance")}
             className={cn(
               "px-3 py-1.5 rounded text-xs font-medium transition-colors",
@@ -1341,11 +1572,13 @@ export default function AdminLogsPage() {
           >
             <Zap className="w-3.5 h-3.5 inline mr-1" />
             Performance
-          </button>
+          </button>}
         </div>
       </div>
 
-      {pageView === "pipeline" ? (
+      {pageView === "audit" ? (
+        <AuditPanel />
+      ) : pageView === "pipeline" ? (
         <PipelinePanel />
       ) : pageView === "ingestion" ? (
         <IngestionPanel />

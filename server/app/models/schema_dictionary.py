@@ -6,12 +6,12 @@ ingested, a SchemaDictionary row is created pointing at the converted parquet.
 
 At query time, the agent pre-loads all schema dicts for the container into a
 flat {field_name_lower → description} dict and uses it to:
-  1. Enrich inspect_column output with business meaning.
+    1. Enrich inspect_column output with field meaning.
   2. Answer direct "what does X column mean?" questions via
      lookup_field_definition without touching the prompt.
 
-One org can register multiple dictionaries (e.g. FBL3N fields, BSEG fields,
-an HR glossary). All are merged at load time — the first match wins.
+One org can register multiple dictionaries for different source systems or
+domains. All are merged at load time — the first match wins.
 """
 import uuid
 from datetime import datetime, timezone

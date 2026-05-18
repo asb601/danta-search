@@ -1,5 +1,7 @@
 from datetime import datetime
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.config import get_settings
 
 
 class ContainerCreate(BaseModel):
@@ -32,7 +34,7 @@ class ContainerSemanticConfigUpdate(BaseModel):
 
 class ContainerSemanticRebuildRequest(BaseModel):
     re_resolve_roles: bool = True
-    batch_size: int = 250
+    batch_size: int = Field(default_factory=lambda: get_settings().INGEST_SEMANTIC_REBUILD_BATCH_SIZE)
 
 
 class ContainerSyncResponse(BaseModel):

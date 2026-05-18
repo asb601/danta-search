@@ -9,6 +9,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.core.config import get_settings
 from app.core.database import engine, Base
 from app.core.logger import upload_logger, folder_logger, container_logger, auth_logger, chat_logger
+from app.services.audit_log import record_request_audit
 from app.core import metrics as _metrics
 from app.api.v1.auth import router as auth_router
 from app.api.v1.folders import router as folders_router
@@ -31,6 +32,7 @@ import app.models.background_job  # ensure BackgroundJob table is created
 import app.models.conversation  # ensure Conversation + Message tables are created
 import app.models.organization  # ensure Organization table is created
 import app.models.schema_dictionary  # ensure SchemaDictionary table is created
+import app.models.audit_log  # ensure AuditLog table is created
 
 
 async def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
@@ -137,6 +139,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("semantic_layer_migration_failed", error=str(exc)[:300])
 
+    # Queryable API audit logs
+    from app.migrations.audit_log_schema_upgrade import migrate as _audit_log_migrate
+    try:
+        await _audit_log_migrate()
+    except Exception as exc:
+        chat_logger.warning("audit_log_migration_failed", error=str(exc)[:300])
+
     # Pre-warm DataFusion session pool — pays UDF-registration cost once at startup
     # so the first N concurrent queries borrow a ready context without overhead.
     try:
@@ -172,23 +181,37 @@ async def log_requests(request: Request, call_next):
         return await call_next(request)
 
     start = time.perf_counter()
-    response = await call_next(request)
-    duration_ms = round((time.perf_counter() - start) * 1000, 2)
+    response = None
+    error: str | None = None
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        error = str(exc)[:500]
+        raise
+    finally:
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        status_code = response.status_code if response is not None else 500
 
-    path = request.url.path
-    method = request.method
-    status_code = response.status_code
+        path = request.url.path
+        method = request.method
 
-    if "/files" in path:
-        upload_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
-    elif "/folders" in path:
-        folder_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
-    elif "/containers" in path:
-        container_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
-    elif "/auth" in path:
-        auth_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
-    elif "/chat" in path:
-        chat_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
+        if "/files" in path:
+            upload_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
+        elif "/folders" in path:
+            folder_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
+        elif "/containers" in path:
+            container_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
+        elif "/auth" in path:
+            auth_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
+        elif "/chat" in path:
+            chat_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
+
+        await record_request_audit(
+            request,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            error=error,
+        )
 
     return response
 

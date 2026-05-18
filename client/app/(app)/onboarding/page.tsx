@@ -142,7 +142,7 @@ export default function OnboardingPage() {
             </div>
             <h1 className="text-2xl font-semibold text-foreground">Request Sent</h1>
             <p className="text-sm text-muted-foreground">
-              Your access request is pending review. You'll receive an email at{" "}
+              Your access request is pending review. You will receive an email at{" "}
               <span className="text-foreground font-medium">{user?.email}</span> once
               an admin approves or declines it.
             </p>

@@ -9,7 +9,7 @@ Queue layout (3 queues, priority order):
 Worker start commands (run from server/):
   # Normal worker — heavy stage tasks. Keep concurrency conservative:
   # each slot may run preprocessing or Parquet conversion for a large file.
-  uv run celery -A app.worker.celery_app worker -Q ingest_normal -c 2 -n ingest_normal@%h
+  uv run celery -A app.worker.celery_app worker -Q ingest_normal -c 1 -n ingest_normal@%h
 
   # Optional high-priority worker — reserved for future split tasks only.
   uv run celery -A app.worker.celery_app worker -Q ingest_high -c 2 -n ingest_high@%h
@@ -27,6 +27,7 @@ from __future__ import annotations
 from celery import Celery
 
 from app.core.config import get_settings
+from app.services.ingestion_config import celery_task_routes
 
 
 def _make_celery() -> Celery:
@@ -54,18 +55,19 @@ def _make_celery() -> Celery:
 
         # If an Azure/HTTP client hangs forever, the worker slot must be freed.
         # The task itself marks the File row failed when final retry is exhausted.
-        task_soft_time_limit=60 * 45,  # 45 minutes: graceful timeout
-        task_time_limit=60 * 50,       # 50 minutes: hard kill safety net
+        task_soft_time_limit=max(1, int(settings.INGEST_TASK_SOFT_TIME_LIMIT_SECONDS)),
+        task_time_limit=max(1, int(settings.INGEST_TASK_TIME_LIMIT_SECONDS)),
 
         # ── Prefetch ──────────────────────────────────────────────────────────
         # prefetch_multiplier=1: each worker slot fetches exactly one task at a
         # time. This is critical for ingest tasks (each can take minutes and use
         # hundreds of MB RAM). Without this, a worker with 4 slots would prefetch
         # 16 tasks, blocking other workers from seeing them.
-        worker_prefetch_multiplier=1,
+        worker_prefetch_multiplier=max(1, int(settings.CELERY_WORKER_PREFETCH_MULTIPLIER)),
+        worker_concurrency=max(1, int(settings.CELERY_WORKER_CONCURRENCY)),
 
         # ── Result TTL ────────────────────────────────────────────────────────
-        result_expires=86400,  # 24h — results are only used for status checks
+        result_expires=max(1, int(settings.CELERY_RESULT_EXPIRES_SECONDS)),
 
         # Emit task lifecycle events so Flower / Celery inspect / monitoring can
         # detect stuck workers and queue buildup without extra app code.
@@ -77,23 +79,10 @@ def _make_celery() -> Celery:
         enable_utc=True,
 
         # ── Task routing ─────────────────────────────────────────────────────
-        task_routes={
-          "gchat.ingest_pipeline": {"queue": "ingest_normal"},
-          "gchat.ingest.clean": {"queue": "ingest_normal"},
-          "gchat.ingest.parquet": {"queue": "ingest_normal"},
-          "gchat.ingest.metadata": {"queue": "ingest_normal"},
-          "gchat.ingest.ai_description": {"queue": "ingest_normal"},
-          "gchat.ingest.ontology": {"queue": "ingest_normal"},
-          "gchat.ingest.embedding": {"queue": "ingest_normal"},
-          "gchat.ingest.opensearch": {"queue": "ingest_normal"},
-          "gchat.ingest.analytics": {"queue": "ingest_normal"},
-          "gchat.ingest.relationships": {"queue": "ingest_normal"},
-          "gchat.ingest.semantic_layer": {"queue": "ingest_normal"},
-          "gchat.ingest.complete": {"queue": "ingest_normal"},
-        },
+        task_routes=celery_task_routes(),
 
         # ── Default queue ────────────────────────────────────────────────────
-        task_default_queue="ingest_normal",
+        task_default_queue=settings.INGEST_NORMAL_QUEUE,
     )
 
     return app

@@ -18,6 +18,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.logger import ingest_logger
 from app.models.background_job import BackgroundJob
 from app.models.file_analytics import FileAnalytics
@@ -25,16 +26,11 @@ from app.models.file_metadata import FileMetadata
 from app.services.analytics_computer import compute_sample_analytics
 from app.services.parquet_service import convert_csv_to_parquet
 
-# Cap concurrent parquet conversions at 2.
-# Each conversion runs DuckDB + PyArrow + DataFusion profiling in threads and
-# peaks at ~300–500 MB RAM. Without this cap, re-ingest-all on 20+ files fires
-# all jobs simultaneously and OOM-kills the VM kernel.
-# Cap simultaneous CSV->Parquet conversions.  DuckDB loads the whole CSV
-# into RAM during conversion, so each slot is the heaviest single user
-# of memory in the pipeline.  3 = empirical sweet spot for an 8 GB VM:
-# enough parallelism to keep up with the reingest loop, low enough to
-# leave headroom for Postgres + the API process.
-_PARQUET_SEMAPHORE = asyncio.Semaphore(3)
+# Cap simultaneous CSV->Parquet conversions. DuckDB/PyArrow can load large
+# chunks into RAM, so this defaults to 1 for D2s v3-class VMs.
+_PARQUET_SEMAPHORE = asyncio.Semaphore(
+    max(1, int(get_settings().PARQUET_CONVERSION_CONCURRENCY))
+)
 
 
 def _ms(start: float) -> float:

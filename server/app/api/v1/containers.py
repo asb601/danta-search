@@ -28,6 +28,7 @@ from app.schemas.container import (
     ContainerSemanticRebuildRequest,
     ContainerSyncResponse,
 )
+from app.services.ingestion_config import IngestStatus, is_auto_ingest_file
 from app.services.semantic_rebuild import evaluate_container_semantics
 from app.services.semantic_roles import ROLE_KINDS, is_dynamic_role, role_catalog
 
@@ -178,7 +179,7 @@ async def sync_container(container_id: str, user_id: str) -> None:
                     owner_id=user_id,
                     container_id=container_id,
                     blob_path=blob.name,
-                    ingest_status="not_ingested",
+                    ingest_status=IngestStatus.NOT_INGESTED.value,
                 )
                 db.add(file)
                 synced += 1
@@ -213,12 +214,12 @@ async def sync_container(container_id: str, user_id: str) -> None:
             ingestable_result = await db.execute(
                 select(File).where(
                     File.container_id == container_id,
-                    File.ingest_status == "not_ingested",
+                    File.ingest_status == IngestStatus.NOT_INGESTED.value,
                 )
             )
             ingestable = [
                 f for f in ingestable_result.scalars().all()
-                if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv")
+                if is_auto_ingest_file(f.name)
             ]
             if ingestable:
                 task_ids = [run_ingest_pipeline.delay(f.id).id for f in ingestable]

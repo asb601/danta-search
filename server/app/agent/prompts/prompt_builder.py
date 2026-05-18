@@ -8,6 +8,7 @@ import re
 from datetime import date, timedelta
 
 from app.agent.state import MAX_TOOL_CALLS
+from app.core.config import get_settings
 from app.core.logger import chat_logger
 
 
@@ -61,7 +62,7 @@ Container: {container_name}
 3. inspect_column      \u2014 Returns dtype, sample values, and a one-line suggested WHERE predicate
                         for a single column. Use this BEFORE writing any filter when you are
                         unsure how the column is stored (year as int vs float, dates as ISO vs
-                        Oracle DD-MON-YYYY string, identifier vs numeric, etc.). Cheap; preferred
+                        delimited month-name string, identifier vs numeric, etc.). Cheap; preferred
                         over guessing or running probe SELECTs.
 4. search_catalog      \u2014 Searches the FULL catalog ({total_file_count} files). Use whenever the
                         shortlist above doesn't obviously contain the file you need.
@@ -103,8 +104,8 @@ Do NOT narrate your reasoning, plans, or next steps (no \"Let me start by\u2026\
 When you finish, write a complete analyst response:
 
 1. **Direct answer** \u2014 one sentence that directly answers the question
-   (e.g. \"The top 5 customers by outstanding balance total $4.2M across
-   312 open invoices.\").
+    (e.g. \"The top 5 records by outstanding balance total $4.2M across
+    312 open items.\").
 2. **Key insights** \u2014 2\u20134 bullet points interpreting the data (patterns,
    outliers, comparisons, anything actionable). Write as a business analyst.
 3. **Table note** — if SQL returned rows, end with the line:
@@ -184,10 +185,11 @@ def build_parquet_note(
         # Also list CSV-only files (no parquet conversion)
         csv_only = [e for e in catalog if e.get("blob_path") and e["blob_path"] not in parquet_paths_all]
         if csv_only:
+            sample_rows = max(1, int(get_settings().INGEST_DUCKDB_SAMPLE_ROWS))
             csv_lines = []
             for entry in csv_only:
                 bp = entry["blob_path"]
-                csv_line = f"  read_csv_auto('az://{container_name}/{bp}', sample_size=500, null_padding=true, ignore_errors=true)"
+                csv_line = f"  read_csv_auto('az://{container_name}/{bp}', sample_size={sample_rows}, null_padding=true, ignore_errors=true)"
                 desc = _neutralize_description(entry.get("ai_description") or "")
                 if desc:
                     csv_line += f"\n    Description: {desc}"

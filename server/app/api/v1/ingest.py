@@ -12,6 +12,7 @@ from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
 from app.models.user import User
+from app.services.ingestion_config import is_supported_ingest_file, supported_ingest_extensions
 from app.worker.ingest_tasks import run_ingest_pipeline
 
 router = APIRouter()
@@ -31,8 +32,7 @@ async def ingest_files(
         file = await db.get(File, fid)
         if not file:
             continue
-        ext = (file.name or "").rsplit(".", 1)[-1].lower()
-        if ext not in ("csv", "txt", "tsv"):
+        if not is_supported_ingest_file(file.name):
             continue
         # Domain scope: if developer has domain restrictions, skip files outside their domains
         if admin.allowed_domains:
@@ -43,7 +43,8 @@ async def ingest_files(
         valid_ids.append(fid)
 
     if not valid_ids:
-        raise HTTPException(status_code=400, detail="No valid CSV/TXT files found.")
+        allowed = ", ".join(sorted(supported_ingest_extensions()))
+        raise HTTPException(status_code=400, detail=f"No valid ingestable files found. Supported: {allowed}")
 
     # Dispatch each file to a Celery worker — isolated from the API event loop.
     # The worker runs preprocessing + DuckDB sample + AI description + parquet

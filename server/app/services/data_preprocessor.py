@@ -61,48 +61,51 @@ from typing import Callable, Iterator
 import pandas as pd
 from azure.storage.blob import BlobClient, BlobServiceClient
 
+from app.core.config import get_settings
 from app.core.logger import ingest_logger
+from app.services.ingestion_config import (
+    excel_ingest_extensions,
+    null_tokens_lower,
+    preprocess_extensions,
+    text_ingest_extensions,
+)
 from app.services.preprocessor.cleaning_rules import CleaningProfile, get_cleaning_profile
 
 
 # ── Tunable constants ─────────────────────────────────────────────────────────
 
-CHUNK_ROWS              = 50_000        # rows per streaming chunk (lower = less RAM per thread)
-SMALL_FILE_THRESHOLD_MB = 50            # files under this get full-load + dedup
-HEADER_SCAN_ROWS        = 15            # max rows to scan for the real header
-TYPE_DETECT_SAMPLE_ROWS = 1_000         # rows used for column-type detection
-PROBE_BYTES             = 256 * 1024    # bytes range-read from Azure for probing
-BLOCK_SIZE              = 4 * 1024 * 1024  # 4 MB per Azure block blob block
-MIN_EXCEL_TMP_FREE_BYTES = 2 * 1024 * 1024 * 1024  # keep 2 GB free after download
-EXCEL_TMP_FREE_MULTIPLIER = 2.0  # require free tmp space >= max(2 GB, file_size * 2)
+_SETTINGS = get_settings()
+CHUNK_ROWS = max(1, int(_SETTINGS.INGEST_PREPROCESS_CHUNK_ROWS))
+SMALL_FILE_THRESHOLD_MB = max(1, int(_SETTINGS.INGEST_SMALL_FILE_THRESHOLD_MB))
+HEADER_SCAN_ROWS = max(1, int(_SETTINGS.INGEST_HEADER_SCAN_ROWS))
+TYPE_DETECT_SAMPLE_ROWS = max(1, int(_SETTINGS.INGEST_TYPE_DETECT_SAMPLE_ROWS))
+PROBE_BYTES = max(1, int(_SETTINGS.INGEST_PROBE_BYTES))
+AZURE_READ_BUFFER_BYTES = max(1, int(_SETTINGS.INGEST_AZURE_READ_BUFFER_BYTES))
+BLOCK_SIZE = max(1, int(_SETTINGS.INGEST_UPLOAD_BLOCK_SIZE_BYTES))
+MIN_EXCEL_TMP_FREE_BYTES = max(1, int(_SETTINGS.INGEST_MIN_EXCEL_TMP_FREE_BYTES))
+EXCEL_TMP_FREE_MULTIPLIER = max(1.0, float(_SETTINGS.INGEST_EXCEL_TMP_FREE_MULTIPLIER))
+QUARANTINE_SAMPLE_ROWS = max(0, int(_SETTINGS.INGEST_QUARANTINE_SAMPLE_ROWS))
+MALFORMED_SAMPLE_ROWS = max(0, int(_SETTINGS.INGEST_MALFORMED_SAMPLE_ROWS))
+DELIMITER_DETECT_BYTES = max(1, int(_SETTINGS.INGEST_DELIMITER_DETECT_BYTES))
+DELIMITER_CONSISTENCY_THRESHOLD = max(0.0, min(1.0, float(_SETTINGS.INGEST_DELIMITER_CONSISTENCY_THRESHOLD)))
+HEADER_NUMERIC_PENALTY_WEIGHT = max(0.0, float(_SETTINGS.INGEST_HEADER_NUMERIC_PENALTY_WEIGHT))
+HEADER_AVG_LEN_TARGET = max(1, int(_SETTINGS.INGEST_HEADER_AVG_LEN_TARGET))
+HEADER_LEN_PENALTY_SPAN = max(1, int(_SETTINGS.INGEST_HEADER_LEN_PENALTY_SPAN))
+HEADER_EARLY_ROW_LIMIT = max(0, int(_SETTINGS.INGEST_HEADER_EARLY_ROW_LIMIT))
+HEADER_EARLY_SCORE_THRESHOLD = max(0.0, float(_SETTINGS.INGEST_HEADER_EARLY_SCORE_THRESHOLD))
+HEADER_SCORE_EPSILON = max(0.0, float(_SETTINGS.INGEST_HEADER_SCORE_EPSILON))
 
 
 # ── Supported file-type groups ────────────────────────────────────────────────
 
-EXCEL_EXTS = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb"})
-TEXT_EXTS  = frozenset({
-    # Standard delimited-text formats
-    ".csv", ".tsv", ".tab",
-    # Generic text — any delimiter detected automatically
-    ".txt",
-    # ERP / data-warehouse exports often use these extensions
-    ".dat",   # SAP, Oracle EBS generic data export
-    ".psv",   # pipe-separated values
-    ".pipe",  # pipe-separated (alternate convention)
-    ".dsv",   # delimiter-separated values
-})
-ALL_EXTS   = EXCEL_EXTS | TEXT_EXTS
+EXCEL_EXTS = frozenset(excel_ingest_extensions(dotted=True))
+TEXT_EXTS = frozenset(text_ingest_extensions(dotted=True))
+ALL_EXTS = frozenset(preprocess_extensions(dotted=True))
 
 
 # ── Null-like string patterns (compared after .strip().lower()) ───────────────
 
-_NULLSTR: frozenset[str] = frozenset({
-    "", "null", "none", "na", "n/a", "nan", "nil", "tbd", "n.a.", "n.a",
-    "-", "--", "---", ".", "..", "?", "#", "#n/a", "#na", "#null!",
-    "not available", "not applicable", "not provided", "not assigned",
-    "missing", "unknown", "no data", "no value", "nd", "n.d.",
-    "void", "blank", "empty",
-})
+_NULLSTR: frozenset[str] = null_tokens_lower()
 
 
 # ── Compiled regex patterns ───────────────────────────────────────────────────
@@ -122,7 +125,7 @@ _GARBAGE_ROW_RE = re.compile(
     r"^\s*(total|grand\s+total|subtotal|sub\s+total|sum|page\s+total|"
     r"running\s+total|end\s+of\s+report|average|avg|mean|balance\s+forward|"
     r"carried\s+forward|min|max|"
-    # German (SAP, other ERP exports)
+    # German and other exported report formats
     r"summe|gesamtsumme|gesamt|zwischensumme|durchschnitt|"
     # French
     r"total\s+g[e" + "\u00e9" + r"]n[e" + "\u00e9" + r"]ral|total\s+partiel|moyenne|"
@@ -155,8 +158,12 @@ _MULTI_SPACE_RE = re.compile(r" {2,}")
 # ── Concurrency guard ─────────────────────────────────────────────────────────
 # Preprocessing is CPU + I/O heavy. On an 8 GB VM, allow at most 2 concurrent
 # preprocessing jobs so pandas string ops don't saturate all cores / exhaust RAM.
-_PREPROCESS_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(2)
-_EXCEL_PREPROCESS_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(1)
+_PREPROCESS_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(
+    max(1, int(_SETTINGS.INGEST_PREPROCESS_CONCURRENCY))
+)
+_EXCEL_PREPROCESS_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(
+    max(1, int(_SETTINGS.INGEST_EXCEL_PREPROCESS_CONCURRENCY))
+)
 
 
 def _get_preprocess_semaphore() -> asyncio.Semaphore:
@@ -652,15 +659,15 @@ def _process_text_stream(
 
     def _handle_bad_line(bad_line: list) -> None:  # type: ignore[return]
         _malformed_count[0] += 1
-        if len(_malformed_sample) < 5:
+        if len(_malformed_sample) < MALFORMED_SAMPLE_ROWS:
             _malformed_sample.append({
                 "reason": "malformed_csv_row",
-                "row": {"_raw": ",".join(str(x) for x in bad_line[:20])},
+                "row": {"_raw": ",".join(str(x) for x in bad_line[:QUARANTINE_SAMPLE_ROWS])},
             })
         return None  # skip the row
 
     downloader = src_bc.download_blob()
-    raw_stream = io.BufferedReader(_AzureRawStream(downloader), buffer_size=8 * 1024 * 1024)
+    raw_stream = io.BufferedReader(_AzureRawStream(downloader), buffer_size=AZURE_READ_BUFFER_BYTES)
 
     try:
         reader = pd.read_csv(
@@ -693,8 +700,8 @@ def _process_text_stream(
         original_rows += len(chunk)
         chunk, q_rows  = _clean_chunk(chunk, converters, _active_profile)
         total_quarantine += len(q_rows)
-        if len(quarantine_sample) < 20:
-            quarantine_sample.extend(q_rows[:20 - len(quarantine_sample)])
+        if len(quarantine_sample) < QUARANTINE_SAMPLE_ROWS:
+            quarantine_sample.extend(q_rows[:QUARANTINE_SAMPLE_ROWS - len(quarantine_sample)])
 
         if is_large:
             buf = io.StringIO()
@@ -725,8 +732,8 @@ def _process_text_stream(
     if _malformed_count[0]:
         warns.append(f"Skipped {_malformed_count[0]} malformed CSV row(s) (wrong column count)")
         total_quarantine += _malformed_count[0]
-        if len(quarantine_sample) < 20:
-            quarantine_sample.extend(_malformed_sample[:20 - len(quarantine_sample)])
+        if len(quarantine_sample) < QUARANTINE_SAMPLE_ROWS:
+            quarantine_sample.extend(_malformed_sample[:QUARANTINE_SAMPLE_ROWS - len(quarantine_sample)])
 
     return {
         "original_rows":     original_rows,
@@ -926,8 +933,8 @@ def _process_xlsx_to_blob(
 
     sample_clean, q_rows = _make_chunk(sample_rows)
     total_quarantine += len(q_rows)
-    if len(quarantine_sample) < 20:
-        quarantine_sample.extend(q_rows[:20 - len(quarantine_sample)])
+    if len(quarantine_sample) < QUARANTINE_SAMPLE_ROWS:
+        quarantine_sample.extend(q_rows[:QUARANTINE_SAMPLE_ROWS - len(quarantine_sample)])
     if is_large:
         buf = io.StringIO()
         sample_clean.to_csv(buf, index=False, header=False)
@@ -943,8 +950,8 @@ def _process_xlsx_to_blob(
         if len(batch) >= CHUNK_ROWS:
             chunk, q_rows = _make_chunk(batch)
             total_quarantine += len(q_rows)
-            if len(quarantine_sample) < 20:
-                quarantine_sample.extend(q_rows[:20 - len(quarantine_sample)])
+            if len(quarantine_sample) < QUARANTINE_SAMPLE_ROWS:
+                quarantine_sample.extend(q_rows[:QUARANTINE_SAMPLE_ROWS - len(quarantine_sample)])
             if is_large:
                 buf = io.StringIO()
                 chunk.to_csv(buf, index=False, header=False)
@@ -957,8 +964,8 @@ def _process_xlsx_to_blob(
     if batch:
         chunk, q_rows = _make_chunk(batch)
         total_quarantine += len(q_rows)
-        if len(quarantine_sample) < 20:
-            quarantine_sample.extend(q_rows[:20 - len(quarantine_sample)])
+        if len(quarantine_sample) < QUARANTINE_SAMPLE_ROWS:
+            quarantine_sample.extend(q_rows[:QUARANTINE_SAMPLE_ROWS - len(quarantine_sample)])
         if is_large:
             buf = io.StringIO()
             chunk.to_csv(buf, index=False, header=False)
@@ -1112,7 +1119,7 @@ def _detect_encoding(path: str) -> str:
         return _detect_encoding_from_bytes(fh.read(65536))
 
 
-def _is_consistent_delimiter(text: str, delim: str, threshold: float = 0.80) -> bool:
+def _is_consistent_delimiter(text: str, delim: str, threshold: float | None = None) -> bool:
     """
     Return True if *delim* produces a consistent column count across lines.
     >80% of non-empty lines must split into the same number of fields.
@@ -1125,7 +1132,8 @@ def _is_consistent_delimiter(text: str, delim: str, threshold: float = 0.80) -> 
     if mode_count == 0:
         return False
     agree = sum(1 for c in counts if c == mode_count)
-    return agree / len(counts) >= threshold
+    active_threshold = DELIMITER_CONSISTENCY_THRESHOLD if threshold is None else threshold
+    return agree / len(counts) >= active_threshold
 
 
 def _frequency_delimiter(text: str) -> str | None:
@@ -1179,7 +1187,7 @@ def _detect_delimiter_from_str(text: str, ext_hint: str = "") -> str:
     The probe sample used is the first 8 KB (sufficient for sniffing without reading
     the whole file into memory).
     """
-    sample = text[:8192]
+    sample = text[:DELIMITER_DETECT_BYTES]
 
     # ── 1. clevercsv (preferred) ───────────────────────────────────────────────
     try:
@@ -1217,7 +1225,7 @@ def _detect_delimiter(path: str, encoding: str) -> str:
     """Detect CSV delimiter from a local file path (used by the file-path test helpers)."""
     try:
         with open(path, encoding=encoding, errors="replace") as fh:
-            return _detect_delimiter_from_str(fh.read(8192), path)
+            return _detect_delimiter_from_str(fh.read(DELIMITER_DETECT_BYTES), path)
     except OSError:
         return ","
 
@@ -1321,7 +1329,7 @@ def _clean_str_series(s: pd.Series) -> pd.Series:
     """Vectorized column cleaning — one C-level call per pattern, NOT a Python loop.
 
     Replaces the old `s.apply(_clean_str)` which fired a Python function call
-    for every single cell (30M+ calls on a SAP file with 300 cols × 100K rows).
+    for every single cell on wide, high-row-count files.
     Vectorized .str operations call into pandas/regex C extensions once per column.
     """
     # Only process object/string columns — pass through already-typed numerics/dates
@@ -1379,13 +1387,13 @@ def _find_header_row(df: pd.DataFrame) -> int:
         str_ratio = str_cnt / max(len(non_null), 1)
         num_ratio = num_cnt / max(len(non_null), 1)
         avg_len   = sum(len(str(v)) for v in non_null) / max(len(non_null), 1)
-        len_pen   = max(0.0, (avg_len - 60) / 150)
-        score = coverage * str_ratio - num_ratio * 0.5 - len_pen
+        len_pen   = max(0.0, (avg_len - HEADER_AVG_LEN_TARGET) / HEADER_LEN_PENALTY_SPAN)
+        score = coverage * str_ratio - num_ratio * HEADER_NUMERIC_PENALTY_WEIGHT - len_pen
 
-        if score > best_score + 0.05:
+        if score > best_score + HEADER_SCORE_EPSILON:
             best_score = score
             best_row   = i
-        if i <= 3 and score > 0.70:
+        if i <= HEADER_EARLY_ROW_LIMIT and score > HEADER_EARLY_SCORE_THRESHOLD:
             break
 
     return best_row
@@ -1472,7 +1480,7 @@ def _build_converters(
     """Return the per-column converter map by consulting the detector registry.
 
     The registry's ordering rule is "identifier first, value-based last", so
-    columns named like IDs (LEDGER_ID, INVOICE_NUM, ...) are never coerced —
+    columns named like IDs or codes are never coerced —
     even when their values happen to look like years or numbers. Columns that
     no detector claims are intentionally left without a converter; the caller
     keeps them as raw strings.

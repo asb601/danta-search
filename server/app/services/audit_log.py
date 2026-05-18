@@ -1,0 +1,343 @@
+from __future__ import annotations
+
+import time
+import uuid
+from typing import Any
+
+from fastapi import Request
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import async_session
+from app.core.logger import audit_logger
+from app.core.security import decode_access_token
+from app.models.audit_log import AuditLog
+from app.models.file import File
+from app.models.folder import Folder
+from app.models.user import User
+
+_SECRET_QUERY_KEYS = {"token", "access_token", "code", "state", "password", "secret", "key"}
+
+
+def _as_list(value: Any) -> list[str] | None:
+    if not value:
+        return None
+    return [str(item) for item in value if str(item)] or None
+
+
+def _client_ip(request: Request) -> str | None:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else None
+
+
+def _route_template(request: Request) -> str:
+    route = request.scope.get("route")
+    return getattr(route, "path", None) or request.url.path
+
+
+def _action_for_request(request: Request) -> str:
+    return f"{request.method} {_route_template(request)}"
+
+
+def _scrubbed_query_params(request: Request) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, value in request.query_params.items():
+        result[key] = "[redacted]" if key.lower() in _SECRET_QUERY_KEYS else value
+    return result
+
+
+async def _actor_from_request(request: Request, db: AsyncSession) -> User | None:
+    auth = request.headers.get("authorization") or ""
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    try:
+        payload = decode_access_token(token)
+    except Exception:
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    return await db.get(User, str(user_id))
+
+
+async def _target_context_from_request(
+    request: Request,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    params = dict(request.path_params or {})
+    context: dict[str, Any] = {}
+
+    container_id = params.get("container_id") or request.query_params.get("container_id")
+    if container_id:
+        context["container_id"] = str(container_id)
+
+    target_user_id = params.get("user_id")
+    if target_user_id:
+        user = await db.get(User, str(target_user_id))
+        context["target_user_id"] = str(target_user_id)
+        if user:
+            context["target_user_email"] = user.email
+            context["target_user_name"] = user.name
+
+    folder_id = params.get("folder_id") or request.query_params.get("folder_id")
+    if folder_id:
+        folder = await db.get(Folder, str(folder_id))
+        context["folder_id"] = str(folder_id)
+        if folder:
+            context["folder_name"] = folder.name
+            context["domain_tag"] = folder.domain_tag
+            if not context.get("container_id") and folder.container_id:
+                context["container_id"] = folder.container_id
+
+    file_id = params.get("file_id") or request.query_params.get("file_id")
+    if file_id:
+        file = await db.get(File, str(file_id))
+        context["file_id"] = str(file_id)
+        if file:
+            context["file_name"] = file.name
+            if not context.get("container_id") and file.container_id:
+                context["container_id"] = file.container_id
+            if not context.get("folder_id") and file.folder_id:
+                context["folder_id"] = file.folder_id
+            if file.folder_id and not context.get("domain_tag"):
+                folder = await db.get(Folder, file.folder_id)
+                if folder:
+                    context["folder_name"] = folder.name
+                    context["domain_tag"] = folder.domain_tag
+
+    return context
+
+
+def _actor_fields(actor: User | None) -> dict[str, Any]:
+    if actor is None:
+        return {
+            "actor_user_id": None,
+            "actor_email": None,
+            "actor_name": None,
+            "actor_role": None,
+            "actor_is_admin": False,
+            "actor_allowed_domains": None,
+            "actor_organization_id": None,
+        }
+    return {
+        "actor_user_id": actor.id,
+        "actor_email": actor.email,
+        "actor_name": actor.name,
+        "actor_role": "admin" if actor.is_admin else actor.role,
+        "actor_is_admin": bool(actor.is_admin),
+        "actor_allowed_domains": _as_list(actor.allowed_domains),
+        "actor_organization_id": actor.organization_id,
+    }
+
+
+def _log_to_file(row: AuditLog) -> None:
+    audit_logger.info(
+        "audit_event",
+        audit_id=row.id,
+        event_type=row.event_type,
+        action=row.action,
+        actor_user_id=row.actor_user_id,
+        actor_email=row.actor_email,
+        actor_name=row.actor_name,
+        actor_role=row.actor_role,
+        actor_is_admin=row.actor_is_admin,
+        actor_allowed_domains=row.actor_allowed_domains,
+        actor_organization_id=row.actor_organization_id,
+        method=row.method,
+        path=row.path,
+        route_template=row.route_template,
+        status_code=row.status_code,
+        duration_ms=row.duration_ms,
+        ip_address=row.ip_address,
+        domain_tag=row.domain_tag,
+        container_id=row.container_id,
+        file_id=row.file_id,
+        file_name=row.file_name,
+        folder_id=row.folder_id,
+        folder_name=row.folder_name,
+        target_user_id=row.target_user_id,
+        target_user_email=row.target_user_email,
+        target_user_name=row.target_user_name,
+        details=row.details,
+        error=row.error,
+    )
+
+
+async def record_audit_event(
+    db: AsyncSession,
+    *,
+    actor: User | None,
+    action: str,
+    event_type: str = "action",
+    status_code: int | None = None,
+    method: str | None = None,
+    path: str | None = None,
+    route_template: str | None = None,
+    duration_ms: float | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    domain_tag: str | None = None,
+    container_id: str | None = None,
+    file_id: str | None = None,
+    file_name: str | None = None,
+    folder_id: str | None = None,
+    folder_name: str | None = None,
+    target_user_id: str | None = None,
+    target_user_email: str | None = None,
+    target_user_name: str | None = None,
+    details: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> AuditLog:
+    row = AuditLog(
+        id=str(uuid.uuid4()),
+        event_type=event_type,
+        action=action[:160],
+        **_actor_fields(actor),
+        method=method,
+        path=path,
+        route_template=route_template,
+        status_code=status_code,
+        duration_ms=duration_ms,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        domain_tag=domain_tag,
+        container_id=container_id,
+        file_id=file_id,
+        file_name=file_name,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        target_user_id=target_user_id,
+        target_user_email=target_user_email,
+        target_user_name=target_user_name,
+        details=details,
+        error=error[:1000] if error else None,
+    )
+    db.add(row)
+    _log_to_file(row)
+    return row
+
+
+async def record_audit_event_safe(
+    *,
+    actor: User | None,
+    action: str,
+    event_type: str = "action",
+    status_code: int | None = None,
+    method: str | None = None,
+    path: str | None = None,
+    route_template: str | None = None,
+    duration_ms: float | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    domain_tag: str | None = None,
+    container_id: str | None = None,
+    file_id: str | None = None,
+    file_name: str | None = None,
+    folder_id: str | None = None,
+    folder_name: str | None = None,
+    target_user_id: str | None = None,
+    target_user_email: str | None = None,
+    target_user_name: str | None = None,
+    details: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    """Best-effort action audit using an isolated DB session."""
+    try:
+        async with async_session() as db:
+            actor_row = await db.get(User, actor.id) if actor else None
+            await record_audit_event(
+                db,
+                actor=actor_row,
+                action=action,
+                event_type=event_type,
+                status_code=status_code,
+                method=method,
+                path=path,
+                route_template=route_template,
+                duration_ms=duration_ms,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                domain_tag=domain_tag,
+                container_id=container_id,
+                file_id=file_id,
+                file_name=file_name,
+                folder_id=folder_id,
+                folder_name=folder_name,
+                target_user_id=target_user_id,
+                target_user_email=target_user_email,
+                target_user_name=target_user_name,
+                details=details,
+                error=error,
+            )
+            await db.commit()
+    except Exception as exc:
+        audit_logger.warning(
+            "audit_action_record_failed",
+            action=action,
+            actor_user_id=getattr(actor, "id", None),
+            actor_email=getattr(actor, "email", None),
+            error=str(exc)[:300],
+        )
+
+
+async def record_request_audit(
+    request: Request,
+    *,
+    status_code: int | None,
+    duration_ms: float,
+    error: str | None = None,
+) -> None:
+    if request.method == "OPTIONS":
+        return
+
+    start = time.perf_counter()
+    try:
+        async with async_session() as db:
+            actor = await _actor_from_request(request, db)
+            context = await _target_context_from_request(request, db)
+            row = await record_audit_event(
+                db,
+                actor=actor,
+                event_type="request",
+                action=_action_for_request(request),
+                method=request.method,
+                path=request.url.path,
+                route_template=_route_template(request),
+                status_code=status_code,
+                duration_ms=duration_ms,
+                ip_address=_client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+                details={
+                    "query_params": _scrubbed_query_params(request),
+                    "referer": request.headers.get("referer"),
+                    "audit_insert_ms": None,
+                },
+                error=error,
+                **context,
+            )
+            if row.details is not None:
+                row.details["audit_insert_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            await db.commit()
+    except Exception as exc:
+        audit_logger.warning(
+            "audit_record_failed",
+            method=request.method,
+            path=request.url.path,
+            status_code=status_code,
+            error=str(exc)[:300],
+        )
+
+
+async def visible_user_ids_for_domains(db: AsyncSession, domains: list[str]) -> set[str]:
+    if not domains:
+        return set()
+    result = await db.execute(
+        select(User.id).where(User.allowed_domains.op("&&")(domains))
+    )
+    return set(result.scalars().all())

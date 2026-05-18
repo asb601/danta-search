@@ -1,0 +1,123 @@
+{
+  "runtime": {
+    "reingest_batch_size": null,
+    "reingest_batch_delay_seconds": null,
+    "parquet_conversion_concurrency": null,
+    "preprocess_concurrency": null,
+    "excel_preprocess_concurrency": null,
+    "celery_worker_concurrency": null,
+    "celery_worker_prefetch_multiplier": 1,
+    "celery_result_expires_seconds": 86400
+  },
+  "queues": {
+    "high": "ingest_high",
+    "normal": "ingest_normal",
+    "low": "ingest_low"
+  },
+  "task": {
+    "max_retries": 3,
+    "default_retry_delay_seconds": 30,
+    "retry_backoff": true,
+    "retry_backoff_max_seconds": 300,
+    "acks_late": true,
+    "reject_on_worker_lost": true,
+    "soft_time_limit_seconds": 2700,
+    "time_limit_seconds": 3000
+  },
+  "semantic_rebuild": {
+    "max_retries": 1,
+    "default_retry_delay_seconds": 60,
+    "batch_size": 250
+  },
+  "extensions": {
+    "supported": ["csv", "txt", "tsv", "tab", "dat", "psv", "pipe", "dsv", "xlsx", "xls", "xlsm", "xlsb"],
+    "auto_ingest": ["csv", "txt", "tsv"],
+    "text": ["csv", "txt", "tsv", "tab", "dat", "psv", "pipe", "dsv"],
+    "excel": ["xlsx", "xls", "xlsm", "xlsb"],
+    "parquet_sources": ["csv", "txt", "tsv", "tab", "dat", "psv", "pipe", "dsv"],
+    "parquet_output": "parquet"
+  },
+  "duckdb": {
+    "sample_rows": 500,
+    "query_timeout_seconds": 30,
+    "query_max_rows": 1000
+  },
+  "columns": {
+    "unique_values_limit": 20,
+    "sample_values_limit": 3
+  },
+  "role_resolver": {
+    "max_columns": 60,
+    "sample_values": 10,
+    "glossary_items": 80,
+    "preview_items": 10
+  },
+  "file_description": {
+    "sample_rows": 20,
+    "max_completion_tokens": 600
+  },
+  "llm": {
+    "retry_delays_seconds": [1, 5, 30]
+  },
+  "identifier_detection": {
+    "exact_names": ["id", "uuid", "guid"],
+    "suffixes": ["_id", "_num", "_number", "_no", "_key", "_code", "_ref", "_uuid"],
+    "prefixes": []
+  },
+  "preprocess": {
+    "chunk_rows": 50000,
+    "small_file_threshold_mb": 50,
+    "header_scan_rows": 15,
+    "type_detect_sample_rows": 1000,
+    "probe_bytes": 262144,
+    "azure_read_buffer_bytes": 8388608,
+    "upload_block_size_bytes": 4194304,
+    "min_excel_tmp_free_bytes": 2147483648,
+    "excel_tmp_free_multiplier": 2.0,
+    "quarantine_sample_rows": 20,
+    "malformed_sample_rows": 5,
+    "log_sample_items": 5,
+    "delimiter_detect_bytes": 8192,
+    "delimiter_consistency_threshold": 0.8,
+    "header_numeric_penalty_weight": 0.5,
+    "header_avg_len_target": 60,
+    "header_len_penalty_span": 150,
+    "header_early_row_limit": 3,
+    "header_early_score_threshold": 0.7,
+    "header_score_epsilon": 0.05
+  },
+  "parquet": {
+    "azure_buffer_bytes": 8388608,
+    "block_bytes": 8388608,
+    "read_block_bytes": 67108864,
+    "compression": "zstd",
+    "compression_level": 3,
+    "auto_dict_max_cardinality": 500,
+    "category_max_ratio": 0.05,
+    "category_max_distinct": 5000,
+    "top_values": 10,
+    "progress_max_pct": 95,
+    "progress_batch_pct": 5
+  },
+  "analytics": {
+    "value_count_columns": 10,
+    "value_count_top_values": 20,
+    "crosstab_dimensions": 3,
+    "crosstab_metrics": 3,
+    "crosstab_top_rows": 15
+  },
+  "semantic_layer": {
+    "component_limit": 10,
+    "failure_sample_limit": 20
+  },
+  "cleaning": {
+    "null_tokens": ["<empty>", "null", "none", "na", "n/a", "nan", "nil", "tbd", "-", "--", "---", ".", "..", "?", "#", "#n/a", "#na", "#null!", "not available", "not applicable", "not provided", "not assigned", "missing", "unknown", "no data", "no value", "void", "blank", "empty", "#value!", "#ref!", "#div/0!", "#name?", "#num!", "#error!", "tba", "wip", "pending", "not entered", "not recorded"]
+  },
+  "dictionary_detection": {
+    "schema_filename_tokens": ["schema"],
+    "glossary_filename_tokens": ["schema", "glossary", "column_map", "field_def", "mapping", "data_dict"],
+    "field_name_tokens": ["field", "fieldname", "field_name", "column", "column_name", "col_name", "attribute", "technical_name", "element", "fieldid", "field_id", "colname"],
+    "description_tokens": ["description", "desc", "short_text", "long_text", "label", "meaning", "definition", "documentation", "help_text", "medium_text", "descr", "description_text", "explanation"],
+    "notes_tokens": ["long_text", "documentation", "notes", "remark", "extended_description", "detail", "comment"]
+  }
+}

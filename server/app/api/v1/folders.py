@@ -37,8 +37,8 @@ async def get_folder_contents(
     # Resolve effective domain restriction by walking ancestors. A subfolder
     # without its own domain_tag inherits the tag of its nearest tagged
     # ancestor. This prevents bypass via "untagged subfolder inside a tagged
-    # parent" — e.g. "FBL3N / archive" must remain restricted to FBL3N users
-    # even if 'archive' itself has no tag.
+    # parent"; access remains restricted to users with the inherited tag even
+    # if the child folder itself has no tag.
     async def _effective_domain_tag(start_folder_id: str) -> str | None:
         cursor_id: str | None = start_folder_id
         seen: set[str] = set()
@@ -72,7 +72,7 @@ async def get_folder_contents(
     # Domain scope: only show folders the user is allowed to see.
     # Rule: domain-restricted users see ONLY folders explicitly tagged with
     # one of their allowed domains.
-    #   - At root: untagged folders (OEBS AP, SAP OTC EWM, …) are hidden.
+    #   - At root: untagged folders are hidden.
     #   - Inside an authorised folder: untagged subfolders inherit the parent's
     #     domain and are shown (admin created them inside the domain folder).
     if user.allowed_domains:
