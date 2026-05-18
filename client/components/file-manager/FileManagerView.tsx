@@ -790,7 +790,7 @@ export default function FileManagerView({
               renamingId === item.id ? (
                 <div key={item.id} className="flex flex-col items-center justify-center rounded-xl p-3 border border-primary/50 bg-primary/5">
                   <div className="flex items-center justify-center h-[52px]">
-                    {(() => { const Icon = getIcon(item.type); return <Icon className={cn("w-9 h-9", getIconColor(item.type))} strokeWidth={1.5} />; })()}
+                    {(() => { const Icon = TYPE_ICONS[item.type]; return <Icon className={cn("w-9 h-9", getIconColor(item.type))} strokeWidth={1.5} />; })()}
                   </div>
                   <input
                     ref={renameInputRef}
@@ -847,7 +847,7 @@ export default function FileManagerView({
             {sorted.map((item) => (
               renamingId === item.id ? (
                 <div key={item.id} className="h-10 flex items-center px-3 gap-4 border-b border-border bg-primary/5">
-                  {(() => { const Icon = getIcon(item.type); return <Icon className={cn("w-4 h-4 shrink-0", getIconColor(item.type))} strokeWidth={1.5} />; })()}
+                  {(() => { const Icon = TYPE_ICONS[item.type]; return <Icon className={cn("w-4 h-4 shrink-0", getIconColor(item.type))} strokeWidth={1.5} />; })()}
                   <input
                     ref={renameInputRef}
                     value={renameValue}
