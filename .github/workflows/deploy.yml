@@ -16,7 +16,24 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
+            set -e
             export PATH="$HOME/.local/bin:$PATH"
+
+            # ── 1. Install uv if not present (fresh VM bootstrap) ─────────────
+            if ! command -v uv &>/dev/null; then
+              echo "uv not found — installing..."
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+              export PATH="$HOME/.local/bin:$PATH"
+              echo "uv installed: $(uv --version)"
+            else
+              echo "uv OK: $(uv --version)"
+            fi
+
+            # ── 2. Clone repo if not present (fresh VM bootstrap) ────────────
+            if [ ! -d "$HOME/G-CHAT-/.git" ]; then
+              echo "Repo not found — cloning..."
+              git clone https://github.com/asb601/G-CHAT-.git "$HOME/G-CHAT-"
+            fi
 
             cd ~/G-CHAT-
 
@@ -29,19 +46,74 @@ jobs:
             # Remove client folder — VM only needs server
             rm -rf ~/G-CHAT-/client
 
-            # Write .env from GitHub Secret
+            # ── 3. Write .env from GitHub Secret ─────────────────────────────
             cat > ~/G-CHAT-/server/.env << 'ENVEOF'
             ${{ secrets.SERVER_ENV }}
             ENVEOF
 
-            # Sync dependencies so any new packages in uv.lock are installed
+            # ── 4. Sync dependencies ──────────────────────────────────────────
             cd ~/G-CHAT-/server
             uv sync --frozen
 
-            # Restart backend service (creates all tables on first start)
-            sudo systemctl restart gchat
+            # ── 5. Create gchat FastAPI service if not present ────────────────
+            if [ ! -f /etc/systemd/system/gchat.service ]; then
+              echo "gchat.service not found — creating..."
+              sudo tee /etc/systemd/system/gchat.service > /dev/null << SVCEOF
+            [Unit]
+            Description=G-CHAT FastAPI Backend
+            After=network.target
 
-            # Wait for uvicorn to fully start, then verify
+            [Service]
+            Type=simple
+            User=$USER
+            WorkingDirectory=$HOME/G-CHAT-/server
+            EnvironmentFile=$HOME/G-CHAT-/server/.env
+            ExecStart=$HOME/.local/bin/uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+            Restart=always
+            RestartSec=5
+            StandardOutput=journal
+            StandardError=journal
+
+            [Install]
+            WantedBy=multi-user.target
+            SVCEOF
+              sudo systemctl daemon-reload
+              sudo systemctl enable gchat
+              echo "gchat.service created and enabled"
+            fi
+
+            # ── 6. Create gchat-celery worker service if not present ──────────
+            if [ ! -f /etc/systemd/system/gchat-celery.service ]; then
+              echo "gchat-celery.service not found — creating..."
+              sudo tee /etc/systemd/system/gchat-celery.service > /dev/null << CELEOF
+            [Unit]
+            Description=G-CHAT Celery Ingest Worker
+            After=network.target gchat.service
+
+            [Service]
+            Type=simple
+            User=$USER
+            WorkingDirectory=$HOME/G-CHAT-/server
+            EnvironmentFile=$HOME/G-CHAT-/server/.env
+            ExecStart=$HOME/.local/bin/uv run celery -A app.worker.celery_app worker -Q ingest_normal -c 1 -n ingest_normal@%%h --loglevel=info
+            Restart=always
+            RestartSec=10
+            StandardOutput=journal
+            StandardError=journal
+
+            [Install]
+            WantedBy=multi-user.target
+            CELEOF
+              sudo systemctl daemon-reload
+              sudo systemctl enable gchat-celery
+              echo "gchat-celery.service created and enabled"
+            fi
+
+            # ── 7. Restart both services ──────────────────────────────────────
+            sudo systemctl restart gchat
+            sudo systemctl restart gchat-celery
+
+            # ── 8. Wait for uvicorn to be healthy ─────────────────────────────
             HEALTHY=0
             for i in $(seq 1 10); do
               sleep 3
@@ -60,7 +132,15 @@ jobs:
               exit 1
             fi
 
-            # Run DB migrations after service is up (safe no-op if columns already exist)
+            # ── 9. DB migrations (safe no-op if already applied) ──────────────
             cd ~/G-CHAT-/server
             uv run python -m app.migrations.chat_memory_upgrade
             echo "Migrations complete"
+
+            # ── 10. Verify Celery worker is running ───────────────────────────
+            if systemctl is-active --quiet gchat-celery; then
+              echo "Celery worker OK"
+            else
+              echo "WARNING: gchat-celery is not running — check logs:"
+              sudo journalctl -u gchat-celery -n 20 --no-pager
+            fi
