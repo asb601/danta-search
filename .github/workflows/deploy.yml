@@ -128,7 +128,7 @@ jobs:
             HEALTHY=0
             for i in $(seq 1 15); do
               sleep 4
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health)
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health 2>/dev/null || echo "000")
               echo "Attempt $i: status=$STATUS"
               if [ "$STATUS" = "200" ]; then
                 echo "Backend OK"
