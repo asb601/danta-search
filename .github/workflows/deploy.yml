@@ -35,6 +35,7 @@ jobs:
               git clone https://github.com/asb601/G-CHAT-.git "$HOME/G-CHAT-"
             fi
 
+
             cd ~/G-CHAT-
 
             # Discard any locally modified lock file so git pull never aborts
