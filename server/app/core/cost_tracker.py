@@ -13,7 +13,7 @@ Usage:
     track_llm("generate_sql", "gpt-4o-mini", 845, 210, 0.00023, 1340.2)
 
     # called automatically by parquet_service after each download/upload
-    track_azure_blob("download" ,   "files/data.csv", size_bytes=3_000_000_000, duration_ms=87_000)
+    track_azure_blob("download",   "files/data.csv", size_bytes=3_000_000_000, duration_ms=87_000)
 """
 from __future__ import annotations
 
