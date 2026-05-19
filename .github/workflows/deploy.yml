@@ -110,13 +110,24 @@ jobs:
             fi
 
             # ── 7. Restart both services ──────────────────────────────────────
-            sudo systemctl restart gchat
-            sudo systemctl restart gchat-celery
+            if sudo systemctl restart gchat; then
+              echo "gchat started OK"
+            else
+              echo "gchat failed to start — logs:"
+              sudo journalctl -u gchat -n 40 --no-pager
+            fi
+
+            if sudo systemctl restart gchat-celery; then
+              echo "gchat-celery started OK"
+            else
+              echo "gchat-celery failed to start — logs:"
+              sudo journalctl -u gchat-celery -n 20 --no-pager
+            fi
 
             # ── 8. Wait for uvicorn to be healthy ─────────────────────────────
             HEALTHY=0
-            for i in $(seq 1 10); do
-              sleep 3
+            for i in $(seq 1 15); do
+              sleep 4
               STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health)
               echo "Attempt $i: status=$STATUS"
               if [ "$STATUS" = "200" ]; then
@@ -127,8 +138,8 @@ jobs:
             done
 
             if [ "$HEALTHY" = "0" ]; then
-              echo "Backend did not become healthy"
-              sudo journalctl -u gchat -n 30 --no-pager
+              echo "Backend did not become healthy — full gchat logs:"
+              sudo journalctl -u gchat -n 60 --no-pager
               exit 1
             fi
 
