@@ -146,7 +146,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("audit_log_migration_failed", error=str(exc)[:300])
 
-    # Pre-warm DataFusion session pool — pays UDF-registration cost once at startup
+    # Pre-warm DataFusion  session pool — pays UDF-registration cost once at startup
     # so the first N concurrent queries borrow a ready context without overhead.
     try:
         import asyncio as _asyncio
