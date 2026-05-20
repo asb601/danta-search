@@ -123,12 +123,12 @@ async def ensure_container_index(container_id: str) -> str:
 async def index_file_metadata(container_id: str, file_id: str, document: dict[str, Any]) -> None:
     if not opensearch_enabled():
         return
-    index_name = await ensure_container_index(container_id)
     try:
+        index_name = await ensure_container_index(container_id)
         await _request("PUT", f"/{index_name}/_doc/{file_id}", json=document)
         ingest_logger.info("opensearch_document_indexed", index=index_name, file_id=file_id)
     except Exception as exc:
-        # Indexing failure must not fail ingestion. PostgreSQL remains source of truth.
+        # OpenSearch is optional; PostgreSQL remains the source of truth.
         ingest_logger.warning("opensearch_index_failed", file_id=file_id, error=str(exc)[:300])
 
 

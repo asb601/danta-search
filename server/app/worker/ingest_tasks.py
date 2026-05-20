@@ -11,7 +11,7 @@ Celery tasks so each stage has its own retry/failure boundary:
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TypeVar
 
 import structlog
 from celery import chain
@@ -32,6 +32,7 @@ from app.services.ingestion_config import (
 from app.worker.celery_app import celery_app
 
 Payload = dict[str, Any]
+T = TypeVar("T")
 _INGEST_TASK_OPTIONS = celery_ingest_task_options()
 _SEMANTIC_REBUILD_TASK_OPTIONS = celery_semantic_rebuild_task_options()
 _NON_FATAL_STAGES = {
@@ -43,6 +44,7 @@ _NON_FATAL_STAGES = {
     StageName.RELATIONSHIPS.value,
     StageName.SEMANTIC_LAYER.value,
 }
+_WORKER_LOOP: asyncio.AbstractEventLoop | None = None
 
 
 def _file_id_from_payload(payload_or_file_id: Payload | str) -> str:
@@ -61,8 +63,16 @@ def _failed_payload(file_id: str, stage: str, exc: BaseException, retries: int) 
     }
 
 
-def _run_async(coro: Awaitable[Payload]) -> Payload:
-    return asyncio.run(coro)
+def _worker_loop() -> asyncio.AbstractEventLoop:
+    global _WORKER_LOOP
+    if _WORKER_LOOP is None or _WORKER_LOOP.is_closed():
+        _WORKER_LOOP = asyncio.new_event_loop()
+        asyncio.set_event_loop(_WORKER_LOOP)
+    return _WORKER_LOOP
+
+
+def _run_async(coro: Awaitable[T]) -> T:
+    return _worker_loop().run_until_complete(coro)
 
 
 def _run_stage(
@@ -111,7 +121,7 @@ def _run_stage(
         if task.request.retries >= task.max_retries:
             from app.services.ingestion_stages import mark_ingestion_failed
 
-            asyncio.run(mark_ingestion_failed(file_id, stage_value, exc))
+            _run_async(mark_ingestion_failed(file_id, stage_value, exc))
             return _failed_payload(file_id, stage_value, exc, task.request.retries)
         raise task.retry(exc=exc)
     finally:
@@ -132,12 +142,12 @@ def run_ingest_pipeline(self, file_id: str) -> Payload:
     try:
         from app.services.ingestion_stages import prepare_pipeline
 
-        prepared = asyncio.run(prepare_pipeline(file_id))
+        prepared = _run_async(prepare_pipeline(file_id))
     except (SoftTimeLimitExceeded, Exception) as exc:
         if self.request.retries >= self.max_retries:
             from app.services.ingestion_stages import mark_ingestion_failed
 
-            asyncio.run(mark_ingestion_failed(file_id, "prepare", exc))
+            _run_async(mark_ingestion_failed(file_id, "prepare", exc))
             return _failed_payload(file_id, "prepare", exc, self.request.retries)
         raise self.retry(exc=exc)
 
@@ -309,7 +319,7 @@ def run_semantic_rebuild_container(
     try:
         from app.services.semantic_rebuild import rebuild_container_semantics
 
-        return asyncio.run(
+        return _run_async(
             rebuild_container_semantics(
                 container_id,
                 re_resolve_roles=re_resolve_roles,
