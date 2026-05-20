@@ -53,6 +53,25 @@ jobs:
             cd ~/G-CHAT-/server
             uv sync --frozen
 
+            # ── 4.1. Ensure local Redis is available for Celery ───────────────
+            # Only manage Redis when the app is configured to use localhost.
+            # External Redis setups are controlled outside this deploy script.
+            if grep -q '^REDIS_URL=redis://localhost' ~/G-CHAT-/server/.env; then
+              if ! command -v redis-server &>/dev/null; then
+                echo "redis-server not found — installing..."
+                sudo apt-get update
+                sudo apt-get install -y redis-server
+              fi
+              sudo systemctl enable --now redis-server
+              if systemctl is-active --quiet redis-server; then
+                echo "redis-server OK"
+              else
+                echo "redis-server failed to start — logs:"
+                sudo journalctl -u redis-server -n 30 --no-pager
+                exit 1
+              fi
+            fi
+
             # ── 5. Create gchat FastAPI service if not present ────────────────
             if [ ! -f /etc/systemd/system/gchat.service ]; then
               echo "gchat.service not found — creating..."
