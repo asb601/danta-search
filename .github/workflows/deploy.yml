@@ -38,14 +38,11 @@ jobs:
 
             cd ~/G-CHAT-
 
-            # Discard any locally modified lock file so git pull never aborts
-            git checkout server/uv.lock 2>/dev/null || true
-
-            # Pull latest code
-            git pull origin main
-
-            # Remove client folder — VM only needs server
-            rm -rf ~/G-CHAT-/client
+            # Keep the VM checkout clean and pinned to the branch that triggered deploy.
+            # Older deploys removed client/ from a tracked repo, leaving the VM dirty.
+            git restore client server/uv.lock 2>/dev/null || true
+            git fetch origin main
+            git checkout -B main origin/main
 
             # ── 3. Write .env from GitHub Secret ─────────────────────────────
             cat > ~/G-CHAT-/server/.env << 'ENVEOF'

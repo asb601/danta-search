@@ -107,6 +107,12 @@ async def reingest_all(
     await db.execute(delete(FileRelationship).where(FileRelationship.file_b_id.in_(file_ids)))
     await db.execute(delete(FileAnalytics).where(FileAnalytics.file_id.in_(file_ids)))
     await db.execute(delete(FileMetadata).where(FileMetadata.file_id.in_(file_ids)))
+    await db.execute(
+        delete(BackgroundJob).where(
+            BackgroundJob.file_id.in_(file_ids),
+            BackgroundJob.job_type == "parquet_conversion",
+        )
+    )
 
     # Reset ingest status AND preprocessed flag so the preprocessor actually runs again.
     # Without resetting is_preprocessed, ingest_file skips preprocessing entirely
@@ -114,7 +120,7 @@ async def reingest_all(
     await db.execute(
         update(File)
         .where(File.id.in_(file_ids))
-        .values(ingest_status=IngestStatus.NOT_INGESTED.value, is_preprocessed=False)
+        .values(ingest_status=IngestStatus.PENDING.value, is_preprocessed=False)
     )
     await db.commit()
     invalidate_catalog_cache()

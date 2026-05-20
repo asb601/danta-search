@@ -332,14 +332,18 @@ async def file_timings(
         select(BackgroundJob).where(
             BackgroundJob.file_id.in_(file_ids),
             BackgroundJob.job_type == "parquet_conversion",
-        )
+        ).order_by(BackgroundJob.started_at.desc())
     )
-    jobs_map = {j.file_id: j for j in jobs_result.scalars().all()}
+    jobs_map: dict[str, BackgroundJob] = {}
+    for job in jobs_result.scalars().all():
+        jobs_map.setdefault(job.file_id, job)
 
     rows = []
     for f in files:
         meta = meta_map.get(f.id)
         job = jobs_map.get(f.id)
+        has_core_ingest = bool(meta and meta.ingested_at) or f.ingest_status == "ingested"
+        visible_parquet_status = job.status if job and has_core_ingest else None
 
         upload_secs = f.upload_duration_secs
 
@@ -372,11 +376,11 @@ async def file_timings(
             "upload_secs": upload_secs,
             "ingested_at": meta.ingested_at.isoformat() if meta and meta.ingested_at else None,
             "ingestion_secs": ingestion_secs,
-            "parquet_status": job.status if job else None,
-            "parquet_secs": parquet_secs,
+            "parquet_status": visible_parquet_status,
+            "parquet_secs": parquet_secs if has_core_ingest else None,
             "processing_secs": processing_secs,
             "total_secs": total_secs,
-            "parquet_error": job.error_message if job else None,
+            "parquet_error": job.error_message if job and has_core_ingest else None,
         })
 
     return {"files": rows}

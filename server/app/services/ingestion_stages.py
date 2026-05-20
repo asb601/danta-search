@@ -92,10 +92,10 @@ async def prepare_pipeline(file_id: str) -> Payload:
         if not file or not file.blob_path:
             return {"file_id": file_id, "status": PayloadStatus.SKIPPED.value, "reason": "file or blob_path missing"}
 
-        if file.ingest_status == IngestStatus.PENDING.value:
+        if file.ingest_status == IngestStatus.RUNNING.value:
             return {"file_id": file_id, "status": PayloadStatus.ALREADY_RUNNING.value}
 
-        file.ingest_status = IngestStatus.PENDING.value
+        file.ingest_status = IngestStatus.RUNNING.value
         await db.commit()
         return {"file_id": file_id, "status": PayloadStatus.QUEUED.value}
 
