@@ -110,3 +110,8 @@ def _make_celery() -> Celery:
 
 
 celery_app = _make_celery()
+
+# Import task modules after the app is created so `celery -A app.worker.celery_app
+# worker ...` registers every named task. Without this, the API can publish
+# gchat.ingest_pipeline while the worker has no strategy for that task name.
+import app.worker.ingest_tasks  # noqa: E402,F401
