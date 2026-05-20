@@ -26,6 +26,7 @@ class ChatMessageRequest(BaseModel):
 
 class IngestRequest(BaseModel):
     file_ids: list[str]
+    force_preprocess: bool = False
 
 
 class ConversationRenameRequest(BaseModel):

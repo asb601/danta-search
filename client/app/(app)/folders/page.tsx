@@ -228,6 +228,31 @@ export default function FoldersPage() {
     }
   }, [mutate]);
 
+  const handleIngestForce = useCallback(async (id: string) => {
+    try {
+      const res = await apiFetch("/api/chat/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_ids: [id], force_preprocess: true }),
+      });
+      if (!res.ok) return;
+      await mutate();
+      const poll = setInterval(async () => {
+        const statusRes = await apiFetch(`/api/chat/ingest-status/${id}`);
+        if (statusRes.ok) {
+          const data = await statusRes.json();
+          if (data.ingest_status !== "pending") {
+            clearInterval(poll);
+            await mutate();
+          }
+        }
+      }, 3000);
+      setTimeout(() => { clearInterval(poll); mutate(); }, 120_000);
+    } catch {
+      // silently ignore
+    }
+  }, [mutate]);
+
   const handleOpenFile = useCallback(async (id: string) => {
     try {
       const res = await apiFetch(`/api/files/${id}/signed-url`);
@@ -240,11 +265,12 @@ export default function FoldersPage() {
   }, []);
 
   const [reingestLoading, setReingestLoading] = useState(false);
+  const [reingestQuickLoading, setReingestQuickLoading] = useState(false);
 
   const handleReingestAll = useCallback(async () => {
     setReingestLoading(true);
     try {
-      const res = await apiFetch("/api/admin/reingest-all", { method: "POST" });
+      const res = await apiFetch("/api/admin/reingest-all?force_preprocess=true", { method: "POST" });
       if (!res.ok) {
         setReingestLoading(false);
         return;
@@ -266,6 +292,32 @@ export default function FoldersPage() {
       setTimeout(() => { clearInterval(poll); setReingestLoading(false); mutate(); }, 300_000);
     } catch {
       setReingestLoading(false);
+    }
+  }, [mutate, swrKey]);
+
+  const handleReingestAllQuick = useCallback(async () => {
+    setReingestQuickLoading(true);
+    try {
+      const res = await apiFetch("/api/admin/reingest-all?force_preprocess=false", { method: "POST" });
+      if (!res.ok) {
+        setReingestQuickLoading(false);
+        return;
+      }
+      const poll = setInterval(async () => {
+        await mutate();
+        const freshItems = await contentsFetcher(swrKey);
+        const stillPending = freshItems.some(
+          (i) => i.type !== "folder" && (i.status === "pending" || i.status === "not_ingested")
+        );
+        if (!stillPending) {
+          clearInterval(poll);
+          setReingestQuickLoading(false);
+          await mutate();
+        }
+      }, 5000);
+      setTimeout(() => { clearInterval(poll); setReingestQuickLoading(false); mutate(); }, 300_000);
+    } catch {
+      setReingestQuickLoading(false);
     }
   }, [mutate, swrKey]);
 
@@ -337,6 +389,7 @@ export default function FoldersPage() {
       onContainerChange={setSelectedContainerId}
       onUpload={handleUpload}
       onIngest={handleIngest}
+      onIngestForce={canWrite ? handleIngestForce : undefined}
       onDelete={handleDelete}
       onRename={handleRename}
       onCreateFolder={handleCreateFolder}
@@ -348,6 +401,8 @@ export default function FoldersPage() {
       onCancelAllUploads={handleCancelAll}
       onReingestAll={canWrite ? handleReingestAll : undefined}
       reingestLoading={reingestLoading}
+      onReingestAllQuick={canWrite ? handleReingestAllQuick : undefined}
+      reingestQuickLoading={reingestQuickLoading}
       onMove={canWrite ? handleMove : undefined}
     />
   );

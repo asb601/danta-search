@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.chat_common import IngestRequest
@@ -45,6 +45,16 @@ async def ingest_files(
     if not valid_ids:
         allowed = ", ".join(sorted(supported_ingest_extensions()))
         raise HTTPException(status_code=400, detail=f"No valid ingestable files found. Supported: {allowed}")
+
+    # If the caller wants to force re-preprocessing, clear the flag so clean_file_stage
+    # re-runs preprocess_file() for each file regardless of its current state.
+    if body.force_preprocess:
+        await db.execute(
+            update(File)
+            .where(File.id.in_(valid_ids))
+            .values(is_preprocessed=False)
+        )
+        await db.commit()
 
     # Dispatch each file to a Celery worker — isolated from the API event loop.
     # The worker runs preprocessing + DuckDB sample + AI description + parquet

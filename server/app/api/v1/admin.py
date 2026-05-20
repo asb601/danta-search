@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Sequence
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -238,6 +238,7 @@ async def cost_summary(current_user: User = Depends(get_current_user)) -> dict:
 
 @router.post("/reingest-all")
 async def reingest_all(
+    force_preprocess: bool = Query(True, description="When true (default), resets is_preprocessed=False so the clean stage re-runs preprocessing. Set to false to skip preprocessing for already-preprocessed files."),
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -308,13 +309,16 @@ async def reingest_all(
         )
     )
 
-    # Reset ingest status AND preprocessed flag so the preprocessor actually runs again.
-    # Without resetting is_preprocessed, ingest_file skips preprocessing entirely
-    # and re-reads the already-preprocessed (possibly corrupted) CSV blob as-is.
+    # Reset ingest status. Optionally reset the preprocessed flag so the
+    # preprocessor re-runs (force_preprocess=True) or preserve it to allow
+    # already-preprocessed files to skip straight to the metadata stage.
+    values_dict: dict = {"ingest_status": IngestStatus.PENDING.value}
+    if force_preprocess:
+        values_dict["is_preprocessed"] = False
     await db.execute(
         update(File)
         .where(File.id.in_(file_ids))
-        .values(ingest_status=IngestStatus.PENDING.value, is_preprocessed=False)
+        .values(**values_dict)
     )
     await db.commit()
     invalidate_catalog_cache()

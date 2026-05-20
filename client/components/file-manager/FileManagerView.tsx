@@ -74,9 +74,10 @@ interface FileManagerViewProps {
   onContainerChange?: (id: string) => void;
   onUpload: (files: File[]) => void;
   onIngest: (id: string) => void;
+  onIngestForce?: (id: string) => void;
   onDelete: (id: string) => void;
-  onRename?: (id: string, newName: string) => void;
-  onCreateFolder?: (name: string) => void;
+  onRename: (id: string, newName: string) => void;
+  onCreateFolder: (name: string) => void;
   onFolderOpen: (id: string) => void;
   onOpenFile?: (id: string) => void;
   onFolderHover?: (id: string) => void;
@@ -85,6 +86,8 @@ interface FileManagerViewProps {
   onCancelAllUploads?: () => void;
   onReingestAll?: () => void;
   reingestLoading?: boolean;
+  onReingestAllQuick?: () => void;
+  reingestQuickLoading?: boolean;
   onMove?: (fileId: string, targetFolderId: string | null) => void;
 }
 
@@ -221,6 +224,7 @@ function ContextMenu({
   onOpen,
   onOpenFile,
   onIngest,
+  onIngestForce,
   onRename,
   onDelete,
   onMove,
@@ -233,6 +237,7 @@ function ContextMenu({
   onOpen: () => void;
   onOpenFile: () => void;
   onIngest: () => void;
+  onIngestForce?: () => void;
   onRename: () => void;
   onDelete: () => void;
   onMove: () => void;
@@ -295,6 +300,15 @@ function ContextMenu({
             <Zap className="w-3.5 h-3.5 text-muted-foreground" />
             Ingest
           </button>
+          {onIngestForce && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onIngestForce(); onClose(); }}
+              className="w-full h-8 px-3 text-sm flex items-center gap-2 text-foreground hover:bg-surface-raised transition-colors"
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-400" />
+              Preprocess + Ingest
+            </button>
+          )}
           <div className="h-px bg-border mx-2 my-0.5" />
         </>
       )}
@@ -456,6 +470,7 @@ export default function FileManagerView({
   onContainerChange,
   onUpload,
   onIngest,
+  onIngestForce,
   onDelete,
   onRename,
   onCreateFolder,
@@ -467,6 +482,8 @@ export default function FileManagerView({
   onCancelAllUploads,
   onReingestAll,
   reingestLoading,
+  onReingestAllQuick,
+  reingestQuickLoading,
   onMove,
 }: FileManagerViewProps) {
   const items = files ?? [];
@@ -662,6 +679,21 @@ export default function FileManagerView({
                   ))}
                 </select>
               )}
+              {onReingestAllQuick && (
+                <button
+                  onClick={onReingestAllQuick}
+                  disabled={reingestQuickLoading}
+                  className={cn(
+                    "h-7 px-2.5 flex items-center gap-1.5 rounded-md text-xs font-medium transition-colors",
+                    reingestQuickLoading
+                      ? "text-amber-400/70 bg-amber-400/10 cursor-not-allowed"
+                      : "text-amber-400 hover:bg-amber-400/10"
+                  )}
+                >
+                  <Zap className={cn("w-3.5 h-3.5", reingestQuickLoading && "animate-pulse")} />
+                  {reingestQuickLoading ? "Ingesting…" : "Ingest All"}
+                </button>
+              )}
               {onReingestAll && (
                 <button
                   onClick={onReingestAll}
@@ -674,7 +706,7 @@ export default function FileManagerView({
                   )}
                 >
                   <Zap className={cn("w-3.5 h-3.5", reingestLoading && "animate-pulse")} />
-                  {reingestLoading ? "Re-ingesting…" : "Re-ingest All"}
+                  {reingestLoading ? "Re-ingesting…" : "Preprocess + Ingest All"}
                 </button>
               )}
               <div className="w-px h-4 bg-border" />
@@ -897,6 +929,7 @@ export default function FileManagerView({
           onOpen={() => onFolderOpen(ctxItem.id)}
           onOpenFile={() => onOpenFile?.(ctxItem.id)}
           onIngest={() => onIngest(ctxItem.id)}
+          onIngestForce={onIngestForce ? () => onIngestForce(ctxItem.id) : undefined}
           onRename={() => startRename(ctxItem.id)}
           onDelete={() => onDelete(ctxItem.id)}
           onMove={() => setMovingFileId(ctxItem.id)}

@@ -603,10 +603,10 @@ def _process_text_stream(
     sample_df  = sample_df.apply(_clean_str_series).apply(_nullify_series)
     converters = _build_converters(sample_df, headers, warns)
 
-    # ── Fast path: skip full rewrite for large files that are already clean ────
-    # For files >50 MB we check 5 probe conditions from Pass 1 data only.
-    # If ALL met, the file is already a clean UTF-8 comma-delimited CSV with no
-    # dirty null values → skip the 3-6 GB network round-trip entirely.
+    # ── Fast path: skip full rewrite if file is already clean ────────────────
+    # Probe-only check using Pass 1 data — works for any file size.
+    # If ALL 5 conditions met, the file is already a clean UTF-8 comma-delimited
+    # CSV with no dirty null values → skip the Azure round-trip entirely.
     #
     # Conditions:
     #   1. UTF-8 / ASCII encoding  (no re-encoding needed)
@@ -614,40 +614,39 @@ def _process_text_stream(
     #   3. Delimiter is ','        (output is always comma)
     #   4. Column names unchanged  (no Unnamed: N, no dedup renames)
     #   5. Sample has no null-like strings  (e.g. 'N/A', 'null', 'none')
-    if is_large:
-        cell_strs      = [str(v) if v is not None else "" for v in head_df.iloc[header_row_idx]]
-        headers_clean  = (cell_strs == raw_headers) and not cols_renamed
-        encoding_clean = encoding in ("utf-8", "utf-8-sig", "ascii")
-        delimiter_clean = delimiter == ","
+    cell_strs      = [str(v) if v is not None else "" for v in head_df.iloc[header_row_idx]]
+    headers_clean  = (cell_strs == raw_headers) and not cols_renamed
+    encoding_clean = encoding in ("utf-8", "utf-8-sig", "ascii")
+    delimiter_clean = delimiter == ","
 
-        if encoding_clean and header_row_idx == 0 and delimiter_clean and headers_clean:
-            # Re-read raw sample WITHOUT _nullify_series, compare to nullified version
-            raw_sample = pd.read_csv(
-                io.StringIO(probe_text), sep=delimiter, header=None, dtype=str,
-                names=headers, keep_default_na=False, skiprows=1,
-                nrows=TYPE_DETECT_SAMPLE_ROWS, on_bad_lines="skip",
-            ).apply(_clean_str_series)
-            sample_nullified = raw_sample.copy().apply(_nullify_series)
-            no_null_changes  = raw_sample.fillna("").equals(sample_nullified.fillna(""))
+    if encoding_clean and header_row_idx == 0 and delimiter_clean and headers_clean:
+        # Re-read raw sample WITHOUT _nullify_series, compare to nullified version
+        raw_sample = pd.read_csv(
+            io.StringIO(probe_text), sep=delimiter, header=None, dtype=str,
+            names=headers, keep_default_na=False, skiprows=1,
+            nrows=TYPE_DETECT_SAMPLE_ROWS, on_bad_lines="skip",
+        ).apply(_clean_str_series)
+        sample_nullified = raw_sample.copy().apply(_nullify_series)
+        no_null_changes  = raw_sample.fillna("").equals(sample_nullified.fillna(""))
 
-            if no_null_changes:
-                warns.append(
-                    "fast_path: file is already clean UTF-8 CSV — "
-                    "full rewrite skipped (probe passed all 5 checks)"
-                )
-                return {
-                    "original_rows": 0,
-                    "clean_rows":    0,
-                    "cols_renamed":  cols_renamed,
-                    "encoding":      encoding,
-                    "already_clean": True,
-                    "cleaning_audit": {
-                        "header_row_idx": header_row_idx,
-                        "delimiter": delimiter,
-                        "dedup_skipped": False,
-                        "rewrite_skipped": True,
-                    },
-                }
+        if no_null_changes:
+            warns.append(
+                "fast_path: file is already clean UTF-8 CSV — "
+                "full rewrite skipped (probe passed all 5 checks)"
+            )
+            return {
+                "original_rows": 0,
+                "clean_rows":    0,
+                "cols_renamed":  cols_renamed,
+                "encoding":      encoding,
+                "already_clean": True,
+                "cleaning_audit": {
+                    "header_row_idx": header_row_idx,
+                    "delimiter": delimiter,
+                    "dedup_skipped": False,
+                    "rewrite_skipped": True,
+                },
+            }
 
     # ── Pass 2: full streaming read ────────────────────────────────────────────
     _active_profile = profile if profile is not None else get_cleaning_profile()
