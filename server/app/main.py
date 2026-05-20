@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
               AND f.container_id IS NOT NULL
         """))
 
-    # Retrieval-engine schema (pgvector + pg_trgm + new file_metadata columns)
+    # Retrieval -engine schema (pgvector + pg_trgm + new file_metadata columns)
     from app.migrations.retrieval_schema_upgrade import migrate as _retrieval_migrate
     try:
         await _retrieval_migrate()
