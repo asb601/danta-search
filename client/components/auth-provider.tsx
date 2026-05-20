@@ -5,9 +5,10 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
-import { fetchMe, clearToken, getCachedUser, type User } from "@/lib/auth";
+import { fetchMe, clearToken, getCachedUser, getToken, type User } from "@/lib/auth";
 
 interface AuthContextValue {
   user: User | null;
@@ -27,13 +28,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const cached = getCachedUser();
   const [user, setUser] = useState<User | null>(cached);
   const [loading, setLoading] = useState(cached === null);
+  const attemptsLeft = useRef(2); // allow 1 retry on transient failures
 
   useEffect(() => {
-    // If we had a valid cache hit, still revalidate in the background so the
-    // cache stays fresh — but the page doesn't block on it.
-    fetchMe()
-      .then((u) => { if (u) setUser(u); else if (!cached) setUser(null); })
-      .finally(() => setLoading(false));
+    const attempt = () => {
+      fetchMe()
+        .then((u) => {
+          // null means 401/403 — token definitively rejected
+          setUser(u);
+          setLoading(false);
+        })
+        .catch(() => {
+          // Transient error (5xx, network hiccup, timeout)
+          attemptsLeft.current -= 1;
+          if (attemptsLeft.current > 0) {
+            // Retry once after 3 s
+            setTimeout(attempt, 3_000);
+          } else {
+            // Exhausted retries — honour cache, or stay loading if we have
+            // a token so we don't falsely redirect to /login on a transient outage.
+            const stillHasToken = !!getToken();
+            if (cached) {
+              setUser(cached);
+              setLoading(false);
+            } else if (!stillHasToken) {
+              setUser(null);
+              setLoading(false);
+            }
+            // If token exists but server unreachable: keep loading=true
+            // (spinner) rather than bouncing the user back to /login.
+          }
+        });
+    };
+    attempt();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
