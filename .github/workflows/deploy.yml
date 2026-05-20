@@ -3,6 +3,10 @@ name: Deploy to VM
 on:
   push:
     branches: [main]
+    paths:
+      - "server/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -137,6 +141,7 @@ jobs:
             EnvironmentFile=$HOME/G-CHAT-/server/.env
             ExecStartPre=$HOME/.local/bin/uv run python -c "from app.worker.celery_app import celery_app; assert 'gchat.ingest_pipeline' in celery_app.tasks, sorted(k for k in celery_app.tasks if k.startswith('gchat.'))"
             ExecStart=$HOME/.local/bin/uv run celery -A app.worker.ingest_tasks:celery_app worker -Q ingest_normal -c 1 -n ingest_normal@%%h --loglevel=info
+            TimeoutStopSec=3600
             Restart=always
             RestartSec=10
             StandardOutput=journal
