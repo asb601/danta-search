@@ -11,13 +11,19 @@ jobs:
     steps:
       - name: Deploy to Azure VM
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          envs: GH_TOKEN
           script: |
             set -e
             export PATH="$HOME/.local/bin:$PATH"
+
+            # ── 0. Authenticate git with GitHub token (private repo) ──────────
+            git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
             # ── 1. Install uv if not present (fresh VM bootstrap) ─────────────
             if ! command -v uv &>/dev/null; then
