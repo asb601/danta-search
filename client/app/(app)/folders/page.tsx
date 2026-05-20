@@ -59,7 +59,11 @@ function mapFile(f: {
     type,
     size: f.size,
     status: (
-      f.ingest_status === "ingested" ? "indexed" : (f.ingest_status ?? "not_ingested")
+      f.ingest_status === "ingested" ? "indexed" :
+      f.ingest_status === "running"  ? "pending" :
+      f.ingest_status === "pending"  ? "pending" :
+      f.ingest_status === "failed"   ? "failed"  :
+      "not_ingested"
     ) as FileStatus,
     lastModified: new Date(f.created_at),
     synced: !!f.container_id,
