@@ -50,12 +50,12 @@ SEMANTIC_REBUILD_TASK_NAME = "gchat.semantic.rebuild_container"
 
 INGEST_STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(StageName.CLEAN, "gchat.ingest.clean"),
-    StageSpec(StageName.PARQUET, "gchat.ingest.parquet"),
     StageSpec(StageName.METADATA, "gchat.ingest.metadata"),
     StageSpec(StageName.AI_DESCRIPTION, "gchat.ingest.ai_description"),
     StageSpec(StageName.ONTOLOGY, "gchat.ingest.ontology"),
     StageSpec(StageName.EMBEDDING, "gchat.ingest.embedding"),
     StageSpec(StageName.OPENSEARCH, "gchat.ingest.opensearch"),
+    StageSpec(StageName.PARQUET, "gchat.ingest.parquet"),
     StageSpec(StageName.ANALYTICS, "gchat.ingest.analytics"),
     StageSpec(StageName.RELATIONSHIPS, "gchat.ingest.relationships"),
     StageSpec(StageName.SEMANTIC_LAYER, "gchat.ingest.semantic_layer"),

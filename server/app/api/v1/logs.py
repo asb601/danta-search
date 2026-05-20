@@ -141,6 +141,7 @@ async def pipeline_stream(
 # structlog contextvars so we can filter them out of ai_pipeline.log.
 _INGEST_EVENTS = {
     "chain_start", "chain_end", "chain_skip", "cleanup", "step",
+    "ingest_stage", "ingest_stage_nonfatal_failed", "metadata_schema_detected",
     "preprocess", "analytics_compute", "parquet_conversion",
     "parquet_conversion_job_update_failed", "status_update_failed",
     "parquet_service",
@@ -217,21 +218,44 @@ async def ingest_timings(
     for tid, events in traces.items():
         events_sorted = sorted(events, key=lambda e: e.get("timestamp", ""))
 
-        # Find chain_start / chain_end for total wall time
+        # Find chain_start / chain_end for monolithic ingest, or first/complete
+        # stage events for the staged Celery pipeline.
         start_ev = next((e for e in events_sorted if e.get("event") == "chain_start"), None)
         end_ev = next((e for e in events_sorted if e.get("event") == "chain_end"), None)
+        if start_ev is None:
+            start_ev = events_sorted[0] if events_sorted else None
+        if end_ev is None:
+            end_ev = next(
+                (
+                    e for e in reversed(events_sorted)
+                    if e.get("event") == "ingest_stage"
+                    and e.get("stage") == "complete"
+                    and e.get("status") == "done"
+                ),
+                None,
+            )
+        filename_ev = next((e for e in events_sorted if e.get("filename")), None)
 
         steps = []
         for ev in events_sorted:
-            if ev.get("event") != "step":
+            if ev.get("event") == "step":
+                step_entry = {
+                    "step": ev.get("step"),
+                    "name": ev.get("name"),
+                    "status": ev.get("status"),
+                    "duration_ms": ev.get("duration_ms"),
+                    "timestamp": ev.get("timestamp"),
+                }
+            elif ev.get("event") == "ingest_stage":
+                step_entry = {
+                    "step": ev.get("stage"),
+                    "name": ev.get("stage"),
+                    "status": ev.get("status"),
+                    "duration_ms": ev.get("duration_ms"),
+                    "timestamp": ev.get("timestamp"),
+                }
+            else:
                 continue
-            step_entry = {
-                "step": ev.get("step"),
-                "name": ev.get("name"),
-                "status": ev.get("status"),
-                "duration_ms": ev.get("duration_ms"),
-                "timestamp": ev.get("timestamp"),
-            }
             # Include any extra context fields (encoding, safe_for_raw_sample, etc.)
             for k in ("encoding", "safe_for_raw_sample", "reason", "original_rows",
                       "clean_rows", "clean_blob_path", "error"):
@@ -251,8 +275,8 @@ async def ingest_timings(
 
         files.append({
             "file_id": tid,
-            "filename": start_ev.get("filename") if start_ev else None,
-            "status": end_ev.get("status") if end_ev else "in_progress",
+            "filename": (filename_ev or start_ev or {}).get("filename"),
+            "status": "done" if end_ev else "in_progress",
             "total_ms": total_ms,
             "started_at": start_ev.get("timestamp") if start_ev else None,
             "probe": {

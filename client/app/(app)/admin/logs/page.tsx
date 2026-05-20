@@ -1029,6 +1029,29 @@ function getIngestCfg(ev: LogEntry): { num: string; label: string; color: string
       : { num: "✓", label: "Done",   color: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40" };
   if (e === "chain_skip") return { num: "⊘", label: "Skipped", color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30" };
   if (e === "cleanup")    return { num: "·", label: "Cleanup",  color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30" };
+  if (e === "ingest_stage") {
+    const stage = (ev.stage as string) ?? "stage";
+    const status = (ev.status as string) ?? "";
+    const STAGE: Record<string, { num: string; label: string; color: string }> = {
+      clean:          { num: "0", label: "Clean",      color: "bg-violet-500/15 text-violet-300 border-violet-500/30" },
+      metadata:       { num: "1", label: "Metadata",   color: "bg-teal-500/15 text-teal-300 border-teal-500/30" },
+      ai_description: { num: "2", label: "AI Desc",    color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30" },
+      ontology:       { num: "3", label: "Roles",      color: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30" },
+      embedding:      { num: "4", label: "Embed",      color: "bg-indigo-500/15 text-indigo-300 border-indigo-500/30" },
+      opensearch:     { num: "5", label: "Search",     color: "bg-blue-500/15 text-blue-300 border-blue-500/30" },
+      parquet:        { num: "P", label: "Parquet",    color: "bg-orange-500/15 text-orange-300 border-orange-500/30" },
+      analytics:      { num: "A", label: "Analytics",  color: "bg-amber-500/15 text-amber-300 border-amber-500/30" },
+      relationships:  { num: "R", label: "Relations",  color: "bg-lime-500/15 text-lime-300 border-lime-500/30" },
+      semantic_layer: { num: "S", label: "Semantic",   color: "bg-purple-500/15 text-purple-300 border-purple-500/30" },
+      complete:       { num: "✓", label: "Complete",   color: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40" },
+    };
+    const def = STAGE[stage] ?? { num: "·", label: stage, color: "bg-blue-500/15 text-blue-300 border-blue-500/30" };
+    if (status === "failed")  return { ...def, color: "bg-red-500/15 text-red-300 border-red-500/30" };
+    if (status === "skipped") return { ...def, color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30" };
+    return def;
+  }
+  if (e === "ingest_stage_nonfatal_failed") return { num: "!", label: "Nonfatal", color: "bg-amber-500/15 text-amber-300 border-amber-500/30" };
+  if (e === "metadata_schema_detected") return { num: "1", label: "Schema", color: "bg-teal-500/15 text-teal-300 border-teal-500/30" };
   if (e === "step") {
     const name = (ev.name as string) ?? "";
     const status = (ev.status as string) ?? "";
@@ -1065,6 +1088,22 @@ function ingestSummary(ev: LogEntry): string {
       : `Done in ${ev.total_duration_ms}ms — ${ev.filename ?? ""}`;
   if (e === "chain_skip") return `skipped: ${ev.reason ?? ""}`;
   if (e === "cleanup")    return String(ev.action ?? "");
+  if (e === "ingest_stage") {
+    const stage = (ev.stage as string) ?? "stage";
+    const status = (ev.status as string) ?? "";
+    const duration = ev.duration_ms ? ` · ${ev.duration_ms}ms` : "";
+    if (status === "done") {
+      if (stage === "clean" && ev.clean_rows) return `${ev.original_rows} → ${ev.clean_rows} rows${duration}`;
+      if (stage === "metadata" && ev.row_count) return `${ev.columns} cols · ${ev.row_count} rows${duration}`;
+      if (stage === "ontology") return `${ev.resolved ?? 0} roles · ${ev.source ?? ""}${duration}`;
+      if (stage === "analytics") return `${ev.row_count ?? ""} rows${duration}`;
+      if (stage === "relationships") return `${ev.relationships_created ?? 0} relationships${duration}`;
+      return `done${duration}`;
+    }
+    return `${stage} · ${status}`;
+  }
+  if (e === "ingest_stage_nonfatal_failed") return `${ev.stage ?? "stage"}: ${String(ev.error ?? "").slice(0, 120)}`;
+  if (e === "metadata_schema_detected") return `${ev.filename ?? ""} · ${ev.row_count ?? ""} rows`;
   if (e === "step") {
     const name = (ev.name as string) ?? "";
     const status = (ev.status as string) ?? "";

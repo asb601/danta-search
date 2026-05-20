@@ -294,6 +294,10 @@ _SKIP_AUDIT_GET_PREFIXES = (
     "/api/logs/",   # log-viewing endpoints polled every few seconds by the UI
 )
 
+_ANONYMOUS_404_EXEMPT_PREFIXES = (
+    "/api/auth/",
+)
+
 
 async def record_request_audit(
     request: Request,
@@ -310,6 +314,17 @@ async def record_request_audit(
         path = request.url.path
         if any(path.startswith(prefix) for prefix in _SKIP_AUDIT_GET_PREFIXES):
             return
+
+    # Public servers are constantly scanned for paths like /.env, /wp-admin,
+    # /server/.env, test.php, etc. Those anonymous 404s are security noise,
+    # not product audit events.
+    if (
+        request.method in {"GET", "HEAD"}
+        and status_code == 404
+        and not request.headers.get("authorization")
+        and not any(request.url.path.startswith(prefix) for prefix in _ANONYMOUS_404_EXEMPT_PREFIXES)
+    ):
+        return
 
     start = time.perf_counter()
     try:

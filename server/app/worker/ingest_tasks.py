@@ -34,6 +34,15 @@ from app.worker.celery_app import celery_app
 Payload = dict[str, Any]
 _INGEST_TASK_OPTIONS = celery_ingest_task_options()
 _SEMANTIC_REBUILD_TASK_OPTIONS = celery_semantic_rebuild_task_options()
+_NON_FATAL_STAGES = {
+    StageName.ONTOLOGY.value,
+    StageName.EMBEDDING.value,
+    StageName.OPENSEARCH.value,
+    StageName.PARQUET.value,
+    StageName.ANALYTICS.value,
+    StageName.RELATIONSHIPS.value,
+    StageName.SEMANTIC_LAYER.value,
+}
 
 
 def _file_id_from_payload(payload_or_file_id: Payload | str) -> str:
@@ -81,6 +90,24 @@ def _run_stage(
     try:
         return _run_async(func(stage_payload))
     except (SoftTimeLimitExceeded, Exception) as exc:
+        if stage_value in _NON_FATAL_STAGES:
+            from app.core.logger import ingest_logger
+
+            error = str(exc)[:500]
+            ingest_logger.warning(
+                "ingest_stage_nonfatal_failed",
+                stage=stage_value,
+                file_id=file_id,
+                error=error,
+            )
+            nonfatal_errors = list(stage_payload.get("nonfatal_errors") or [])
+            nonfatal_errors.append({"stage": stage_value, "error": error})
+            return {
+                **stage_payload,
+                "stage": stage_value,
+                "nonfatal_errors": nonfatal_errors,
+            }
+
         if task.request.retries >= task.max_retries:
             from app.services.ingestion_stages import mark_ingestion_failed
 

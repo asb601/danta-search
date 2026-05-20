@@ -342,6 +342,10 @@ async def ai_description_stage(payload: Payload) -> Payload:
 
         await db.commit()
 
+        file.ingest_status = IngestStatus.INGESTED.value
+        metadata.ingest_error = None
+        await db.commit()
+
         ingest_logger.info(
             "ingest_stage",
             stage=stage,
@@ -349,6 +353,14 @@ async def ai_description_stage(payload: Payload) -> Payload:
             file_id=file_id,
             duration_ms=_ms(start),
         )
+
+        try:
+            from app.agent.catalog_cache import invalidate_catalog_cache  # noqa: PLC0415
+
+            invalidate_catalog_cache()
+        except Exception as exc:
+            ingest_logger.warning("catalog_invalidate_failed", file_id=file_id, error=str(exc)[:200])
+
         return _next(payload, stage=stage)
 
 
