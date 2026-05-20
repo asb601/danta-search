@@ -178,6 +178,97 @@ async def ingest_events(
     return {"total_lines": len(ingest), "returned": len(tail), "lines": tail}
 
 
+@router.get("/ingest-timings")
+async def ingest_timings(
+    last_n_files: int = Query(default=20, ge=1, le=100),
+    _: User = Depends(require_admin),
+) -> dict:
+    """
+    Per-file, per-step timing breakdown from ingest events.
+
+    Groups events by file_id (via trace_id) and computes duration for each
+    named step so you can see exactly where time is being spent.
+    Returns the most recently completed files first.
+    """
+    path = LOG_DIR / "ai_pipeline.log"
+    if not path.is_file():
+        return {"files": []}
+
+    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    # Collect events keyed by trace_id (= file_id set by _ensure_trace)
+    from collections import defaultdict
+    traces: dict[str, list[dict]] = defaultdict(list)
+    for line in all_lines:
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+            if ev.get("pipeline") != "ingest":
+                continue
+            tid = ev.get("trace_id") or ev.get("file_id")
+            if tid:
+                traces[tid].append(ev)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Build per-file summary
+    files = []
+    for tid, events in traces.items():
+        events_sorted = sorted(events, key=lambda e: e.get("timestamp", ""))
+
+        # Find chain_start / chain_end for total wall time
+        start_ev = next((e for e in events_sorted if e.get("event") == "chain_start"), None)
+        end_ev = next((e for e in events_sorted if e.get("event") == "chain_end"), None)
+
+        steps = []
+        for ev in events_sorted:
+            if ev.get("event") != "step":
+                continue
+            step_entry = {
+                "step": ev.get("step"),
+                "name": ev.get("name"),
+                "status": ev.get("status"),
+                "duration_ms": ev.get("duration_ms"),
+                "timestamp": ev.get("timestamp"),
+            }
+            # Include any extra context fields (encoding, safe_for_raw_sample, etc.)
+            for k in ("encoding", "safe_for_raw_sample", "reason", "original_rows",
+                      "clean_rows", "clean_blob_path", "error"):
+                if k in ev:
+                    step_entry[k] = ev[k]
+            steps.append(step_entry)
+
+        # Find the probe event (separate from steps)
+        probe_ev = next(
+            (e for e in events_sorted if e.get("event") == "step" and e.get("name") == "probe"),
+            None,
+        )
+
+        total_ms = None
+        if start_ev and end_ev:
+            total_ms = end_ev.get("duration_ms")
+
+        files.append({
+            "file_id": tid,
+            "filename": start_ev.get("filename") if start_ev else None,
+            "status": end_ev.get("status") if end_ev else "in_progress",
+            "total_ms": total_ms,
+            "started_at": start_ev.get("timestamp") if start_ev else None,
+            "probe": {
+                "safe_for_raw_sample": probe_ev.get("safe_for_raw_sample"),
+                "encoding": probe_ev.get("encoding"),
+                "reason": probe_ev.get("reason"),
+                "duration_ms": probe_ev.get("duration_ms"),
+            } if probe_ev else None,
+            "steps": steps,
+        })
+
+    # Sort by started_at desc, return last N
+    files.sort(key=lambda f: f.get("started_at") or "", reverse=True)
+    return {"files": files[:last_n_files]}
+
+
 # ── Generic log file endpoints ────────────────────────────────────────────────
 
 @router.get("/files")

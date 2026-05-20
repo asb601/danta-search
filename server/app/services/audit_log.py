@@ -286,6 +286,15 @@ async def record_audit_event_safe(
         )
 
 
+# GET-only paths that are polled frequently and would flood the audit table.
+# These are all read-only endpoints — nothing meaningful to audit.
+_SKIP_AUDIT_GET_PREFIXES = (
+    "/api/health",
+    "/api/metrics",
+    "/api/logs/",   # log-viewing endpoints polled every few seconds by the UI
+)
+
+
 async def record_request_audit(
     request: Request,
     *,
@@ -295,6 +304,12 @@ async def record_request_audit(
 ) -> None:
     if request.method == "OPTIONS":
         return
+
+    # Skip noisy read-only polling routes to keep audit logs meaningful.
+    if request.method == "GET":
+        path = request.url.path
+        if any(path.startswith(prefix) for prefix in _SKIP_AUDIT_GET_PREFIXES):
+            return
 
     start = time.perf_counter()
     try:
