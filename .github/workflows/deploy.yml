@@ -92,10 +92,10 @@ jobs:
               fi
             fi
 
-            # ── 5. Create gchat FastAPI service if not present ────────────────
-            if [ ! -f /etc/systemd/system/gchat.service ]; then
-              echo "gchat.service not found — creating..."
-              sudo tee /etc/systemd/system/gchat.service > /dev/null << SVCEOF
+            # ── 5. Create/update gchat FastAPI service ───────────────────────
+            # Always rewrite the unit so an existing VM cannot keep stale service
+            # definitions after deploy script changes.
+            sudo tee /etc/systemd/system/gchat.service > /dev/null << SVCEOF
             [Unit]
             Description=G-CHAT FastAPI Backend
             After=network.target
@@ -114,18 +114,15 @@ jobs:
             [Install]
             WantedBy=multi-user.target
             SVCEOF
-              sudo systemctl daemon-reload
-              sudo systemctl enable gchat
-              echo "gchat.service created and enabled"
-            fi
+            sudo systemctl daemon-reload
+            sudo systemctl enable gchat
+            echo "gchat.service installed/updated"
 
-            # ── 6. Create gchat-celery worker service if not present ──────────
-            if [ ! -f /etc/systemd/system/gchat-celery.service ]; then
-              echo "gchat-celery.service not found — creating..."
-              sudo tee /etc/systemd/system/gchat-celery.service > /dev/null << CELEOF
+            # ── 6. Create/update gchat-celery worker service ─────────────────
+            sudo tee /etc/systemd/system/gchat-celery.service > /dev/null << CELEOF
             [Unit]
             Description=G-CHAT Celery Ingest Worker
-            After=network.target gchat.service
+            After=network.target redis-server.service redis.service gchat.service
 
             [Service]
             Type=simple
@@ -141,10 +138,9 @@ jobs:
             [Install]
             WantedBy=multi-user.target
             CELEOF
-              sudo systemctl daemon-reload
-              sudo systemctl enable gchat-celery
-              echo "gchat-celery.service created and enabled"
-            fi
+            sudo systemctl daemon-reload
+            sudo systemctl enable gchat-celery
+            echo "gchat-celery.service installed/updated"
 
             # ── 7. Restart both services ──────────────────────────────────────
             if sudo systemctl restart gchat; then
@@ -152,6 +148,7 @@ jobs:
             else
               echo "gchat failed to start — logs:"
               sudo journalctl -u gchat -n 40 --no-pager
+              exit 1
             fi
 
             if sudo systemctl restart gchat-celery; then
@@ -159,6 +156,7 @@ jobs:
             else
               echo "gchat-celery failed to start — logs:"
               sudo journalctl -u gchat-celery -n 20 --no-pager
+              exit 1
             fi
 
             # ── 8. Wait for uvicorn to be healthy ─────────────────────────────
@@ -191,4 +189,16 @@ jobs:
             else
               echo "WARNING: gchat-celery is not running — check logs:"
               sudo journalctl -u gchat-celery -n 20 --no-pager
+              exit 1
+            fi
+
+            # Service active is not enough: verify the worker can answer through Redis.
+            CELERY_PING=$(timeout 20s uv run celery -A app.worker.celery_app inspect ping 2>&1 || true)
+            echo "$CELERY_PING"
+            if echo "$CELERY_PING" | grep -q "pong"; then
+              echo "Celery broker/worker ping OK"
+            else
+              echo "Celery inspect ping failed — gchat-celery may be active but disconnected"
+              sudo journalctl -u gchat-celery -n 60 --no-pager
+              exit 1
             fi

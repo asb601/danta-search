@@ -22,7 +22,7 @@ from collections.abc import Sequence
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cost_tracker import get_session_summary
@@ -54,6 +54,11 @@ def _reingest_batch_delay_seconds() -> int:
     return max(0, int(get_settings().REINGEST_BATCH_DELAY_SECONDS))
 
 
+_UUID_PATTERN = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
 def _safe_celery_error(exc: BaseException) -> str:
     message = str(exc) or exc.__class__.__name__
     message = re.sub(r"(redis|rediss)://[^@\s]+@", r"\1://***@", message)
@@ -78,6 +83,81 @@ def _assert_ingestion_queue_available() -> None:
                 "restart redis-server, gchat, and gchat-celery, then retry."
             ),
         ) from exc
+
+
+def _inspect_ingestion_runtime() -> dict:
+    settings = get_settings()
+    queue_name = settings.INGEST_NORMAL_QUEUE
+    health: dict = {
+        "broker_ok": False,
+        "result_backend_ok": False,
+        "workers": {},
+        "queue": {"name": queue_name},
+        "errors": {},
+    }
+
+    try:
+        with celery_app.connection_for_write() as connection:
+            connection.ensure_connection(max_retries=1, timeout=3)
+        health["broker_ok"] = True
+    except Exception as exc:
+        health["errors"]["broker"] = _safe_celery_error(exc)
+
+    try:
+        backend_client = getattr(celery_app.backend, "client", None)
+        if backend_client is not None:
+            backend_client.ping()
+        health["result_backend_ok"] = True
+    except Exception as exc:
+        health["errors"]["result_backend"] = _safe_celery_error(exc)
+
+    try:
+        inspector = celery_app.control.inspect(timeout=3)
+        health["workers"] = {
+            "ping": inspector.ping() or {},
+            "active": inspector.active() or {},
+            "reserved": inspector.reserved() or {},
+            "scheduled": inspector.scheduled() or {},
+        }
+    except Exception as exc:
+        health["errors"]["inspect"] = _safe_celery_error(exc)
+
+    try:
+        import redis  # noqa: PLC0415
+
+        broker = redis.Redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
+        broker.ping()
+        health["queue"]["length"] = broker.llen(queue_name)
+    except Exception as exc:
+        health["errors"]["queue_length"] = _safe_celery_error(exc)
+
+    return health
+
+
+def _active_ingest_file_ids() -> set[str]:
+    """Best-effort extraction of file IDs from Celery active/reserved/scheduled tasks."""
+    try:
+        inspector = celery_app.control.inspect(timeout=3)
+        task_groups = [
+            inspector.active() or {},
+            inspector.reserved() or {},
+            inspector.scheduled() or {},
+        ]
+    except Exception as exc:
+        ingest_logger.warning("celery_active_file_inspect_failed", error=_safe_celery_error(exc))
+        return set()
+
+    file_ids: set[str] = set()
+    for tasks_by_worker in task_groups:
+        for tasks in tasks_by_worker.values():
+            for task in tasks or []:
+                request = task.get("request", task) if isinstance(task, dict) else task
+                file_ids.update(_UUID_PATTERN.findall(repr(request)))
+    return file_ids
 
 
 async def _mark_dispatch_failed(db: AsyncSession, file_ids: Sequence[str], error: str) -> None:
@@ -111,6 +191,41 @@ async def _mark_dispatch_failed(db: AsyncSession, file_ids: Sequence[str], error
             ))
 
     await db.commit()
+
+
+@router.get("/ingestion-health")
+async def ingestion_health(
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    runtime = await asyncio.to_thread(_inspect_ingestion_runtime)
+
+    status_rows = await db.execute(
+        select(File.ingest_status, func.count()).group_by(File.ingest_status)
+    )
+    status_counts = {status or "unknown": count for status, count in status_rows.all()}
+
+    stuck_rows = await db.execute(
+        select(File.id, File.name, File.ingest_status, File.created_at)
+        .where(File.ingest_status.in_([IngestStatus.PENDING.value, IngestStatus.RUNNING.value, IngestStatus.FAILED.value]))
+        .order_by(File.created_at.desc())
+        .limit(50)
+    )
+    files = [
+        {
+            "id": file_id,
+            "name": name,
+            "ingest_status": status,
+            "created_at": created_at.isoformat() if created_at else None,
+        }
+        for file_id, name, status, created_at in stuck_rows.all()
+    ]
+
+    return {
+        "runtime": runtime,
+        "file_status_counts": status_counts,
+        "attention_files": files,
+    }
 
 
 @router.get("/cost-summary")
@@ -147,14 +262,30 @@ async def reingest_all(
 
     _assert_ingestion_queue_available()
 
-    # Exclude files that are currently being processed by another reingest.
-    in_flight_statuses = {IngestStatus.RUNNING.value}
-    in_flight = [f.id for f in ingestable if f.ingest_status in in_flight_statuses]
-    file_ids = [f.id for f in ingestable if f.ingest_status not in in_flight_statuses]
+    # Exclude only files that are truly active in Celery. Stale RUNNING rows
+    # from a dead worker must be reset/requeued or they look stuck forever.
+    active_file_ids = await asyncio.to_thread(_active_ingest_file_ids)
+    in_flight = [
+        f.id
+        for f in ingestable
+        if f.ingest_status == IngestStatus.RUNNING.value and f.id in active_file_ids
+    ]
+    in_flight_ids = set(in_flight)
+    stale_running = [
+        f.id
+        for f in ingestable
+        if f.ingest_status == IngestStatus.RUNNING.value and f.id not in active_file_ids
+    ]
+    file_ids = [f.id for f in ingestable if f.id not in in_flight_ids]
     if in_flight:
         ingest_logger.info(
             "reingest_all_skipping_in_flight",
             in_flight_count=len(in_flight),
+        )
+    if stale_running:
+        ingest_logger.warning(
+            "reingest_all_requeueing_stale_running",
+            stale_running_count=len(stale_running),
         )
     if not file_ids:
         return {
@@ -222,6 +353,7 @@ async def reingest_all(
         admin_name=admin.name,
         file_count=len(file_ids),
         in_flight_count=len(in_flight),
+        stale_running_count=len(stale_running),
         batch_size=batch_size,
         batch_delay_seconds=batch_delay_seconds,
         task_ids=task_ids,
@@ -239,6 +371,7 @@ async def reingest_all(
             details={
                 "file_count": len(file_ids),
                 "in_flight_count": len(in_flight),
+                "stale_running_count": len(stale_running),
                 "batch_size": batch_size,
                 "batch_delay_seconds": batch_delay_seconds,
                 "scheduled_tasks": schedule,
@@ -253,6 +386,7 @@ async def reingest_all(
         "message": "Re-ingestion queued",
         "file_count": len(file_ids),
         "in_flight_count": len(in_flight),
+        "stale_running_count": len(stale_running),
         "batch_size": batch_size,
         "batch_delay_seconds": batch_delay_seconds,
         "task_ids": task_ids,
