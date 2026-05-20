@@ -1,4 +1,10 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Relative base so every apiFetch call goes to the same origin (g-chat-xi.vercel.app).
+// Vercel rewrites /api/* → backend. This prevents Brave Shields from blocking
+// what would otherwise be cross-origin requests to genai.codeen.in.net.
+const API_URL = "";
+// Direct backend URL — only used for the Google OAuth login redirect
+// (the browser navigates away from the app, so the rewrite doesn't apply).
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const USER_CACHE_KEY = "gchat_user";
 const USER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -88,7 +94,7 @@ export async function fetchMe(): Promise<User | null> {
   }
 }
 
-/** Get the Google OAuth login URL (points at FastAPI) */
+/** Get the Google OAuth login URL (points directly at FastAPI — must NOT go through the proxy) */
 export function getGoogleLoginUrl(): string {
-  return `${API_URL}/api/auth/google/login`;
+  return `${BACKEND_URL}/api/auth/google/login`;
 }

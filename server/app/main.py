@@ -1,5 +1,12 @@
 import time
+import logging as _logging
 from contextlib import asynccontextmanager
+
+# Suppress uvicorn's default access log — it prints raw URLs including OAuth
+# codes and tokens in plaintext. Our log_requests middleware handles request
+# logging in a structured, redacted format.
+_logging.getLogger("uvicorn.access").handlers.clear()
+_logging.getLogger("uvicorn.access").propagate = False
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
