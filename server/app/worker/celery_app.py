@@ -33,7 +33,7 @@ from app.services.ingestion_config import celery_task_routes
 def _make_celery() -> Celery:
     settings = get_settings()
 
-    app = Celery("gchat")
+    app = Celery("gchat", include=["app.worker.ingest_tasks"])
 
     app.conf.update(
         # ── Broker + backend ──────────────────────────────────────────────────

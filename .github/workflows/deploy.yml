@@ -129,7 +129,8 @@ jobs:
             User=$USER
             WorkingDirectory=$HOME/G-CHAT-/server
             EnvironmentFile=$HOME/G-CHAT-/server/.env
-            ExecStart=$HOME/.local/bin/uv run celery -A app.worker.celery_app worker -Q ingest_normal -c 1 -n ingest_normal@%%h --loglevel=info
+            ExecStartPre=$HOME/.local/bin/uv run python -c "from app.worker.celery_app import celery_app; assert 'gchat.ingest_pipeline' in celery_app.tasks, sorted(k for k in celery_app.tasks if k.startswith('gchat.'))"
+            ExecStart=$HOME/.local/bin/uv run celery -A app.worker.ingest_tasks:celery_app worker -Q ingest_normal -c 1 -n ingest_normal@%%h --loglevel=info
             Restart=always
             RestartSec=10
             StandardOutput=journal
@@ -193,7 +194,7 @@ jobs:
             fi
 
             # Service active is not enough: verify the worker can answer through Redis.
-            CELERY_PING=$(timeout 20s uv run celery -A app.worker.celery_app inspect ping 2>&1 || true)
+            CELERY_PING=$(timeout 20s uv run celery -A app.worker.ingest_tasks:celery_app inspect ping 2>&1 || true)
             echo "$CELERY_PING"
             if echo "$CELERY_PING" | grep -q "pong"; then
               echo "Celery broker/worker ping OK"
