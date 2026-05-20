@@ -57,17 +57,37 @@ jobs:
             # Only manage Redis when the app is configured to use localhost.
             # External Redis setups are controlled outside this deploy script.
             if grep -q '^REDIS_URL=redis://localhost' ~/G-CHAT-/server/.env; then
-              if ! command -v redis-server &>/dev/null; then
-                echo "redis-server not found — installing..."
+              REDIS_SERVICE=""
+              if systemctl list-unit-files redis-server.service --no-legend 2>/dev/null | grep -q '^redis-server.service'; then
+                REDIS_SERVICE="redis-server"
+              elif systemctl list-unit-files redis.service --no-legend 2>/dev/null | grep -q '^redis.service'; then
+                REDIS_SERVICE="redis"
+              fi
+
+              if [ -z "$REDIS_SERVICE" ]; then
+                echo "Redis systemd service not found — installing redis-server..."
                 sudo apt-get update
                 sudo apt-get install -y redis-server
+                sudo systemctl daemon-reload
+                if systemctl list-unit-files redis-server.service --no-legend 2>/dev/null | grep -q '^redis-server.service'; then
+                  REDIS_SERVICE="redis-server"
+                elif systemctl list-unit-files redis.service --no-legend 2>/dev/null | grep -q '^redis.service'; then
+                  REDIS_SERVICE="redis"
+                fi
               fi
-              sudo systemctl enable --now redis-server
-              if systemctl is-active --quiet redis-server; then
-                echo "redis-server OK"
+
+              if [ -z "$REDIS_SERVICE" ]; then
+                echo "Redis install completed but no redis systemd service was found"
+                systemctl list-unit-files 'redis*.service' --no-legend || true
+                exit 1
+              fi
+
+              sudo systemctl enable --now "$REDIS_SERVICE"
+              if systemctl is-active --quiet "$REDIS_SERVICE"; then
+                echo "$REDIS_SERVICE OK"
               else
-                echo "redis-server failed to start — logs:"
-                sudo journalctl -u redis-server -n 30 --no-pager
+                echo "$REDIS_SERVICE failed to start — logs:"
+                sudo journalctl -u "$REDIS_SERVICE" -n 30 --no-pager
                 exit 1
               fi
             fi
