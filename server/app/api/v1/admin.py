@@ -17,6 +17,7 @@ POST /api/admin/retry-parquet
 import asyncio
 import re
 import uuid
+from collections.abc import Sequence
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -39,6 +40,7 @@ from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
 from app.models.folder import Folder
 from app.models.user import User
+from app.worker.celery_app import celery_app
 from app.worker.ingest_tasks import run_ingest_pipeline
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -50,6 +52,65 @@ def _reingest_batch_size() -> int:
 
 def _reingest_batch_delay_seconds() -> int:
     return max(0, int(get_settings().REINGEST_BATCH_DELAY_SECONDS))
+
+
+def _safe_celery_error(exc: BaseException) -> str:
+    message = str(exc) or exc.__class__.__name__
+    message = re.sub(r"(redis|rediss)://[^@\s]+@", r"\1://***@", message)
+    return message[:500]
+
+
+def _assert_ingestion_queue_available() -> None:
+    try:
+        with celery_app.connection_for_write() as connection:
+            connection.ensure_connection(max_retries=1, timeout=3)
+
+        backend_client = getattr(celery_app.backend, "client", None)
+        if backend_client is not None:
+            backend_client.ping()
+    except Exception as exc:
+        error = _safe_celery_error(exc)
+        ingest_logger.error("ingestion_queue_unavailable", error=error)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Ingestion queue is unavailable. Redis/Celery is down or stale; "
+                "restart redis-server, gchat, and gchat-celery, then retry."
+            ),
+        ) from exc
+
+
+async def _mark_dispatch_failed(db: AsyncSession, file_ids: Sequence[str], error: str) -> None:
+    if not file_ids:
+        return
+
+    await db.execute(
+        update(File)
+        .where(File.id.in_(file_ids))
+        .values(ingest_status=IngestStatus.FAILED.value)
+    )
+
+    result = await db.execute(select(File).where(File.id.in_(file_ids)))
+    files_by_id = {file.id: file for file in result.scalars().all()}
+    result = await db.execute(select(FileMetadata).where(FileMetadata.file_id.in_(file_ids)))
+    metadata_by_file_id = {metadata.file_id: metadata for metadata in result.scalars().all()}
+    ingest_error = f"Ingestion dispatch failed before worker start: {error}"[:1000]
+
+    for file_id in file_ids:
+        file = files_by_id.get(file_id)
+        metadata = metadata_by_file_id.get(file_id)
+        if metadata:
+            metadata.ingest_error = ingest_error
+        elif file:
+            db.add(FileMetadata(
+                id=str(uuid.uuid4()),
+                file_id=file_id,
+                blob_path=file.blob_path,
+                container_id=file.container_id,
+                ingest_error=ingest_error,
+            ))
+
+    await db.commit()
 
 
 @router.get("/cost-summary")
@@ -84,8 +145,10 @@ async def reingest_all(
     if not ingestable:
         raise HTTPException(status_code=400, detail="No ingestable files found.")
 
+    _assert_ingestion_queue_available()
+
     # Exclude files that are currently being processed by another reingest.
-    in_flight_statuses = {IngestStatus.PENDING.value, IngestStatus.RUNNING.value}
+    in_flight_statuses = {IngestStatus.RUNNING.value}
     in_flight = [f.id for f in ingestable if f.ingest_status in in_flight_statuses]
     file_ids = [f.id for f in ingestable if f.ingest_status not in in_flight_statuses]
     if in_flight:
@@ -131,11 +194,26 @@ async def reingest_all(
     batch_delay_seconds = _reingest_batch_delay_seconds()
     task_ids = []
     schedule = []
-    for idx, fid in enumerate(file_ids):
-        countdown = (idx // batch_size) * batch_delay_seconds
-        task = run_ingest_pipeline.apply_async(args=[fid], countdown=countdown)
-        task_ids.append(task.id)
-        schedule.append({"file_id": fid, "task_id": task.id, "countdown": countdown})
+    try:
+        for idx, fid in enumerate(file_ids):
+            countdown = (idx // batch_size) * batch_delay_seconds
+            task = run_ingest_pipeline.apply_async(args=[fid], countdown=countdown, retry=False)
+            task_ids.append(task.id)
+            schedule.append({"file_id": fid, "task_id": task.id, "countdown": countdown})
+    except Exception as exc:
+        error = _safe_celery_error(exc)
+        unscheduled_file_ids = file_ids[len(task_ids):]
+        await _mark_dispatch_failed(db, unscheduled_file_ids, error)
+        ingest_logger.error(
+            "reingest_all_dispatch_failed",
+            error=error,
+            queued_count=len(task_ids),
+            failed_count=len(unscheduled_file_ids),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Ingestion queue unavailable while scheduling files. Restart Redis/Celery/API and retry.",
+        ) from exc
 
     ingest_logger.info(
         "reingest_all_queued",

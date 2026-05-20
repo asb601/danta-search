@@ -46,6 +46,27 @@ def _make_celery() -> Celery:
         accept_content=["json"],
 
         # ── Reliability ───────────────────────────────────────────────────────
+        broker_connection_timeout=3,
+        broker_connection_max_retries=1,
+        broker_transport_options={
+          "socket_connect_timeout": 3,
+          "socket_timeout": 3,
+          "retry_on_timeout": False,
+        },
+        result_backend_transport_options={
+          "socket_connect_timeout": 3,
+          "socket_timeout": 3,
+          "retry_on_timeout": False,
+          "retry_policy": {"timeout": 3},
+        },
+        task_publish_retry=True,
+        task_publish_retry_policy={
+          "max_retries": 1,
+          "interval_start": 0,
+          "interval_step": 0.2,
+          "interval_max": 0.5,
+        },
+
         # acks_late: task is NOT acknowledged until it completes successfully.
         # If the worker process is killed mid-task (OOM, VM restart), the
         # message goes back to the queue and another worker picks it up.
