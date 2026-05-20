@@ -15,18 +15,19 @@ function CallbackHandler() {
       return;
     }
     setToken(token);
-    document.cookie = `token=${token}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`;
+    const secure = window.location.protocol === "https:" ? "; Secure" : "";
+    document.cookie = `token=${encodeURIComponent(token)}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax${secure}`;
 
     // Fetch user, cache it, then decide where to send them
     fetchMe().then((user) => {
       if (user && !user.is_admin && !user.allowed_domains) {
         // First-time user: no domain selected yet — send to onboarding
-        router.replace("/onboarding");
+        window.location.replace("/onboarding");
       } else {
-        router.replace("/chat");
+        window.location.replace("/chat");
       }
     }).catch(() => {
-      router.replace("/chat");
+      window.location.replace("/chat");
     });
   }, [searchParams, router]);
 
