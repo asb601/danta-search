@@ -66,7 +66,7 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
   return fetch(`${API_URL}${path}`, { ...init, headers });
 }
 
-/** Fetch current user from the backend — waits up to 20 s.
+ /** Fetch current user from the backend — waits up to 20 s.
  *  Returns null only when there is definitively no token or the server
  *  rejects it with 401/403 (token is cleared in that case).
  *  Throws for transient failures (5xx, network error, timeout) so callers
