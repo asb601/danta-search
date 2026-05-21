@@ -43,10 +43,10 @@ interface LogResponse {
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
 const LEVEL_COLORS: Record<string, string> = {
-  error: "bg-red-500/10 text-red-400 border-red-500/20",
-  warning: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-  info: "bg-blue-500/10 text-blue-300 border-blue-500/20",
-  debug: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
+  error: "bg-red-50 text-red-700 border-red-200",
+  warning: "bg-yellow-50 text-yellow-700 border-yellow-200",
+  info: "bg-blue-50 text-blue-700 border-blue-200",
+  debug: "bg-zinc-100 text-zinc-600 border-zinc-300",
 };
 
 const LEVEL_ICONS: Record<string, typeof Info> = {
@@ -159,10 +159,10 @@ function LogLine({ entry }: { entry: LogEntry }) {
             className={cn(
               "px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0",
               status === "done" || status === "started"
-                ? "bg-green-500/10 text-green-400"
+                ? "bg-green-50 text-green-700"
                 : status === "failed"
-                ? "bg-red-500/10 text-red-400"
-                : "bg-zinc-500/10 text-zinc-400"
+                ? "bg-red-50 text-red-700"
+                : "bg-zinc-100 text-zinc-600"
             )}
           >
             {status}
@@ -311,12 +311,12 @@ function formatDateTime(iso: string | null): string {
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { color: string; icon: typeof CheckCircle }> = {
-    ingested: { color: "bg-green-500/10 text-green-400 border-green-500/20", icon: CheckCircle },
-    done: { color: "bg-green-500/10 text-green-400 border-green-500/20", icon: CheckCircle },
-    failed: { color: "bg-red-500/10 text-red-400 border-red-500/20", icon: XCircle },
-    running: { color: "bg-blue-500/10 text-blue-400 border-blue-500/20", icon: Loader2 },
-    pending: { color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20", icon: Clock },
-    not_ingested: { color: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20", icon: Clock },
+    ingested: { color: "bg-green-50 text-green-700 border-green-200", icon: CheckCircle },
+    done: { color: "bg-green-50 text-green-700 border-green-200", icon: CheckCircle },
+    failed: { color: "bg-red-50 text-red-700 border-red-200", icon: XCircle },
+    running: { color: "bg-blue-50 text-blue-700 border-blue-200", icon: Loader2 },
+    pending: { color: "bg-yellow-50 text-yellow-700 border-yellow-200", icon: Clock },
+    not_ingested: { color: "bg-zinc-100 text-zinc-600 border-zinc-300", icon: Clock },
   };
   const conf = map[status] || map.not_ingested;
   const Icon = conf.icon;
@@ -342,26 +342,26 @@ type StepConfig = {
 };
 
 const PIPELINE_STEPS: Record<string, StepConfig> = {
-  query_received:        { num: "1", label: "Query Received",   color: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30",       short: "query" },
-  catalog_loaded:        { num: "2", label: "Catalog Loaded",   color: "bg-blue-500/15 text-blue-300 border-blue-500/30",       short: "catalog" },
-  catalog_empty:         { num: "2", label: "Catalog Empty",    color: "bg-red-500/15 text-red-300 border-red-500/30",          short: "catalog_empty" },
-  system_prompt_built:   { num: "3", label: "System Prompt",    color: "bg-violet-500/15 text-violet-300 border-violet-500/30", short: "prompt" },
-  search_catalog:        { num: "3", label: "Catalog Search",   color: "bg-violet-500/15 text-violet-300 border-violet-500/30", short: "search" },
-  get_file_schema:       { num: "3", label: "File Schema",      color: "bg-violet-500/15 text-violet-300 border-violet-500/30", short: "schema" },
-  llm_input:             { num: "4", label: "LLM Input",        color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "llm_in" },
-  llm_stream_input:      { num: "4", label: "LLM Input",        color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "llm_in" },
-  llm_output:            { num: "4", label: "LLM Decision",     color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "llm_out" },
-  llm_stream_output:     { num: "4", label: "LLM Decision",     color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "llm_out" },
-  tool_call_start:       { num: "4", label: "Tool Start",       color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "tool_start" },
-  tool_call_end:         { num: "4", label: "Tool End",         color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "tool_end" },
-  sql_execute_start:     { num: "5", label: "SQL Executing",    color: "bg-amber-500/15 text-amber-300 border-amber-500/30",    short: "sql_start" },
-  sql_execute_done:      { num: "6", label: "SQL Result",       color: "bg-orange-500/15 text-orange-300 border-orange-500/30", short: "sql_done" },
-  sql_execute_error:     { num: "6", label: "SQL Error",        color: "bg-red-500/15 text-red-300 border-red-500/30",          short: "sql_error" },
-  inspect_data_format:   { num: "5", label: "Data Sample",      color: "bg-amber-500/15 text-amber-300 border-amber-500/30",    short: "sample" },
-  summarise_dataframe_done: { num: "5", label: "Stats",         color: "bg-amber-500/15 text-amber-300 border-amber-500/30",    short: "stats" },
-  ingest_llm_prompt:     { num: "i", label: "Ingest Prompt",    color: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30",       short: "ingest_p" },
-  ingest_llm_response:   { num: "i", label: "Ingest Reply",     color: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30",       short: "ingest_r" },
-  final_answer:          { num: "✓", label: "Final Answer",     color: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40", short: "answer" },
+  query_received:        { num: "1", label: "Query Received",   color: "bg-cyan-50 text-cyan-800 border-cyan-200",       short: "query" },
+  catalog_loaded:        { num: "2", label: "Catalog Loaded",   color: "bg-blue-50 text-blue-800 border-blue-200",       short: "catalog" },
+  catalog_empty:         { num: "2", label: "Catalog Empty",    color: "bg-red-50 text-red-700 border-red-200",          short: "catalog_empty" },
+  system_prompt_built:   { num: "3", label: "System Prompt",    color: "bg-violet-50 text-violet-800 border-violet-200", short: "prompt" },
+  search_catalog:        { num: "3", label: "Catalog Search",   color: "bg-violet-50 text-violet-800 border-violet-200", short: "search" },
+  get_file_schema:       { num: "3", label: "File Schema",      color: "bg-violet-50 text-violet-800 border-violet-200", short: "schema" },
+  llm_input:             { num: "4", label: "LLM Input",        color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "llm_in" },
+  llm_stream_input:      { num: "4", label: "LLM Input",        color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "llm_in" },
+  llm_output:            { num: "4", label: "LLM Decision",     color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "llm_out" },
+  llm_stream_output:     { num: "4", label: "LLM Decision",     color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "llm_out" },
+  tool_call_start:       { num: "4", label: "Tool Start",       color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "tool_start" },
+  tool_call_end:         { num: "4", label: "Tool End",         color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "tool_end" },
+  sql_execute_start:     { num: "5", label: "SQL Executing",    color: "bg-amber-50 text-amber-800 border-amber-200",    short: "sql_start" },
+  sql_execute_done:      { num: "6", label: "SQL Result",       color: "bg-orange-50 text-orange-800 border-orange-200", short: "sql_done" },
+  sql_execute_error:     { num: "6", label: "SQL Error",        color: "bg-red-50 text-red-700 border-red-200",          short: "sql_error" },
+  inspect_data_format:   { num: "5", label: "Data Sample",      color: "bg-amber-50 text-amber-800 border-amber-200",    short: "sample" },
+  summarise_dataframe_done: { num: "5", label: "Stats",         color: "bg-amber-50 text-amber-800 border-amber-200",    short: "stats" },
+  ingest_llm_prompt:     { num: "i", label: "Ingest Prompt",    color: "bg-zinc-100 text-zinc-700 border-zinc-300",       short: "ingest_p" },
+  ingest_llm_response:   { num: "i", label: "Ingest Reply",     color: "bg-zinc-100 text-zinc-700 border-zinc-300",       short: "ingest_r" },
+  final_answer:          { num: "✓", label: "Final Answer",     color: "bg-emerald-50 text-emerald-800 border-emerald-200", short: "answer" },
 };
 
 function pipelineSummary(ev: LogEntry): string {
@@ -517,8 +517,8 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
           <span className="text-muted-foreground">File:</span>{" "}
           <span className="font-mono text-foreground">{String(ev.blob_path)}</span>{" "}
           <span className={cn("ml-2 px-1.5 py-0.5 rounded text-[10px] border",
-            ev.found ? "bg-green-500/10 text-green-400 border-green-500/30"
-                     : "bg-red-500/10 text-red-400 border-red-500/30")}>
+            ev.found ? "bg-green-50 text-green-700 border-green-200"
+                     : "bg-red-50 text-red-700 border-red-200")}>
             {ev.found ? "found" : "not found"}
           </span>
         </div>
@@ -532,7 +532,7 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
                 {cols.map((c) => (
                   <tr key={c} className="border-t border-border/50">
                     <td className="px-2 py-1 text-foreground">{c}</td>
-                    <td className="px-2 py-1 text-cyan-300">{types[c] ?? ""}</td>
+                    <td className="px-2 py-1 text-cyan-700">{types[c] ?? ""}</td>
                     <td className="px-2 py-1 text-muted-foreground">{(samples[c] || []).slice(0,3).map(String).join(", ")}</td>
                   </tr>
                 ))}
@@ -558,7 +558,7 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
             <div className="text-[11px] text-muted-foreground">LLM decided to call {tcs.length} tool(s):</div>
             {tcs.map((tc, i) => (
               <div key={i} className="border border-border rounded p-2 bg-[#0d1117]">
-                <div className="text-[11px] text-fuchsia-300 font-mono mb-1">→ {tc.name}</div>
+                <div className="text-[11px] text-fuchsia-700 font-mono mb-1">→ {tc.name}</div>
                 <PipelineCodeBlock lang="args">{JSON.stringify(tc.args ?? {}, null, 2)}</PipelineCodeBlock>
               </div>
             ))}
@@ -593,7 +593,7 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
   if (e === "tool_call_start") {
     return (
       <div className="space-y-2">
-        <div className="text-[11px]"><span className="text-muted-foreground">Tool:</span> <span className="font-mono text-fuchsia-300">{String(ev.tool)}</span></div>
+        <div className="text-[11px]"><span className="text-muted-foreground">Tool:</span> <span className="font-mono text-fuchsia-700">{String(ev.tool)}</span></div>
         <PipelineCodeBlock lang="input">{JSON.stringify(ev.input ?? {}, null, 2)}</PipelineCodeBlock>
       </div>
     );
@@ -603,7 +603,7 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
     const out = String(ev.output ?? "");
     return (
       <div className="space-y-2">
-        <div className="text-[11px]"><span className="text-muted-foreground">Tool:</span> <span className="font-mono text-fuchsia-300">{String(ev.tool)}</span></div>
+        <div className="text-[11px]"><span className="text-muted-foreground">Tool:</span> <span className="font-mono text-fuchsia-700">{String(ev.tool)}</span></div>
         <PipelineCodeBlock lang="output">{out.length > 4000 ? out.slice(0, 4000) + "\n… (truncated)" : out}</PipelineCodeBlock>
       </div>
     );
@@ -623,7 +623,7 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
     return (
       <div className="space-y-2">
         <div className="grid grid-cols-3 gap-2 text-[11px]">
-          <div><span className="text-muted-foreground">Returned:</span> <span className="font-mono text-emerald-300">{String(ev.rows_returned)}/{String(ev.total_rows)}</span></div>
+          <div><span className="text-muted-foreground">Returned:</span> <span className="font-mono text-emerald-700">{String(ev.rows_returned)}/{String(ev.total_rows)}</span></div>
           <div><span className="text-muted-foreground">Duration:</span> <span className="font-mono">{String(ev.duration_ms)} ms</span></div>
           <div><span className="text-muted-foreground">Columns:</span> <span className="font-mono">{Array.isArray(ev.columns) ? (ev.columns as unknown[]).length : 0}</span></div>
         </div>
@@ -638,7 +638,7 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
         <div className="text-[11px] text-muted-foreground">SQL that failed:</div>
         <PipelineCodeBlock lang="sql">{String(ev.sql ?? "")}</PipelineCodeBlock>
         <div className="text-[11px] text-muted-foreground">Error:</div>
-        <div className="border border-red-500/30 bg-red-500/5 rounded p-2 text-[11px] font-mono text-red-300 whitespace-pre-wrap break-all">
+        <div className="border border-red-200 bg-red-50 rounded p-2 text-[11px] font-mono text-red-700 whitespace-pre-wrap break-all">
           {String(ev.error ?? "")}
         </div>
       </div>
@@ -651,7 +651,7 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
         <div className="grid grid-cols-3 gap-2 text-[11px]">
           <div><span className="text-muted-foreground">Tool calls:</span> <span className="font-mono">{String(ev.tool_calls)}</span></div>
           <div><span className="text-muted-foreground">Rows:</span> <span className="font-mono">{String(ev.row_count)}</span></div>
-          <div><span className="text-muted-foreground">Total time:</span> <span className="font-mono text-emerald-300">{String(ev.total_duration_ms)} ms</span></div>
+          <div><span className="text-muted-foreground">Total time:</span> <span className="font-mono text-emerald-700">{String(ev.total_duration_ms)} ms</span></div>
         </div>
         <div className="text-[11px] text-muted-foreground">Answer delivered to user:</div>
         <PipelineCodeBlock>{String(ev.answer ?? "")}</PipelineCodeBlock>
@@ -822,7 +822,7 @@ function PipelinePanel() {
           className={cn(
             "px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1",
             autoRefresh
-              ? "bg-green-500/15 text-green-400 border border-green-500/30"
+              ? "bg-green-50 text-green-700 border border-green-200"
               : "bg-surface-raised text-muted-foreground hover:text-foreground"
           )}
         >
@@ -844,7 +844,7 @@ function PipelinePanel() {
       </div>
 
       {error && (
-        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />
           {error}
         </div>
@@ -904,7 +904,7 @@ function PerformancePanel() {
       </div>
 
       {error && (
-        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />
           {error}
         </div>
@@ -939,7 +939,7 @@ function PerformancePanel() {
                 <td className="px-3 py-2 text-center">
                   {t.upload_secs !== null ? (
                     <span className="flex items-center justify-center gap-1 text-foreground font-mono">
-                      <Upload className="w-3 h-3 text-blue-400" />
+                      <Upload className="w-3 h-3 text-blue-600" />
                       {formatSecs(t.upload_secs)}
                     </span>
                   ) : (
@@ -955,7 +955,7 @@ function PerformancePanel() {
                 <td className="px-3 py-2 text-center">
                   {t.processing_secs !== null ? (
                     <span className="flex items-center justify-center gap-1 text-foreground font-mono">
-                      <Zap className="w-3 h-3 text-yellow-400" />
+                      <Zap className="w-3 h-3 text-yellow-600" />
                       {formatSecs(t.processing_secs)}
                       {t.ingestion_secs !== null && t.parquet_secs !== null && (
                         <span className="text-[9px] text-muted-foreground ml-0.5">
@@ -964,7 +964,7 @@ function PerformancePanel() {
                       )}
                     </span>
                   ) : t.parquet_error ? (
-                    <span className="text-red-400 text-[10px]" title={t.parquet_error}>Error</span>
+                    <span className="text-red-700 text-[10px]" title={t.parquet_error}>Error</span>
                   ) : (
                     <span className="text-muted-foreground">—</span>
                   )}
@@ -972,7 +972,7 @@ function PerformancePanel() {
                 <td className="px-3 py-2 text-center">
                   {t.total_secs !== null ? (
                     <span className="flex items-center justify-center gap-1 text-foreground font-mono font-semibold">
-                      <Clock className="w-3 h-3 text-green-400" />
+                      <Clock className="w-3 h-3 text-green-600" />
                       {formatSecs(t.total_secs)}
                     </span>
                   ) : (
@@ -1022,61 +1022,61 @@ async function clearLog(filename: string): Promise<boolean> {
 
 function getIngestCfg(ev: LogEntry): { num: string; label: string; color: string } {
   const e = ev.event as string;
-  if (e === "chain_start") return { num: "→", label: "Start",    color: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30" };
+  if (e === "chain_start") return { num: "→", label: "Start",    color: "bg-cyan-50 text-cyan-800 border-cyan-200" };
   if (e === "chain_end")
     return ev.outcome === "error"
-      ? { num: "✗", label: "Failed", color: "bg-red-500/15 text-red-300 border-red-500/30" }
-      : { num: "✓", label: "Done",   color: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40" };
-  if (e === "chain_skip") return { num: "⊘", label: "Skipped", color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30" };
-  if (e === "cleanup")    return { num: "·", label: "Cleanup",  color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30" };
+      ? { num: "✗", label: "Failed", color: "bg-red-50 text-red-700 border-red-200" }
+      : { num: "✓", label: "Done",   color: "bg-emerald-50 text-emerald-800 border-emerald-200" };
+  if (e === "chain_skip") return { num: "⊘", label: "Skipped", color: "bg-zinc-100 text-zinc-600 border-zinc-300" };
+  if (e === "cleanup")    return { num: "·", label: "Cleanup",  color: "bg-zinc-100 text-zinc-600 border-zinc-300" };
   if (e === "ingest_stage") {
     const stage = (ev.stage as string) ?? "stage";
     const status = (ev.status as string) ?? "";
     const STAGE: Record<string, { num: string; label: string; color: string }> = {
-      clean:          { num: "0", label: "Clean",      color: "bg-violet-500/15 text-violet-300 border-violet-500/30" },
-      metadata:       { num: "1", label: "Metadata",   color: "bg-teal-500/15 text-teal-300 border-teal-500/30" },
-      ai_description: { num: "2", label: "AI Desc",    color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30" },
-      ontology:       { num: "3", label: "Roles",      color: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30" },
-      embedding:      { num: "4", label: "Embed",      color: "bg-indigo-500/15 text-indigo-300 border-indigo-500/30" },
-      opensearch:     { num: "5", label: "Search",     color: "bg-blue-500/15 text-blue-300 border-blue-500/30" },
-      parquet:        { num: "P", label: "Parquet",    color: "bg-orange-500/15 text-orange-300 border-orange-500/30" },
-      analytics:      { num: "A", label: "Analytics",  color: "bg-amber-500/15 text-amber-300 border-amber-500/30" },
-      relationships:  { num: "R", label: "Relations",  color: "bg-lime-500/15 text-lime-300 border-lime-500/30" },
-      semantic_layer: { num: "S", label: "Semantic",   color: "bg-purple-500/15 text-purple-300 border-purple-500/30" },
-      complete:       { num: "✓", label: "Complete",   color: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40" },
+      clean:          { num: "0", label: "Clean",      color: "bg-violet-50 text-violet-800 border-violet-200" },
+      metadata:       { num: "1", label: "Metadata",   color: "bg-teal-50 text-teal-800 border-teal-200" },
+      ai_description: { num: "2", label: "AI Desc",    color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200" },
+      ontology:       { num: "3", label: "Roles",      color: "bg-cyan-50 text-cyan-800 border-cyan-200" },
+      embedding:      { num: "4", label: "Embed",      color: "bg-indigo-50 text-indigo-800 border-indigo-200" },
+      opensearch:     { num: "5", label: "Search",     color: "bg-blue-50 text-blue-800 border-blue-200" },
+      parquet:        { num: "P", label: "Parquet",    color: "bg-orange-50 text-orange-800 border-orange-200" },
+      analytics:      { num: "A", label: "Analytics",  color: "bg-amber-50 text-amber-800 border-amber-200" },
+      relationships:  { num: "R", label: "Relations",  color: "bg-lime-50 text-lime-800 border-lime-200" },
+      semantic_layer: { num: "S", label: "Semantic",   color: "bg-purple-50 text-purple-800 border-purple-200" },
+      complete:       { num: "✓", label: "Complete",   color: "bg-emerald-50 text-emerald-800 border-emerald-200" },
     };
-    const def = STAGE[stage] ?? { num: "·", label: stage, color: "bg-blue-500/15 text-blue-300 border-blue-500/30" };
-    if (status === "failed")  return { ...def, color: "bg-red-500/15 text-red-300 border-red-500/30" };
-    if (status === "skipped") return { ...def, color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30" };
+    const def = STAGE[stage] ?? { num: "·", label: stage, color: "bg-blue-50 text-blue-800 border-blue-200" };
+    if (status === "failed")  return { ...def, color: "bg-red-50 text-red-700 border-red-200" };
+    if (status === "skipped") return { ...def, color: "bg-zinc-100 text-zinc-600 border-zinc-300" };
     return def;
   }
-  if (e === "ingest_stage_nonfatal_failed") return { num: "!", label: "Nonfatal", color: "bg-amber-500/15 text-amber-300 border-amber-500/30" };
-  if (e === "metadata_schema_detected") return { num: "1", label: "Schema", color: "bg-teal-500/15 text-teal-300 border-teal-500/30" };
+  if (e === "ingest_stage_nonfatal_failed") return { num: "!", label: "Nonfatal", color: "bg-amber-50 text-amber-800 border-amber-200" };
+  if (e === "metadata_schema_detected") return { num: "1", label: "Schema", color: "bg-teal-50 text-teal-800 border-teal-200" };
   if (e === "step") {
     const name = (ev.name as string) ?? "";
     const status = (ev.status as string) ?? "";
     const STEP: Record<string, { num: string; label: string; color: string }> = {
-      probe:             { num: "0", label: "Probe",      color: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30" },
-      preprocess:        { num: "0", label: "Preprocess", color: "bg-violet-500/15 text-violet-300 border-violet-500/30" },
-      duckdb_sample:     { num: "1", label: "DuckDB",     color: "bg-blue-500/15 text-blue-300 border-blue-500/30" },
-      ai_description:    { num: "2", label: "AI Desc",    color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30" },
-      save_metadata:     { num: "3", label: "Metadata",   color: "bg-teal-500/15 text-teal-300 border-teal-500/30" },
-      embed_metadata:    { num: "4", label: "Embed",      color: "bg-indigo-500/15 text-indigo-300 border-indigo-500/30" },
-      compute_analytics: { num: "5", label: "Analytics",  color: "bg-amber-500/15 text-amber-300 border-amber-500/30" },
-      parquet:           { num: "5", label: "Parquet",    color: "bg-orange-500/15 text-orange-300 border-orange-500/30" },
+      probe:             { num: "0", label: "Probe",      color: "bg-zinc-100 text-zinc-700 border-zinc-300" },
+      preprocess:        { num: "0", label: "Preprocess", color: "bg-violet-50 text-violet-800 border-violet-200" },
+      duckdb_sample:     { num: "1", label: "DuckDB",     color: "bg-blue-50 text-blue-800 border-blue-200" },
+      ai_description:    { num: "2", label: "AI Desc",    color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200" },
+      save_metadata:     { num: "3", label: "Metadata",   color: "bg-teal-50 text-teal-800 border-teal-200" },
+      embed_metadata:    { num: "4", label: "Embed",      color: "bg-indigo-50 text-indigo-800 border-indigo-200" },
+      compute_analytics: { num: "5", label: "Analytics",  color: "bg-amber-50 text-amber-800 border-amber-200" },
+      parquet:           { num: "5", label: "Parquet",    color: "bg-orange-50 text-orange-800 border-orange-200" },
     };
-    const def = STEP[name] ?? { num: "·", label: name, color: "bg-blue-500/15 text-blue-300 border-blue-500/30" };
-    if (status === "failed")  return { ...def, color: "bg-red-500/15 text-red-300 border-red-500/30" };
-    if (status === "skipped") return { ...def, color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30" };
+    const def = STEP[name] ?? { num: "·", label: name, color: "bg-blue-50 text-blue-800 border-blue-200" };
+    if (status === "failed")  return { ...def, color: "bg-red-50 text-red-700 border-red-200" };
+    if (status === "skipped") return { ...def, color: "bg-zinc-100 text-zinc-600 border-zinc-300" };
     return def;
   }
-  if (e === "preprocess")        return { num: "0", label: "Preprocess", color: "bg-violet-500/15 text-violet-300 border-violet-500/30" };
-  if (e === "analytics_compute") return { num: "5", label: "Analytics",  color: "bg-amber-500/15 text-amber-300 border-amber-500/30" };
+  if (e === "preprocess")        return { num: "0", label: "Preprocess", color: "bg-violet-50 text-violet-800 border-violet-200" };
+  if (e === "analytics_compute") return { num: "5", label: "Analytics",  color: "bg-amber-50 text-amber-800 border-amber-200" };
   if (e === "parquet_service" || e === "parquet_conversion") {
     const bad = (ev.status as string) === "failed" || ev.level === "error" || ev.level === "warning";
-    return { num: "P", label: "Parquet", color: bad ? "bg-red-500/15 text-red-300 border-red-500/30" : "bg-orange-500/15 text-orange-300 border-orange-500/30" };
+    return { num: "P", label: "Parquet", color: bad ? "bg-red-50 text-red-700 border-red-200" : "bg-orange-50 text-orange-800 border-orange-200" };
   }
-  return { num: "·", label: e, color: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30" };
+  return { num: "·", label: e, color: "bg-zinc-100 text-zinc-700 border-zinc-300" };
 }
 
 function ingestSummary(ev: LogEntry): string {
@@ -1171,7 +1171,7 @@ function IngestEventRow({ ev }: { ev: LogEntry }) {
             {extraKeys.map((key) => (
               <div key={key} className="contents">
                 <span className="text-muted-foreground font-mono">{key}</span>
-                <span className={cn("font-mono break-all", key === "error" ? "text-red-400" : "text-foreground")}>
+                <span className={cn("font-mono break-all", key === "error" ? "text-red-700" : "text-foreground")}>
                   {typeof ev[key] === "object" ? JSON.stringify(ev[key]) : String(ev[key])}
                 </span>
               </div>
@@ -1244,7 +1244,7 @@ function IngestionPanel() {
         </select>
         <button onClick={() => setAutoRefresh(!autoRefresh)}
           className={cn("px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1",
-            autoRefresh ? "bg-green-500/15 text-green-400 border border-green-500/30" : "bg-surface-raised text-muted-foreground hover:text-foreground")}>
+            autoRefresh ? "bg-green-50 text-green-700 border border-green-200" : "bg-surface-raised text-muted-foreground hover:text-foreground")}>
           <RefreshCw className={cn("w-3 h-3", autoRefresh && "animate-spin")} />
           {autoRefresh ? "Live" : "Auto"}
         </button>
@@ -1258,7 +1258,7 @@ function IngestionPanel() {
         </button>
         <button onClick={async () => { if (await clearLog("ai_pipeline.log")) fetchEvents(); }}
           title="Clear ai_pipeline.log"
-          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-red-400 transition-colors">
+          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-red-600 transition-colors">
           <Trash2 className="w-3.5 h-3.5" />
         </button>
         <span className="text-[10px] text-muted-foreground ml-auto hidden sm:block">
@@ -1267,7 +1267,7 @@ function IngestionPanel() {
       </div>
 
       {error && (
-        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />{error}
         </div>
       )}
@@ -1286,10 +1286,10 @@ function IngestionPanel() {
 }
 
 function statusClass(status: number | null): string {
-  if (!status) return "bg-zinc-500/10 text-zinc-400 border-zinc-500/20";
-  if (status >= 500) return "bg-red-500/10 text-red-400 border-red-500/20";
-  if (status >= 400) return "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
-  return "bg-green-500/10 text-green-400 border-green-500/20";
+  if (!status) return "bg-zinc-100 text-zinc-600 border-zinc-300";
+  if (status >= 500) return "bg-red-50 text-red-700 border-red-200";
+  if (status >= 400) return "bg-yellow-50 text-yellow-700 border-yellow-200";
+  return "bg-green-50 text-green-700 border-green-200";
 }
 
 function AuditRow({ row }: { row: AuditEntry }) {
@@ -1336,7 +1336,7 @@ function AuditRow({ row }: { row: AuditEntry }) {
             <span className="text-muted-foreground">folder</span><span className="text-foreground break-all">{row.context.folder_name || row.context.folder_id || "—"}</span>
             <span className="text-muted-foreground">container</span><span className="text-foreground break-all">{row.context.container_id || "—"}</span>
             <span className="text-muted-foreground">target_user</span><span className="text-foreground break-all">{row.context.target_user_email || row.context.target_user_id || "—"}</span>
-            {row.error && <><span className="text-muted-foreground">error</span><span className="text-red-400 break-all">{row.error}</span></>}
+            {row.error && <><span className="text-muted-foreground">error</span><span className="text-red-700 break-all">{row.error}</span></>}
             {row.details && <><span className="text-muted-foreground">details</span><span className="text-foreground break-all">{JSON.stringify(row.details)}</span></>}
           </div>
         </div>
@@ -1424,7 +1424,7 @@ function AuditPanel() {
         </select>
         <button onClick={() => setAutoRefresh(!autoRefresh)}
           className={cn("px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1",
-            autoRefresh ? "bg-green-500/15 text-green-400 border border-green-500/30" : "bg-surface-raised text-muted-foreground hover:text-foreground")}>
+            autoRefresh ? "bg-green-50 text-green-700 border border-green-200" : "bg-surface-raised text-muted-foreground hover:text-foreground")}>
           <RefreshCw className={cn("w-3 h-3", autoRefresh && "animate-spin")} />
           {autoRefresh ? "Live" : "Auto"}
         </button>
@@ -1438,7 +1438,7 @@ function AuditPanel() {
       </div>
 
       {error && (
-        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />{error}
         </div>
       )}
@@ -1683,7 +1683,7 @@ export default function AdminLogsPage() {
           className={cn(
             "px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1",
             autoRefresh
-              ? "bg-green-500/15 text-green-400 border border-green-500/30"
+              ? "bg-green-50 text-green-700 border border-green-200"
               : "bg-surface-raised text-muted-foreground hover:text-foreground"
           )}
         >
@@ -1713,7 +1713,7 @@ export default function AdminLogsPage() {
         <button
           onClick={async () => { if (await clearLog(activeFile)) fetchLogs(); }}
           title={`Clear ${activeFile}`}
-          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-red-400 transition-colors"
+          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-red-600 transition-colors"
         >
           <Trash2 className="w-3.5 h-3.5" />
         </button>
@@ -1726,7 +1726,7 @@ export default function AdminLogsPage() {
 
       {/* Error */}
       {error && (
-        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />
           {error}
         </div>
