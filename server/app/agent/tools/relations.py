@@ -36,6 +36,12 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
         Use approved relationships for SQL joins. Candidate/technical-only
         relationships are evidence, not permission to join without validation.
         """
+        try:
+            return await _extract_relations_impl(file_paths_csv)
+        except Exception as _exc:  # noqa: BLE001
+            return json.dumps({"relations": [], "context": {}, "error": str(_exc)})
+
+    async def _extract_relations_impl(file_paths_csv: str) -> str:
         selected_ids: set[str] = set()
         for raw in (file_paths_csv or "").split(","):
             key = raw.strip()

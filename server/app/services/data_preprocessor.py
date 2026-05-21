@@ -648,61 +648,87 @@ def _process_text_stream(
                 },
             }
 
-    # ── Pass 2: full streaming read ────────────────────────────────────────────
+    # ── Pass 2: PyArrow streaming CSV + DuckDB dedup ──────────────────────────
+    # PyArrow's Rust CSV parser runs ~10–20× faster than pandas' Python engine
+    # and feeds fixed-size RecordBatches (block_size bytes) so peak RAM stays
+    # bounded regardless of file size.  DuckDB handles deduplication out-of-core
+    # (spills to a temp dir) so we no longer need the small/large file split for
+    # correctness — only keep the split to decide *when* we can afford dedup.
+    import pyarrow as _pa           # noqa: PLC0415
+    import pyarrow.csv as _pa_csv   # noqa: PLC0415
+    import duckdb as _duckdb        # noqa: PLC0415
+
     _active_profile = profile if profile is not None else get_cleaning_profile()
 
-    # Count malformed CSV rows (wrong column count) via on_bad_lines callable
-    # (pandas >= 1.3) so we have an audit trail without a second file pass.
     _malformed_count: list[int] = [0]
     _malformed_sample: list[dict] = []
 
-    def _handle_bad_line(bad_line: list) -> None:  # type: ignore[return]
+    def _invalid_row_handler(invalid_row) -> str:  # PyArrow ≥ 7.0 API
         _malformed_count[0] += 1
         if len(_malformed_sample) < MALFORMED_SAMPLE_ROWS:
             _malformed_sample.append({
                 "reason": "malformed_csv_row",
-                "row": {"_raw": ",".join(str(x) for x in bad_line[:QUARANTINE_SAMPLE_ROWS])},
+                "row": {"_raw": str(invalid_row)[:200]},
             })
-        return None  # skip the row
+        return "skip"
 
     downloader = src_bc.download_blob()
-    raw_stream = io.BufferedReader(_AzureRawStream(downloader), buffer_size=AZURE_READ_BUFFER_BYTES)
+    raw_stream: io.RawIOBase | io.BytesIO = io.BufferedReader(
+        _AzureRawStream(downloader), buffer_size=AZURE_READ_BUFFER_BYTES
+    )
 
-    try:
-        reader = pd.read_csv(
-            raw_stream, sep=delimiter, header=None, dtype=str, names=headers,
-            encoding=encoding, encoding_errors="replace",
-            keep_default_na=False, skiprows=skip_rows,
-            chunksize=CHUNK_ROWS, on_bad_lines=_handle_bad_line,
-        )
-    except TypeError:
-        # pandas < 1.3 — on_bad_lines callable not supported; fall back silently
-        raw_stream.seek(0)
-        reader = pd.read_csv(
-            raw_stream, sep=delimiter, header=None, dtype=str, names=headers,
-            encoding=encoding, encoding_errors="replace",
-            keep_default_na=False, skiprows=skip_rows,
-            chunksize=CHUNK_ROWS, on_bad_lines="skip",
+    # PyArrow only decodes UTF-8.  Transcode non-UTF-8 / BOM-prefixed files
+    # in-memory before handing the stream to the Arrow parser.
+    if encoding.lower() not in ("utf-8", "ascii"):
+        warns.append(f"Transcoding {encoding} → UTF-8 before Arrow parser")
+        raw_bytes = raw_stream.read()
+        raw_stream = io.BytesIO(
+            raw_bytes.decode(encoding, errors="replace").encode("utf-8")
         )
 
-    # Write CSV header row as the first block
+    pa_reader = _pa_csv.open_csv(
+        raw_stream,
+        read_options=_pa_csv.ReadOptions(
+            skip_rows=skip_rows,
+            column_names=headers,
+            # Each batch is ~64 MB of raw CSV bytes — large enough for throughput,
+            # small enough to fit comfortably in RAM alongside the worker semaphore.
+            block_size=max(AZURE_READ_BUFFER_BYTES, 64 * 1024 * 1024),
+        ),
+        parse_options=_pa_csv.ParseOptions(
+            delimiter=delimiter,
+            invalid_row_handler=_invalid_row_handler,
+        ),
+        convert_options=_pa_csv.ConvertOptions(
+            # Keep everything as strings — type inference happens later in DuckDB.
+            column_types={c: _pa.string() for c in headers},
+            include_missing_columns=True,
+            strings_can_be_null=False,
+        ),
+    )
+
+    # Write CSV header row as the first Azure block
     header_bytes = (",".join(headers) + "\n").encode("utf-8")
     block_writer.write(header_bytes)
 
-    original_rows     = 0
-    clean_rows        = 0
-    total_quarantine  = 0
+    original_rows    = 0
+    clean_rows       = 0
+    total_quarantine = 0
     quarantine_sample: list[dict] = []
     small_chunks: list[pd.DataFrame] = []
 
-    for chunk in reader:
-        original_rows += len(chunk)
-        chunk, q_rows  = _clean_chunk(chunk, converters, _active_profile)
+    for _batch in pa_reader:
+        original_rows += len(_batch)
+        # Convert Arrow batch → pandas for existing cleaning-rule machinery.
+        # This is a zero-copy operation for string columns (Arrow shares the buffer).
+        chunk = _batch.to_pandas()
+        chunk, q_rows = _clean_chunk(chunk, converters, _active_profile)
         total_quarantine += len(q_rows)
         if len(quarantine_sample) < QUARANTINE_SAMPLE_ROWS:
             quarantine_sample.extend(q_rows[:QUARANTINE_SAMPLE_ROWS - len(quarantine_sample)])
 
         if is_large:
+            # Large files: stream each batch directly to Azure — no accumulation.
             buf = io.StringIO()
             chunk.to_csv(buf, index=False, header=False)
             block_writer.write(buf.getvalue().encode("utf-8"))
@@ -711,23 +737,31 @@ def _process_text_stream(
             small_chunks.append(chunk)
 
     if not is_large and small_chunks:
-        full   = pd.concat(small_chunks, ignore_index=True)
-        before = len(full)
-        full   = full.drop_duplicates()
-        n_dup  = before - len(full)
+        full = pd.concat(small_chunks, ignore_index=True)
+
+        # Deduplicate via DuckDB — out-of-core capable (spills to disk when the
+        # table exceeds DuckDB's memory budget), so this works for any file that
+        # fits in the "small" category without risking OOM.
+        _conn = _duckdb.connect()
+        try:
+            _conn.register("_dedup_src", full)
+            deduped = _conn.execute("SELECT DISTINCT * FROM _dedup_src").df()
+        finally:
+            _conn.close()
+
+        n_dup = len(full) - len(deduped)
         if n_dup:
             warns.append(f"Dropped {n_dup} exact-duplicate row(s)")
-        full = full.fillna("")
-        buf  = io.StringIO()
-        full.to_csv(buf, index=False, header=False)
+        buf = io.StringIO()
+        deduped.to_csv(buf, index=False, header=False)
         block_writer.write(buf.getvalue().encode("utf-8"))
-        clean_rows = len(full)
+        clean_rows = len(deduped)
     elif is_large:
         warns.append("Deduplication skipped for large file to keep memory bounded")
 
     block_writer.commit()
 
-    # Merge malformed CSV rows into the quarantine audit
+    # Merge malformed-row audit into quarantine totals
     if _malformed_count[0]:
         warns.append(f"Skipped {_malformed_count[0]} malformed CSV row(s) (wrong column count)")
         total_quarantine += _malformed_count[0]
