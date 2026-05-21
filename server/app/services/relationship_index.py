@@ -12,6 +12,7 @@ import hashlib
 import re
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete, select, text
@@ -19,8 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import ingest_logger
 from app.models.column_key_registry import ColumnKeyRegistry
+from app.models.file import File
 from app.models.file_metadata import FileMetadata
-from app.services.ingestion_config import null_tokens_lower
+from app.services.ingestion_config import glossary_filename_tokens, null_tokens_lower
 from app.services.semantic_policy import SemanticPolicy, get_semantic_policy
 from app.services.semantic_roles import (
     is_fingerprint_key_role,
@@ -29,6 +31,12 @@ from app.services.semantic_roles import (
 
 _NULL_LIKE = null_tokens_lower()
 _LEADING_ZERO_INT_RE = re.compile(r"^0+(\d+)$")
+
+
+def is_dictionary_like_path(name_or_path: str | None) -> bool:
+    """Return True for configured schema/glossary/data-dictionary files."""
+    stem = Path(str(name_or_path or "")).stem.lower()
+    return bool(stem and any(token in stem for token in glossary_filename_tokens()))
 
 
 @dataclass(frozen=True)
@@ -161,6 +169,17 @@ def build_registry_candidates(meta: FileMetadata) -> list[RegistryCandidate]:
 
 async def register_file_key_fingerprints(file_id: str, db: AsyncSession) -> int:
     """Upsert all candidate key columns for one file into column_key_registry."""
+    file = await db.get(File, file_id)
+    if file and is_dictionary_like_path(file.name):
+        await db.execute(delete(ColumnKeyRegistry).where(ColumnKeyRegistry.file_id == file_id))
+        await db.commit()
+        ingest_logger.info(
+            "column_key_registry_skipped",
+            file_id=file_id,
+            reason="dictionary_file_not_joinable",
+        )
+        return 0
+
     result = await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
     meta = result.scalar_one_or_none()
     if not meta or not meta.container_id:
@@ -246,6 +265,8 @@ async def find_fingerprint_matches(file_id: str, db: AsyncSession) -> list[dict]
     policy = get_semantic_policy()
     matches: list[dict] = []
     for row in rows:
+        if is_dictionary_like_path(row["file_a_path"]) or is_dictionary_like_path(row["file_b_path"]):
+            continue
         overlap_count = len(row["overlap_values"] or [])
         min_cardinality = max(min(row["card_a"] or 0, row["card_b"] or 0), 1)
         overlap_pct = overlap_count / min_cardinality

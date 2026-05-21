@@ -67,6 +67,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logger import chat_logger
 from app.models.file_metadata import FileMetadata
 from app.models.semantic_layer import SemanticRelationship
+from app.services.relationship_index import is_dictionary_like_path
 from app.services.semantic_policy import get_semantic_policy
 from app.services.semantic_roles import (
     dynamic_role_label,
@@ -249,6 +250,11 @@ async def _plan_inner(
 ) -> ExecutionPlan:
     result = ExecutionPlan()
     policy = get_semantic_policy()
+
+    candidate_files = [
+        f for f in candidate_files
+        if not is_dictionary_like_path(f.get("blob_path") or f.get("name"))
+    ]
 
     if not candidate_files:
         result.fallback_reason = "no_candidate_files"

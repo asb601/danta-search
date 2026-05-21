@@ -9,13 +9,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.file_relationship import FileRelationship
 from app.models.semantic_layer import SemanticRelationship
+from app.services.relationship_index import is_dictionary_like_path
 
 
 def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
     """Return extract_relations tool bound to the current tenant catalog."""
     by_file_id = {f.get("file_id"): f for f in catalog if f.get("file_id")}
     by_blob = {f.get("blob_path"): f for f in catalog if f.get("blob_path")}
-    allowed_file_ids = set(by_file_id.keys())
+    allowed_file_ids = {
+        file_id
+        for file_id, entry in by_file_id.items()
+        if not is_dictionary_like_path(entry.get("blob_path") or entry.get("name"))
+    }
 
     def _context(file_id: str | None) -> dict:
         entry = by_file_id.get(file_id or "") or {}
@@ -55,12 +60,16 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
         if not scope_ids:
             return json.dumps({"relations": [], "context": {}})
 
+        def _scope_filter(model):
+            if not selected_ids:
+                return model.file_a_id.in_(allowed_file_ids) | model.file_b_id.in_(allowed_file_ids)
+            if len(selected_ids) == 1:
+                return model.file_a_id.in_(selected_ids) | model.file_b_id.in_(selected_ids)
+            return model.file_a_id.in_(selected_ids) & model.file_b_id.in_(selected_ids)
+
         semantic_q = (
             select(SemanticRelationship)
-            .where(
-                SemanticRelationship.file_a_id.in_(scope_ids)
-                | SemanticRelationship.file_b_id.in_(scope_ids)
-            )
+            .where(_scope_filter(SemanticRelationship))
             .where(SemanticRelationship.status == "active")
             .order_by(SemanticRelationship.confidence_score.desc())
             .limit(50)
@@ -101,10 +110,7 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
         if not relations:
             raw_q = (
                 select(FileRelationship)
-                .where(
-                    FileRelationship.file_a_id.in_(scope_ids)
-                    | FileRelationship.file_b_id.in_(scope_ids)
-                )
+                .where(_scope_filter(FileRelationship))
                 .order_by(FileRelationship.confidence_score.desc())
                 .limit(50)
             )

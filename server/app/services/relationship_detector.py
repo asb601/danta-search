@@ -108,6 +108,7 @@ async def detect_relationships(
     try:
         await register_file_key_fingerprints(file_id, db)
     except Exception as exc:
+        await db.rollback()
         ingest_logger.warning(
             "column_key_registry_failed",
             file_id=file_id,
@@ -120,6 +121,7 @@ async def detect_relationships(
     try:
         matches = await find_fingerprint_matches(file_id, db)
     except Exception as exc:
+        await db.rollback()
         matches = []
         ingest_logger.warning(
             "relationship_detector",

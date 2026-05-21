@@ -11,7 +11,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ai_client import generate_file_description
@@ -513,6 +513,31 @@ async def relationship_stage(payload: Payload) -> Payload:
         ).scalar_one_or_none()
         if not file or not metadata:
             raise RuntimeError("file or metadata missing before relationship stage")
+
+        from app.models.column_key_registry import ColumnKeyRegistry  # noqa: PLC0415
+        from app.models.file_relationship import FileRelationship  # noqa: PLC0415
+        from app.models.semantic_layer import SemanticRelationship  # noqa: PLC0415
+        from app.services.relationship_index import is_dictionary_like_path  # noqa: PLC0415
+
+        if is_dictionary_like_path(file.name):
+            await db.execute(delete(SemanticRelationship).where(
+                (SemanticRelationship.file_a_id == file_id) | (SemanticRelationship.file_b_id == file_id)
+            ))
+            await db.execute(delete(FileRelationship).where(
+                (FileRelationship.file_a_id == file_id) | (FileRelationship.file_b_id == file_id)
+            ))
+            await db.execute(delete(ColumnKeyRegistry).where(ColumnKeyRegistry.file_id == file_id))
+            await db.commit()
+
+            ingest_logger.info(
+                "ingest_stage",
+                stage=stage,
+                status="skipped",
+                reason="dictionary_file_not_joinable",
+                file_id=file_id,
+                duration_ms=_ms(start),
+            )
+            return _next(payload, stage=stage, relationships_created=0)
 
         from app.services.relationship_detector import detect_relationships  # noqa: PLC0415
 

@@ -67,12 +67,14 @@ Container: {container_name}
 4. search_catalog      \u2014 Searches the FULL catalog ({total_file_count} files). Use whenever the
                         shortlist above doesn't obviously contain the file you need.
 5. inspect_data_format \u2014 Preview raw rows from a specific file.
-6. summarise_dataframe \u2014 Compute stats on the last SQL result.7. extract_relations   — Returns approved join relationships between files (shared columns,
+6. summarise_dataframe \u2014 Compute stats on the last SQL result.
+7. extract_relations   — Returns approved join relationships between files (join columns,
                         join type, confidence score). Call this BEFORE writing any SQL that
-                        JOINs two or more files. Use the returned join columns and join type
+                        JOINs two or more files. Use the returned join_on columns and join_type
                         directly in your SQL — do NOT guess join keys from column names alone.
+
 --- HOW TO WORK ---
-Four principles. Apply them to every situation.
+Five principles. Apply them to every situation.
 
 1. VERIFY BEFORE YOU ACT
    Before writing any SQL, call get_file_schema on the target file (and
@@ -83,10 +85,11 @@ Four principles. Apply them to every situation.
 
 2. BEFORE ANY MULTI-FILE JOIN, call extract_relations first.
    Pass the blob paths of the files you intend to join. Use the returned
-   shared_column and join_type directly. Approved relationships are confirmed
-   by value overlap — trust them over column-name guesses. If extract_relations
-   returns no relationships, fall back to inspecting columns manually, but note
-   the join is unverified.
+    join_on.file_a_col, join_on.file_b_col, and join_type from approved
+    relationships directly. Candidate or technical_candidate relationships are
+    only evidence: validate them with schema/value inspection before joining.
+    If extract_relations returns no relationships, fall back to inspecting
+    columns manually, but note the join is unverified.
 
 3. EVIDENCE OVER ASSUMPTION
    If a query returns 0 rows, a JOIN fails, or a column is missing: investigate
