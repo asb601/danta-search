@@ -850,7 +850,7 @@ function PipelinePanel() {
         </div>
       )}
 
-      <div ref={containerRef} className="flex-1 overflow-y-auto bg-[#0d1117]">
+      <div ref={containerRef} className="flex-1 overflow-y-auto">
         {filtered.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
             <Activity className="w-8 h-8" />
@@ -1272,7 +1272,7 @@ function IngestionPanel() {
         </div>
       )}
 
-      <div ref={containerRef} className="flex-1 overflow-y-auto bg-[#0d1117]">
+      <div ref={containerRef} className="flex-1 overflow-y-auto">
         {filtered.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
             <Upload className="w-8 h-8" />
@@ -1443,7 +1443,7 @@ function AuditPanel() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto bg-[#0d1117]">
+      <div className="flex-1 overflow-y-auto">
         {rows.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
             <Activity className="w-8 h-8" />
