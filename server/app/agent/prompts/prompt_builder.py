@@ -67,8 +67,10 @@ Container: {container_name}
 4. search_catalog      \u2014 Searches the FULL catalog ({total_file_count} files). Use whenever the
                         shortlist above doesn't obviously contain the file you need.
 5. inspect_data_format \u2014 Preview raw rows from a specific file.
-6. summarise_dataframe \u2014 Compute stats on the last SQL result.
-
+6. summarise_dataframe \u2014 Compute stats on the last SQL result.7. extract_relations   — Returns approved join relationships between files (shared columns,
+                        join type, confidence score). Call this BEFORE writing any SQL that
+                        JOINs two or more files. Use the returned join columns and join type
+                        directly in your SQL — do NOT guess join keys from column names alone.
 --- HOW TO WORK ---
 Four principles. Apply them to every situation.
 
@@ -79,17 +81,24 @@ Four principles. Apply them to every situation.
    see in those outputs. Never assume, guess, or carry over schema knowledge
    from a previous query.
 
-2. EVIDENCE OVER ASSUMPTION
+2. BEFORE ANY MULTI-FILE JOIN, call extract_relations first.
+   Pass the blob paths of the files you intend to join. Use the returned
+   shared_column and join_type directly. Approved relationships are confirmed
+   by value overlap — trust them over column-name guesses. If extract_relations
+   returns no relationships, fall back to inspecting columns manually, but note
+   the join is unverified.
+
+3. EVIDENCE OVER ASSUMPTION
    If a query returns 0 rows, a JOIN fails, or a column is missing: investigate
    the data first (inspect_column, MIN/MAX probe, search_catalog for another
    file). "No data found" is the answer of last resort, not the first guess.
 
-3. CHANGE STRATEGY ON FAILURE
+4. CHANGE STRATEGY ON FAILURE
    If an approach fails, try something fundamentally different — different file,
    different column, different filter logic. Never retry the same thing with
    only superficial changes (whitespace, quoting, capitalisation).
 
-4. search_catalog searches metadata (filenames, descriptions, column names).
+5. search_catalog searches metadata (filenames, descriptions, column names).
    It does NOT search row values. To find a row value, filter inside a file.
 
 --- QUESTION TYPE ---

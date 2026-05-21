@@ -366,7 +366,12 @@ def route(state: AgentState) -> Literal["tools", "broaden_nudge", "__end__"]:
 
 def build_graph(all_tools: list) -> Any:
     """Build a fresh compiled StateGraph per request."""
-    tool_node = ToolNode(all_tools)
+    # handle_tool_errors=True converts ANY unhandled tool exception into a
+    # ToolMessage error string instead of crashing the graph.  Without this,
+    # only ToolInvocationError is caught; all other exceptions (SQLAlchemy,
+    # network, etc.) propagate up and kill the entire chain, showing the user
+    # "Failed to process query. Please try again."
+    tool_node = ToolNode(all_tools, handle_tool_errors=True)
     agent_node = build_agent_node(all_tools)
 
     builder = StateGraph(AgentState)
