@@ -118,9 +118,33 @@ def _run_stage(
                 "nonfatal_errors": nonfatal_errors,
             }
 
+        from app.core.logger import ingest_logger
+        import traceback as _tb
+
+        error_str = str(exc)[:500]
+        exc_type = type(exc).__name__
+        ingest_logger.warning(
+            "ingest_stage_fatal_error",
+            stage=stage_value,
+            file_id=file_id,
+            error=error_str,
+            exc_type=exc_type,
+            attempt=task.request.retries + 1,
+            max_retries=task.max_retries,
+            traceback=_tb.format_exc()[-1000:],
+        )
+
         if task.request.retries >= task.max_retries:
             from app.services.ingestion_stages import mark_ingestion_failed
 
+            ingest_logger.error(
+                "ingest_stage_fatal_exhausted",
+                stage=stage_value,
+                file_id=file_id,
+                error=error_str,
+                exc_type=exc_type,
+                attempts=task.request.retries + 1,
+            )
             _run_async(mark_ingestion_failed(file_id, stage_value, exc))
             return _failed_payload(file_id, stage_value, exc, task.request.retries)
         raise task.retry(exc=exc)
