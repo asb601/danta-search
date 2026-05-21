@@ -529,7 +529,9 @@ async def _build_agent_context(
     ))
     # search_catalog uses the lean full catalog so it can find any file
     # without paying the heavy-field cost.
-    all_tools.extend(build_catalog_tools(full_catalog, all_parquet_paths, container_name))
+    # db is passed so get_file_schema can fetch real column types from Postgres
+    # when the lean catalog entry lacks them (i.e. file not in hydration shortlist).
+    all_tools.extend(build_catalog_tools(full_catalog, all_parquet_paths, container_name, db))
     # inspect_column — bound to full catalog with optional schema dict enrichment.
     # For non-hydrated files, falls back to a bounded SQL probe.
     # When field_definitions is non-empty, automatically appends business meaning

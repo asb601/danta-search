@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 from langchain_core.tools import tool
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.search_normalization import (
     is_lookup_file,
@@ -51,6 +53,7 @@ def build_catalog_tools(
     catalog: list[dict],
     parquet_paths: dict[str, str] | None = None,
     container_name: str = "",
+    db: AsyncSession | None = None,
 ) -> list:
     """Return search_catalog and get_file_schema tools bound to the catalog."""
 
@@ -149,7 +152,7 @@ def build_catalog_tools(
         return json.dumps({"files": results, "total": len(results)}, default=str)
 
     @tool
-    def get_file_schema(blob_path: str) -> str:
+    async def get_file_schema(blob_path: str) -> str:
         """Get the full column schema, sample values, and data types for a specific file.
         Use this to understand exact column names and types before writing SQL."""
         # Exact match first
@@ -196,8 +199,11 @@ def build_catalog_tools(
                 "hint": "Use one of the blob_path values above, or call search_catalog to find the right file.",
             })
 
-        cols = []
         sample_preview_count = max(0, int(get_settings().INGEST_LOG_SAMPLE_ITEMS))
+
+        # Prefer the heavy columns_info already merged into the catalog entry
+        # (present when the file was in the retrieval shortlist for this request).
+        cols = []
         for c in (match.get("columns_info") or []):
             cols.append({
                 "name": c["name"],
@@ -206,10 +212,36 @@ def build_catalog_tools(
                 "unique_count": len(c.get("unique_values", [])),
             })
 
-        # If columns_info wasn't hydrated for this file (file outside the
-        # request shortlist), fall back to the lean column_names list and
-        # tell the agent to use inspect_column for any column it needs to
-        # filter on. Names alone are still enough to pick a column.
+        # If the catalog entry is lean (types missing/all unknown), fetch
+        # columns_info directly from Postgres — it was stored at ingest time.
+        types_known = any(c["type"] != "unknown" for c in cols)
+        if (not cols or not types_known) and db and match.get("file_id"):
+            try:
+                from app.models.file_metadata import FileMetadata  # noqa: PLC0415
+                meta_row = (
+                    await db.execute(
+                        select(FileMetadata).where(FileMetadata.file_id == match["file_id"])
+                    )
+                ).scalar_one_or_none()
+                if meta_row and meta_row.columns_info:
+                    cols = [
+                        {
+                            "name": c["name"],
+                            "type": c.get("type", "unknown"),
+                            "sample_values": (c.get("sample_values") or [])[:sample_preview_count],
+                            "unique_count": len(c.get("unique_values") or []),
+                        }
+                        for c in meta_row.columns_info
+                        if isinstance(c, dict) and c.get("name")
+                    ]
+            except Exception as _exc:
+                pipeline_logger.warning(
+                    "get_file_schema_db_fallback_failed",
+                    file_id=match.get("file_id"),
+                    error=str(_exc)[:200],
+                )
+
+        # Last resort: lean column_names list (names only, no types).
         if not cols:
             for name in (match.get("column_names") or []):
                 cols.append({
