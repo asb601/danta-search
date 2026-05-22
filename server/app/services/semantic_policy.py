@@ -58,6 +58,12 @@ class SemanticPolicy:
     planner_missing_join_penalty: float = 0.15
     planner_vague_single_file_penalty: float = 0.10
 
+    min_overlap_fingerprint_count: int = 2
+    relation_direct_limit: int = 20
+    relation_max_hops: int = 4
+    relation_max_paths: int = 8
+    relation_expand_edge_limit: int = 400
+
 
 def _env_name(field_name: str) -> str:
     return f"GCHAT_SEMANTIC_{field_name.upper()}"

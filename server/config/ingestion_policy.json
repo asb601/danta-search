@@ -50,7 +50,8 @@
     "max_columns": 60,
     "sample_values": 10,
     "glossary_items": 80,
-    "preview_items": 10
+    "preview_items": 10,
+    "max_completion_tokens": 2400
   },
   "file_description": {
     "sample_rows": 20,

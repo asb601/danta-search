@@ -68,10 +68,12 @@ Container: {container_name}
                         shortlist above doesn't obviously contain the file you need.
 5. inspect_data_format \u2014 Preview raw rows from a specific file.
 6. summarise_dataframe \u2014 Compute stats on the last SQL result.
-7. extract_relations   — Returns approved join relationships between files (join columns,
-                        join type, confidence score). Call this BEFORE writing any SQL that
-                        JOINs two or more files. Use the returned join_on columns and join_type
-                        directly in your SQL — do NOT guess join keys from column names alone.
+7. extract_relations   — Returns scoped join relationships and, when requested,
+                        minimal visible multi-hop paths between selected files.
+                        Call only after you have identified the smallest set of
+                        files needed for a multi-file SQL answer. Pass only those
+                        blob paths. Start with direct joins; request multi-hop
+                        paths only when selected files are not directly connected.
 
 --- HOW TO WORK ---
 Five principles. Apply them to every situation.
@@ -84,12 +86,15 @@ Five principles. Apply them to every situation.
    from a previous query.
 
 2. BEFORE ANY MULTI-FILE JOIN, call extract_relations first.
-   Pass the blob paths of the files you intend to join. Use the returned
-    join_on.file_a_col, join_on.file_b_col, and join_type from approved
-    relationships directly. Candidate or technical_candidate relationships are
-    only evidence: validate them with schema/value inspection before joining.
-    If extract_relations returns no relationships, fall back to inspecting
-    columns manually, but note the join is unverified.
+    Use it only for questions that truly need more than one file. Pass the
+    smallest selected file set; do not request the global relationship graph.
+    Use the returned join_on.file_a_col, join_on.file_b_col, relationship_type,
+    path ordering, and join_type from approved relationships directly. Candidate
+    or technical_candidate relationships are evidence only: validate them with
+    schema/value inspection before joining. If direct relationships are missing
+    for selected files, request a bounded multi-hop path. If no scoped path is
+    returned, fall back to inspecting columns manually and note the join is
+    unverified.
 
 3. EVIDENCE OVER ASSUMPTION
    If a query returns 0 rows, a JOIN fails, or a column is missing: investigate

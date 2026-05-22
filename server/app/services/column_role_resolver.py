@@ -94,6 +94,7 @@ async def _call_llm(
     max_columns = max(1, int(settings.INGEST_ROLE_RESOLVER_MAX_COLUMNS))
     sample_values = max(0, int(settings.INGEST_ROLE_RESOLVER_SAMPLE_VALUES))
     glossary_items = max(0, int(settings.INGEST_ROLE_RESOLVER_GLOSSARY_ITEMS))
+    max_completion_tokens = max(600, int(settings.INGEST_ROLE_RESOLVER_MAX_COMPLETION_TOKENS))
     null_values = null_tokens_lower()
 
     col_profiles = []
@@ -169,6 +170,7 @@ Rules:
     def _run() -> dict[str, str]:
         client, deployment = get_client()
         prompt_tokens = count_tokens(prompt, deployment)
+        completion_budget = max(600, min(max_completion_tokens, len(col_profiles) * 40))
         t = time.perf_counter()
 
         import openai as _openai  # noqa: PLC0415
@@ -179,7 +181,7 @@ Rules:
                 response = client.chat.completions.create(
                     model=deployment,
                     messages=[{"role": "user", "content": prompt}],
-                    max_completion_tokens=600,
+                    max_completion_tokens=completion_budget,
                     temperature=0,
                 )
                 break
@@ -217,7 +219,12 @@ Rules:
             prompt_tokens=p_tok,
             completion_tokens=c_tok,
             duration_ms=duration,
-            extra={"filename": filename, "resolved": len(filtered), "total": len(col_profiles)},
+            extra={
+                "filename": filename,
+                "resolved": len(filtered),
+                "total": len(col_profiles),
+                "completion_budget": completion_budget,
+            },
         )
         return filtered
 

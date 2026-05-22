@@ -50,6 +50,7 @@ LEGACY_POLICY_PATHS: dict[str, tuple[str, ...]] = {
     "INGEST_ROLE_RESOLVER_SAMPLE_VALUES": ("role_resolver", "sample_values"),
     "INGEST_ROLE_RESOLVER_GLOSSARY_ITEMS": ("role_resolver", "glossary_items"),
     "INGEST_ROLE_RESOLVER_PREVIEW_ITEMS": ("role_resolver", "preview_items"),
+    "INGEST_ROLE_RESOLVER_MAX_COMPLETION_TOKENS": ("role_resolver", "max_completion_tokens"),
     "INGEST_FILE_DESCRIPTION_SAMPLE_ROWS": ("file_description", "sample_rows"),
     "INGEST_FILE_DESCRIPTION_MAX_COMPLETION_TOKENS": ("file_description", "max_completion_tokens"),
     "INGEST_LLM_RETRY_DELAYS_SECONDS": ("llm", "retry_delays_seconds"),

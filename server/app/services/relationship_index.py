@@ -256,9 +256,6 @@ async def find_fingerprint_matches(file_id: str, db: AsyncSession) -> list[dict]
           ON other.container_id = this_cols.container_id
          AND other.file_id != this_cols.file_id
          AND other.value_fingerprints && this_cols.value_fingerprints
-         AND (other.semantic_role = this_cols.semantic_role
-              OR other.semantic_role IS NULL
-              OR this_cols.semantic_role IS NULL)
         """
     )
     rows = (await db.execute(sql, {"file_id": file_id})).mappings().all()
@@ -268,6 +265,8 @@ async def find_fingerprint_matches(file_id: str, db: AsyncSession) -> list[dict]
         if is_dictionary_like_path(row["file_a_path"]) or is_dictionary_like_path(row["file_b_path"]):
             continue
         overlap_count = len(row["overlap_values"] or [])
+        if overlap_count < policy.min_overlap_fingerprint_count:
+            continue
         min_cardinality = max(min(row["card_a"] or 0, row["card_b"] or 0), 1)
         overlap_pct = overlap_count / min_cardinality
         if overlap_pct < policy.min_value_overlap:
