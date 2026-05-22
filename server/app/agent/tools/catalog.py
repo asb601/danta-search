@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from langchain_core.tools import tool
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.search_normalization import (
@@ -201,44 +201,94 @@ def build_catalog_tools(
 
         sample_preview_count = max(0, int(get_settings().INGEST_LOG_SAMPLE_ITEMS))
 
+        def _normalize_col(c: dict) -> dict:
+            """Map DB columns_info format (Parquet/Arrow keys) to the schema tool format.
+
+            The ingest pipeline stores columns_info with Parquet/Arrow field names:
+              type        → Arrow dtype string e.g. 'dictionary<values=string,...>', 'int64', 'date32[day]'
+              top_values  → list of most-frequent values  (sample equivalent)
+              distinct_count → integer cardinality          (unique_count equivalent)
+            The old duckdb_client format used 'sample_values' / 'unique_values'.
+            We support both shapes here.
+            """
+            raw_type = c.get("type", "unknown")
+            # Normalise verbose Arrow/Parquet type strings to readable labels.
+            if raw_type.startswith("dictionary<"):
+                norm_type = "text"
+            elif raw_type.startswith("date"):
+                norm_type = "date"
+            elif raw_type in ("int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"):
+                norm_type = "integer"
+            elif raw_type in ("float", "float32", "float64", "double"):
+                norm_type = "float"
+            elif raw_type.startswith("timestamp"):
+                norm_type = "datetime"
+            elif raw_type == "bool" or raw_type == "boolean":
+                norm_type = "boolean"
+            elif raw_type in ("object", "string", "utf8", "large_utf8"):
+                norm_type = "text"
+            else:
+                norm_type = raw_type  # keep as-is if unrecognised
+            # sample values: prefer 'sample_values' (old format), fall back to
+            # 'top_values' (new ingest format).  For numeric/date columns that
+            # only have min/max, surface those as a range hint so the agent
+            # understands the value space without calling inspect_column.
+            samples = c.get("sample_values") or c.get("top_values") or []
+            if not samples and (c.get("min") is not None or c.get("max") is not None):
+                mn, mx = c.get("min"), c.get("max")
+                samples = [str(mn)] if mn == mx else [str(mn), str(mx)]
+            samples = samples[:sample_preview_count]
+            # unique count: prefer 'unique_values' list length, fall back to 'distinct_count'
+            uvals = c.get("unique_values")
+            if uvals is not None:
+                ucount = len(uvals)
+            else:
+                ucount = int(c.get("distinct_count") or 0)
+            return {
+                "name": c["name"],
+                "type": norm_type,
+                "sample_values": [str(v) for v in samples],
+                "unique_count": ucount,
+            }
+
         # Prefer the heavy columns_info already merged into the catalog entry
         # (present when the file was in the retrieval shortlist for this request).
-        cols = []
-        for c in (match.get("columns_info") or []):
-            cols.append({
-                "name": c["name"],
-                "type": c.get("type", "unknown"),
-                "sample_values": c.get("sample_values", [])[:sample_preview_count],
-                "unique_count": len(c.get("unique_values", [])),
-            })
+        cols = [
+            _normalize_col(c)
+            for c in (match.get("columns_info") or [])
+            if isinstance(c, dict) and c.get("name")
+        ]
 
         # If the catalog entry is lean (types missing/all unknown), fetch
         # columns_info directly from Postgres — it was stored at ingest time.
-        types_known = any(c["type"] != "unknown" for c in cols)
+        # Use a raw text() query instead of ORM select to avoid greenlet/session
+        # state issues that can arise when the shared request session has already
+        # executed ORM queries (hydration, planner, etc.).
+        types_known = any(c["type"] not in ("unknown", "") for c in cols)
         if (not cols or not types_known) and db and match.get("file_id"):
             try:
-                from app.models.file_metadata import FileMetadata  # noqa: PLC0415
-                meta_row = (
-                    await db.execute(
-                        select(FileMetadata).where(FileMetadata.file_id == match["file_id"])
-                    )
-                ).scalar_one_or_none()
-                if meta_row and meta_row.columns_info:
+                result = await db.execute(
+                    text("SELECT columns_info FROM file_metadata WHERE file_id = :fid"),
+                    {"fid": match["file_id"]},
+                )
+                raw = result.scalar_one_or_none()
+                if raw:
                     cols = [
-                        {
-                            "name": c["name"],
-                            "type": c.get("type", "unknown"),
-                            "sample_values": (c.get("sample_values") or [])[:sample_preview_count],
-                            "unique_count": len(c.get("unique_values") or []),
-                        }
-                        for c in meta_row.columns_info
+                        _normalize_col(c)
+                        for c in raw
                         if isinstance(c, dict) and c.get("name")
                     ]
+                pipeline_logger.info(
+                    "get_file_schema_db_fallback",
+                    file_id=match["file_id"],
+                    cols_found=len(cols),
+                    raw_is_none=raw is None,
+                )
             except Exception as _exc:
                 pipeline_logger.warning(
                     "get_file_schema_db_fallback_failed",
                     file_id=match.get("file_id"),
-                    error=str(_exc)[:200],
+                    error=str(_exc)[:300],
                 )
 
         # Last resort: lean column_names list (names only, no types).
