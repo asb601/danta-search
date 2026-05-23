@@ -267,9 +267,15 @@ def build_catalog_tools(
         types_known = any(c["type"] not in ("unknown", "") for c in cols)
         if (not cols or not types_known) and db and match.get("file_id"):
             try:
+                # Rollback any pending transaction state left by earlier ORM
+                # operations (hydration, catalog load) in the same session.
+                # In SQLAlchemy asyncio, calling rollback() when there is no
+                # pending rollback is a no-op — it just ends the implicit
+                # transaction so the next execute() starts fresh.
+                await db.rollback()
                 result = await db.execute(
                     text("SELECT columns_info FROM file_metadata WHERE file_id = :fid"),
-                    {"fid": match["file_id"]},
+                    {"fid": str(match["file_id"])},
                 )
                 raw = result.scalar_one_or_none()
                 if raw:
@@ -285,10 +291,12 @@ def build_catalog_tools(
                     raw_is_none=raw is None,
                 )
             except Exception as _exc:
+                import traceback as _tb
                 pipeline_logger.warning(
                     "get_file_schema_db_fallback_failed",
                     file_id=match.get("file_id"),
                     error=str(_exc)[:300],
+                    traceback=_tb.format_exc()[-600:],
                 )
 
         # Last resort: lean column_names list (names only, no types).
