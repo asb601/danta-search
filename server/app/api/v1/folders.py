@@ -79,7 +79,7 @@ async def get_folder_contents(
         if is_root:
             # Root-level — must be explicitly tagged with an allowed domain.
             folder_stmt = folder_stmt.where(
-                Folder.domain_tag.in_(user.allowed_domains) 
+                Folder.domain_tag.in_(user.allowed_domains)
             )
         else:
             # Non-root — untagged subfolders inherit the parent's domain (allowed)

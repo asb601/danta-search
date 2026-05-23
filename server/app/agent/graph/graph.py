@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.catalog_cache import invalidate_catalog_cache, load_catalog  # re-export
 from app.agent.catalog_hydration import hydrate_files, merge_hydrated
 from app.agent.graph.graph_builder import build_graph
-from app.agent.llm import get_llm
+from app.agent.llm import get_llm_mini
 from app.agent.prompts.prompt_builder import build_system_prompt
 from app.agent.search_normalization import tokenize_search_query
 from app.retrieval.orchestrator import retrieve_with_scores
@@ -166,7 +166,7 @@ async def _try_planner(
             "Write a concise, precise analytical response. Include key totals, "
             "top values, and observations. Use numbers. Be direct."
         )
-        llm_resp = await get_llm().ainvoke([
+        llm_resp = await get_llm_mini().ainvoke([
             SystemMessage(content=(
                 "You are an enterprise ERP data analyst. Answer the user's question "
                 "based ONLY on the data provided. Be specific with numbers."
@@ -933,7 +933,7 @@ async def run_agent_query_stream(
             )
         if _context_parts:
             try:
-                _synth_resp = await get_llm().ainvoke([
+                _synth_resp = await get_llm_mini().ainvoke([
                     SystemMessage(content=(
                         "You are an ERP data analyst. The user asked a question and the "
                         "system executed queries to find the answer. Write a clear, direct "

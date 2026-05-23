@@ -15,7 +15,7 @@ import tiktoken
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.llm import get_llm
+from app.agent.llm import get_llm_mini
 from app.core.logger import chat_logger
 from app.models.conversation import Conversation, Message
 
@@ -227,7 +227,7 @@ async def maybe_regenerate_summary(
     prompt += f"Messages to incorporate:\n{conversation_text}"
 
     try:
-        llm = get_llm()
+        llm = get_llm_mini()
         response = await _call_llm_simple(llm, prompt, SUMMARY_MODEL_MAX_TOKENS)
         conv.summary = response.strip()
         conv.token_count = sum(m.token_count for m in all_msgs)
@@ -275,7 +275,7 @@ async def maybe_generate_title(
     )
 
     try:
-        llm = get_llm()
+        llm = get_llm_mini()
         title = await _call_llm_simple(llm, prompt, TITLE_MODEL_MAX_TOKENS)
         title = title.strip().strip('"').strip("'")[:200]
         if title:
