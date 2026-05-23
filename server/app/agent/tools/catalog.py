@@ -265,19 +265,17 @@ def build_catalog_tools(
         # state issues that can arise when the shared request session has already
         # executed ORM queries (hydration, planner, etc.).
         types_known = any(c["type"] not in ("unknown", "") for c in cols)
-        if (not cols or not types_known) and db and match.get("file_id"):
+        if (not cols or not types_known) and match.get("file_id"):
             try:
-                # Rollback any pending transaction state left by earlier ORM
-                # operations (hydration, catalog load) in the same session.
-                # In SQLAlchemy asyncio, calling rollback() when there is no
-                # pending rollback is a no-op — it just ends the implicit
-                # transaction so the next execute() starts fresh.
-                await db.rollback()
-                result = await db.execute(
-                    text("SELECT columns_info FROM file_metadata WHERE file_id = :fid"),
-                    {"fid": str(match["file_id"])},
-                )
-                raw = result.scalar_one_or_none()
+                # Use a fresh isolated session so concurrent tool calls don't
+                # race on the shared request session (rollback/execute conflicts).
+                from app.core.database import async_session as _session_factory
+                async with _session_factory() as _fresh_db:
+                    result = await _fresh_db.execute(
+                        text("SELECT columns_info FROM file_metadata WHERE file_id = :fid"),
+                        {"fid": str(match["file_id"])},
+                    )
+                    raw = result.scalar_one_or_none()
                 if raw:
                     cols = [
                         _normalize_col(c)

@@ -26,6 +26,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cost_tracker import get_session_summary
+from app.core.response_cache import cache_stats, clear_cache
 from app.core.config import get_settings
 from app.core.database import async_session, get_db
 from app.core.logger import ingest_logger
@@ -231,6 +232,23 @@ async def ingestion_health(
 @router.get("/cost-summary")
 async def cost_summary(current_user: User = Depends(get_current_user)) -> dict:
     return get_session_summary()
+
+
+@router.get("/cache/stats")
+async def response_cache_stats(admin: User = Depends(require_admin)) -> dict:
+    """Return live count of in-process response-cache entries."""
+    return cache_stats()
+
+
+@router.post("/cache/clear")
+async def response_cache_clear(admin: User = Depends(require_admin)) -> dict:
+    """Flush the entire in-process response cache.
+
+    Use this after deploying a bug-fix that may have caused incorrect answers
+    to be stored, or when you want to force fresh agent runs for all queries.
+    """
+    clear_cache()
+    return {"cleared": True, "message": "Response cache flushed."}
 
 
 # ── Re-ingest all files ──────────────────────────────────────────────────────

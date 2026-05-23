@@ -25,6 +25,9 @@ from app.models.conversation import Conversation, Message
 from app.models.user import User
 from app.services.context_service import build_conversation_context, count_tokens, get_recent_files_used
 from app.services.audit_log import record_audit_event_safe
+import structlog as _structlog
+
+_pipeline_log = _structlog.get_logger("ai_pipeline")
 
 router = APIRouter()
 
@@ -147,6 +150,14 @@ async def chat_message_stream(
         # Serve from cache — emit full answer as a single token burst, then done.
         if cached is not None:
             answer_text = cached.get("answer", "")
+            _pipeline_log.info(
+                "response_cache_hit",
+                user_id=str(user.id),
+                conversation_id=str(conv_id),
+                query_preview=query[:200],
+                container_id=effective_container_id or "default",
+                answer_preview=answer_text[:120],
+            )
             for chunk in (answer_text[i:i+80] for i in range(0, len(answer_text), 80)):
                 yield f"data: {_json.dumps({'event': 'token', 'content': chunk})}\n\n"
             cached["conversation_id"] = conv_id

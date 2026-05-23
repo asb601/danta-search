@@ -64,6 +64,18 @@ _HOLLOW_PHRASES: tuple[str, ...] = (
     "please try again",
     "i apologize",
     "unfortunately",
+    # False-negative "ran but found nothing" answers — risky to cache because a
+    # schema/tool bug can cause the agent to incorrectly report no data exists.
+    # Re-running these is cheap; caching a wrong "empty" answer is expensive.
+    "found no ",
+    "no records found",
+    "no matching records",
+    "returned no results",
+    "yielded no results",
+    "no open gl",
+    "no line items",
+    "no transactions found",
+    "no documents found",
 )
 _MIN_ANSWER_TOKENS = 15  # answers shorter than this are too thin to be worth caching
 
