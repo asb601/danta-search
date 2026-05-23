@@ -1,9 +1,8 @@
 """Azure OpenAI LangChain clients — thread-safe singletons.
 
 Two deployments:
-  get_llm()       → gpt-4o      (primary, used on turn 1)
-  get_llm_mini()  → gpt-4o-mini (cheaper, used on follow-up turns 2+;
-                                   graph_builder falls back to get_llm() on RateLimitError)
+  get_llm()       → gpt-4o      (default, used everywhere)
+  get_llm_mini()  → gpt-4o-mini (available for cost-optimised paths if needed)
 """
 from __future__ import annotations
 
