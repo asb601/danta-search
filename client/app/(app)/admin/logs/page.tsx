@@ -1250,11 +1250,12 @@ function statusClass(status: number | null): string {
 
 function AuditRow({ row }: { row: AuditEntry }) {
   const [expanded, setExpanded] = useState(false);
-  const req = row.request;
-  const details = row.details || {};
+  const req = row?.request;
+  const details = row?.details || {};
   const status = req?.status_code ?? null;
-  const actorLabel = row.actor.email || row.actor.user_id || "Anonymous";
-  const domain = row.domain_tag || "—";
+  const actor = row?.actor ?? {};
+  const actorLabel = actor.email || actor.user_id || "Anonymous";
+  const domain = row?.domain_tag || "—";
 
   return (
     <div
@@ -1266,14 +1267,14 @@ function AuditRow({ row }: { row: AuditEntry }) {
     >
       <div className="grid grid-cols-[84px_180px_1fr_80px_92px_24px] gap-2 items-center px-3 py-2 text-xs">
         <span className="text-[10px] text-muted-foreground font-mono">
-          {formatTimestamp(row.created_at || undefined)}
+          {formatTimestamp(row?.created_at || undefined)}
         </span>
         <div className="min-w-0">
           <p className="text-foreground truncate">{actorLabel}</p>
-          <p className="text-[10px] text-muted-foreground truncate">{row.actor.role || "—"}</p>
+          <p className="text-[10px] text-muted-foreground truncate">{actor.role || "—"}</p>
         </div>
         <div className="min-w-0">
-          <p className="font-mono text-foreground truncate">{row.event}</p>
+          <p className="font-mono text-foreground truncate">{row?.event}</p>
           <p className="font-mono text-[10px] text-muted-foreground truncate">{req?.path || "—"}</p>
         </div>
         <span className={cn("inline-flex justify-center px-1.5 py-0.5 rounded text-[10px] font-medium border", statusClass(status))}>
@@ -1286,12 +1287,12 @@ function AuditRow({ row }: { row: AuditEntry }) {
       {expanded && (
         <div className="px-3 pb-3 pl-[17rem] text-[11px]">
           <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono">
-            <span className="text-muted-foreground">role</span><span className="text-foreground">{row.actor.role || "—"}</span>
+            <span className="text-muted-foreground">role</span><span className="text-foreground">{actor.role || "—"}</span>
             <span className="text-muted-foreground">method</span><span className="text-foreground">{req?.method || "—"}</span>
             <span className="text-muted-foreground">duration</span><span className="text-foreground">{formatDuration(req?.duration_ms ?? undefined)}</span>
             <span className="text-muted-foreground">ip</span><span className="text-foreground break-all">{req?.ip_address || "—"}</span>
             <span className="text-muted-foreground">route</span><span className="text-foreground break-all">{req?.route_template || "—"}</span>
-            <span className="text-muted-foreground">file</span><span className="text-foreground break-all">{row.file_name || row.file_id || details.file_name as string || "—"}</span>
+            <span className="text-muted-foreground">file</span><span className="text-foreground break-all">{row?.file_name || row?.file_id || details.file_name as string || "—"}</span>
             <span className="text-muted-foreground">folder</span><span className="text-foreground break-all">{details.folder_name as string || details.folder_id as string || "—"}</span>
             <span className="text-muted-foreground">container</span><span className="text-foreground break-all">{details.container_id as string || "—"}</span>
             <span className="text-muted-foreground">target_user</span><span className="text-foreground break-all">{details.target_user_email as string || details.target_user_id as string || "—"}</span>
@@ -1411,7 +1412,7 @@ function AuditPanel() {
             <p className="text-sm">No audit events found</p>
           </div>
         )}
-        {rows.map((row) => <AuditRow key={row.id} row={row} />)}
+        {rows.filter((r): r is AuditEntry => r != null).map((row) => <AuditRow key={row.id} row={row} />)}
       </div>
     </div>
   );
@@ -1458,8 +1459,8 @@ export default function AdminLogsPage() {
       const data: LogResponse = await res.json();
       setLines(
         searchQuery.trim()
-          ? data.lines.map((line) => (line as { data?: LogEntry }).data || line)
-          : data.lines
+          ? (data.lines || []).map((line) => (line as { data?: LogEntry }).data || line)
+          : (data.lines || [])
       );
 
       // Scroll to bottom
