@@ -16,8 +16,6 @@ import {
   XCircle,
   Loader2,
   Activity,
-  Download,
-  Trash2,
 } from "lucide-react";
 import { apiFetch } from "@/lib/auth";
 import { useAuth } from "@/components/auth-provider";
@@ -34,8 +32,7 @@ interface LogEntry {
 }
 
 interface LogResponse {
-  file: string;
-  total_lines: number;
+  log_type: string;
   returned: number;
   lines: LogEntry[];
 }
@@ -239,17 +236,18 @@ interface FileTiming {
 interface AuditEntry {
   id: string;
   created_at: string | null;
-  event_type: string;
-  action: string;
+  log_type: string;
+  event: string;
+  level: string;
   actor: {
     user_id: string | null;
     email: string | null;
-    name: string | null;
     role: string | null;
-    is_admin: boolean;
-    allowed_domains: string[] | null;
-    organization_id: string | null;
   };
+  domain_tag: string | null;
+  trace_id: string | null;
+  file_id: string | null;
+  file_name: string | null;
   request: {
     method: string | null;
     path: string | null;
@@ -258,20 +256,8 @@ interface AuditEntry {
     duration_ms: number | null;
     ip_address: string | null;
     user_agent: string | null;
-  };
-  context: {
-    domain_tag: string | null;
-    container_id: string | null;
-    file_id: string | null;
-    file_name: string | null;
-    folder_id: string | null;
-    folder_name: string | null;
-    target_user_id: string | null;
-    target_user_email: string | null;
-    target_user_name: string | null;
-  };
+  } | null;
   details: Record<string, unknown> | null;
-  error: string | null;
 }
 
 interface AuditResponse {
@@ -740,11 +726,11 @@ function PipelinePanel() {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch(`/api/logs/pipeline.log?lines=${lines}`);
+      const res = await apiFetch(`/api/logs/ai-pipeline-events?lines=${lines}`);
       if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
       const data: LogResponse = await res.json();
       setEvents(data.lines || []);
-      setTotalLines(data.total_lines || 0);
+      setTotalLines(data.returned || 0);
       requestAnimationFrame(() => {
         if (containerRef.current) containerRef.current.scrollTop = containerRef.current.scrollHeight;
       });
@@ -997,27 +983,6 @@ function PerformancePanel() {
 
 /* ── download helper ──────────────────────────────────────────────────────────────── */
 
-async function downloadLog(filename: string): Promise<void> {
-  try {
-    const res = await apiFetch(`/api/logs/${encodeURIComponent(filename)}/download`);
-    if (!res.ok) { console.error("Download failed:", res.status); return; }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
-  } catch (e) { console.error("Download error:", e); }
-}
-
-async function clearLog(filename: string): Promise<boolean> {
-  if (!confirm(`Clear ${filename}? This will erase all current log entries.`)) return false;
-  try {
-    const res = await apiFetch(`/api/logs/${encodeURIComponent(filename)}`, { method: "DELETE" });
-    if (!res.ok) { console.error("Clear failed:", res.status); return false; }
-    return true;
-  } catch (e) { console.error("Clear error:", e); return false; }
-}
-
 /* ── Ingestion panel helpers ──────────────────────────────────────────────────── */
 
 function getIngestCfg(ev: LogEntry): { num: string; label: string; color: string } {
@@ -1200,7 +1165,7 @@ function IngestionPanel() {
       const res = await apiFetch(`/api/logs/ingest-events?lines=${lines}`);
       if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
       const data: LogResponse = await res.json();
-      setEvents(data.lines || []); setTotalLines(data.total_lines || 0);
+      setEvents(data.lines || []); setTotalLines(data.returned || 0);
       requestAnimationFrame(() => {
         if (containerRef.current) containerRef.current.scrollTop = containerRef.current.scrollHeight;
       });
@@ -1252,15 +1217,6 @@ function IngestionPanel() {
           className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50">
           <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
         </button>
-        <button onClick={() => downloadLog("ai_pipeline.log")} title="Download ai_pipeline.log"
-          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors">
-          <Download className="w-3.5 h-3.5" />
-        </button>
-        <button onClick={async () => { if (await clearLog("ai_pipeline.log")) fetchEvents(); }}
-          title="Clear ai_pipeline.log"
-          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-red-600 transition-colors">
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
         <span className="text-[10px] text-muted-foreground ml-auto hidden sm:block">
           {filtered.length} / {totalLines} events
         </span>
@@ -1294,9 +1250,11 @@ function statusClass(status: number | null): string {
 
 function AuditRow({ row }: { row: AuditEntry }) {
   const [expanded, setExpanded] = useState(false);
-  const status = row.request.status_code;
-  const actorName = row.actor.name || row.actor.email || "Anonymous";
-  const domain = row.context.domain_tag || row.actor.allowed_domains?.join(", ") || "—";
+  const req = row.request;
+  const details = row.details || {};
+  const status = req?.status_code ?? null;
+  const actorLabel = row.actor.email || row.actor.user_id || "Anonymous";
+  const domain = row.domain_tag || "—";
 
   return (
     <div
@@ -1311,12 +1269,12 @@ function AuditRow({ row }: { row: AuditEntry }) {
           {formatTimestamp(row.created_at || undefined)}
         </span>
         <div className="min-w-0">
-          <p className="text-foreground truncate">{actorName}</p>
-          <p className="text-[10px] text-muted-foreground truncate">{row.actor.email || "—"}</p>
+          <p className="text-foreground truncate">{actorLabel}</p>
+          <p className="text-[10px] text-muted-foreground truncate">{row.actor.role || "—"}</p>
         </div>
         <div className="min-w-0">
-          <p className="font-mono text-foreground truncate">{row.action}</p>
-          <p className="font-mono text-[10px] text-muted-foreground truncate">{row.request.path || "—"}</p>
+          <p className="font-mono text-foreground truncate">{row.event}</p>
+          <p className="font-mono text-[10px] text-muted-foreground truncate">{req?.path || "—"}</p>
         </div>
         <span className={cn("inline-flex justify-center px-1.5 py-0.5 rounded text-[10px] font-medium border", statusClass(status))}>
           {status ?? "—"}
@@ -1329,15 +1287,18 @@ function AuditRow({ row }: { row: AuditEntry }) {
         <div className="px-3 pb-3 pl-[17rem] text-[11px]">
           <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono">
             <span className="text-muted-foreground">role</span><span className="text-foreground">{row.actor.role || "—"}</span>
-            <span className="text-muted-foreground">method</span><span className="text-foreground">{row.request.method || "—"}</span>
-            <span className="text-muted-foreground">duration</span><span className="text-foreground">{formatDuration(row.request.duration_ms ?? undefined)}</span>
-            <span className="text-muted-foreground">ip</span><span className="text-foreground break-all">{row.request.ip_address || "—"}</span>
-            <span className="text-muted-foreground">file</span><span className="text-foreground break-all">{row.context.file_name || row.context.file_id || "—"}</span>
-            <span className="text-muted-foreground">folder</span><span className="text-foreground break-all">{row.context.folder_name || row.context.folder_id || "—"}</span>
-            <span className="text-muted-foreground">container</span><span className="text-foreground break-all">{row.context.container_id || "—"}</span>
-            <span className="text-muted-foreground">target_user</span><span className="text-foreground break-all">{row.context.target_user_email || row.context.target_user_id || "—"}</span>
-            {row.error && <><span className="text-muted-foreground">error</span><span className="text-red-700 break-all">{row.error}</span></>}
-            {row.details && <><span className="text-muted-foreground">details</span><span className="text-foreground break-all">{JSON.stringify(row.details)}</span></>}
+            <span className="text-muted-foreground">method</span><span className="text-foreground">{req?.method || "—"}</span>
+            <span className="text-muted-foreground">duration</span><span className="text-foreground">{formatDuration(req?.duration_ms ?? undefined)}</span>
+            <span className="text-muted-foreground">ip</span><span className="text-foreground break-all">{req?.ip_address || "—"}</span>
+            <span className="text-muted-foreground">route</span><span className="text-foreground break-all">{req?.route_template || "—"}</span>
+            <span className="text-muted-foreground">file</span><span className="text-foreground break-all">{row.file_name || row.file_id || details.file_name as string || "—"}</span>
+            <span className="text-muted-foreground">folder</span><span className="text-foreground break-all">{details.folder_name as string || details.folder_id as string || "—"}</span>
+            <span className="text-muted-foreground">container</span><span className="text-foreground break-all">{details.container_id as string || "—"}</span>
+            <span className="text-muted-foreground">target_user</span><span className="text-foreground break-all">{details.target_user_email as string || details.target_user_id as string || "—"}</span>
+            {details.error && <><span className="text-muted-foreground">error</span><span className="text-red-700 break-all">{String(details.error)}</span></>}
+            {Object.keys(details).filter(k => !["route_template","user_agent","folder_id","folder_name","container_id","target_user_id","target_user_email","target_user_name","file_name","error"].includes(k)).length > 0 && (
+              <><span className="text-muted-foreground">details</span><span className="text-foreground break-all">{JSON.stringify(details)}</span></>
+            )}
           </div>
         </div>
       )}
@@ -1363,9 +1324,9 @@ function AuditPanel() {
     setError(null);
     try {
       const params = new URLSearchParams({ lines: String(lines) });
-      if (userFilter.trim()) params.set("user", userFilter.trim());
+      if (userFilter.trim()) params.set("email", userFilter.trim());
       if (domainFilter.trim()) params.set("domain", domainFilter.trim());
-      if (actionFilter.trim()) params.set("action", actionFilter.trim());
+      if (actionFilter.trim()) params.set("event", actionFilter.trim());
       if (pathFilter.trim()) params.set("path", pathFilter.trim());
       const res = await apiFetch(`/api/logs/audit?${params.toString()}`);
       if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
@@ -1457,19 +1418,15 @@ function AuditPanel() {
 }
 
 const LOG_FILES = [
-  { name: "ai_pipeline.log", label: "AI Pipeline", description: "Ingestion & chat" },
-  { name: "audit.log", label: "Audit", description: "Request/action audit" },
-  { name: "system.log", label: "System", description: "Upload, auth, blob" },
   { name: "llm_calls.log", label: "LLM Calls", description: "Token usage & timing" },
-  { name: "costs.log", label: "Costs", description: "Billing events" },
+  { name: "costs.log",     label: "Costs",     description: "Billing events" },
 ];
 
 export default function AdminLogsPage() {
   const { user } = useAuth();
   const [pageView, setPageView] = useState<PageView>("audit");
-  const [activeFile, setActiveFile] = useState("ai_pipeline.log");
+  const [activeFile, setActiveFile] = useState("llm_calls.log");
   const [lines, setLines] = useState<LogEntry[]>([]);
-  const [totalLines, setTotalLines] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1479,6 +1436,7 @@ export default function AdminLogsPage() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
+    // Non-admins can only see the Audit tab — redirect them if somehow on another tab.
     if (user && !user.is_admin && pageView !== "audit") setPageView("audit");
   }, [pageView, user]);
 
@@ -1503,7 +1461,6 @@ export default function AdminLogsPage() {
           ? data.lines.map((line) => (line as { data?: LogEntry }).data || line)
           : data.lines
       );
-      setTotalLines(data.total_lines);
 
       // Scroll to bottom
       requestAnimationFrame(() => {
@@ -1700,27 +1657,9 @@ export default function AdminLogsPage() {
           <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
         </button>
 
-        {/* Download current log file */}
-        <button
-          onClick={() => downloadLog(activeFile)}
-          title={`Download ${activeFile}`}
-          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <Download className="w-3.5 h-3.5" />
-        </button>
-
-        {/* Clear current log file */}
-        <button
-          onClick={async () => { if (await clearLog(activeFile)) fetchLogs(); }}
-          title={`Clear ${activeFile}`}
-          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-red-600 transition-colors"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
-
         {/* Line count */}
         <span className="text-[10px] text-muted-foreground ml-auto hidden sm:block">
-          {lines.length} / {totalLines} lines
+          {lines.length} rows
         </span>
       </div>
 
