@@ -19,7 +19,6 @@ from app.api.v1.chat_common import (
     resolve_chat_scope,
 )
 from app.core.database import async_session
-from app.core.response_cache import get_cached_response, set_cached_response
 from app.dependencies import get_db, get_current_user
 from app.models.conversation import Conversation, Message
 from app.models.user import User
@@ -140,31 +139,8 @@ async def chat_message_stream(
     except Exception:
         await db.rollback()
 
-    # ── Response cache: return immediately for recently-seen identical queries ─
-    cache_key = (effective_container_id or "default", query)
-    cached = get_cached_response(cache_key)
-
     async def event_stream():
         yield f"data: {_json.dumps({'event': 'started', 'conversation_id': conv_id})}\n\n"
-
-        # Serve from cache — emit full answer as a single token burst, then done.
-        # Only serve from cache if the answer is non-empty (don't return a blank/failed cached result).
-        if cached is not None and cached.get("answer", "").strip():
-            answer_text = cached.get("answer", "")
-            _pipeline_log.info(
-                "response_cache_hit",
-                user_id=str(user.id),
-                conversation_id=str(conv_id),
-                query_preview=query[:200],
-                container_id=effective_container_id or "default",
-                answer_preview=answer_text[:120],
-            )
-            for chunk in (answer_text[i:i+80] for i in range(0, len(answer_text), 80)):
-                yield f"data: {_json.dumps({'event': 'token', 'content': chunk})}\n\n"
-            cached["conversation_id"] = conv_id
-            cached["from_cache"] = True
-            yield f"data: {_json.dumps({'event': 'done', 'result': cached})}\n\n"
-            return
 
         try:
             final_payload = None
@@ -236,9 +212,6 @@ async def chat_message_stream(
                         f"This conversation has {new_count}/{MAX_MESSAGES_PER_CONVERSATION} messages. "
                         "It will auto-continue in a new thread when full."
                     )
-
-                # Store in cache for subsequent identical queries
-                set_cached_response(cache_key, final_payload)
 
                 yield f"data: {_json.dumps({'event': 'done', 'result': final_payload})}\n\n"
 
