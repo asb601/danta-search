@@ -1,51 +1,139 @@
 """
-Logs API — stream log files from the server for debugging.
+Logs API — query server_logs table with RBAC-scoped access.
 
-GET  /api/logs/files                    → list available log files
-GET  /api/logs/{filename}               → tail N lines from a log file
-GET  /api/logs/{filename}/search?q=...  → search a log file
-GET  /api/logs/file-timings             → upload + ingestion + parquet timing per file
-GET  /api/logs/pipeline/tail?n=100      → last N pipeline events, pretty-formatted plain text
-GET  /api/logs/pipeline/stream          → SSE live stream of pipeline events (pretty-formatted)
+GET  /api/logs/audit                  → structured audit log (own/domain/all based on role)
+GET  /api/logs/audit/users            → distinct actor list for the audit user filter
+GET  /api/logs/ingest-events          → ingestion pipeline events
+GET  /api/logs/ingest-timings         → per-file ingest stage timings
+GET  /api/logs/file-timings           → upload + ingestion + parquet timing per file (DB)
+GET  /api/logs/pipeline/tail?n=100    → last N pipeline events, pretty-formatted (admin only)
+GET  /api/logs/pipeline/stream        → SSE live stream of pipeline events (admin only)
+GET  /api/logs/{log_type}             → tail N rows for any log_type (RBAC scoped)
+GET  /api/logs/{log_type}/search?q=   → full-text search inside a log_type (RBAC scoped)
 
-Auth: admin only (ADMIN_EMAIL from settings).
+RBAC:
+  admin   → all rows, all log_types
+  manager → all log_types, rows where domain_tag in allowed_domains OR actor is self
+  member  → ai_pipeline rows where actor is self only
 """
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import func, or_, select
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logger import LOG_DIR, format_pipeline_line
 from app.dependencies import get_current_user, require_admin
-from app.models.audit_log import AuditLog
 from app.models.background_job import BackgroundJob
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
+from app.models.server_log import LOG_TYPES, ServerLog
 from app.models.user import User
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
-# Only allow reading known log files — prevent path traversal
-_ALLOWED_FILES = {"system.log", "ai_pipeline.log", "llm_calls.log", "costs.log", "pipeline.log", "audit.log"}
+# Filename alias → log_type mapping for backward-compatible URL patterns.
+# Only aliases that should remain accessible via the /{log_type} endpoint.
+_FILENAME_TO_LOG_TYPE: dict[str, str] = {
+    "ai_pipeline.log": "ai_pipeline",
+    "llm_calls.log":   "llm",
+    "costs.log":       "cost",
+    "system.log":      "system",
+    "audit.log":       "audit",
+    "ingestion.log":   "ingestion",
+}
 
 
-def _safe_log_path(filename: str) -> Path:
-    """Resolve filename and ensure it's within LOG_DIR and in the allowed set."""
-    # Strip any path components — only allow bare filenames
-    clean = Path(filename).name
-    if clean not in _ALLOWED_FILES:
-        raise HTTPException(status_code=404, detail=f"Unknown log file: {clean}")
-    path = (LOG_DIR / clean).resolve()
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail=f"Log file not found: {clean}")
-    return path
+# ── RBAC scope builder ────────────────────────────────────────────────────────
+
+def _build_log_scope(user: User, stmt, log_types: list[str] | None = None):
+    """
+    Apply RBAC row-visibility rules to `stmt`, then optionally filter by log_types.
+
+    admin   → no restriction
+    manager → rows where domain_tag IN allowed_domains OR actor_user_id = self
+    member  → only ai_pipeline rows where actor_user_id = self
+    """
+    if user.is_admin or user.role == "admin":
+        if log_types:
+            stmt = stmt.where(ServerLog.log_type.in_(log_types))
+        return stmt
+
+    if user.role == "manager":
+        if log_types:
+            stmt = stmt.where(ServerLog.log_type.in_(log_types))
+        domains = list(user.allowed_domains or [])
+        if domains:
+            stmt = stmt.where(
+                or_(
+                    ServerLog.domain_tag.in_(domains),
+                    ServerLog.actor_user_id == user.id,
+                )
+            )
+        # manager with no domains = unrestricted scope (no extra WHERE)
+        return stmt
+
+    # member: ai_pipeline only, own rows only
+    allowed = [t for t in (log_types or ["ai_pipeline"]) if t == "ai_pipeline"]
+    if not allowed:
+        # member asked for a tab outside their scope — force empty result
+        stmt = stmt.where(text("false"))
+        return stmt
+    stmt = stmt.where(
+        ServerLog.log_type.in_(allowed),
+        ServerLog.actor_user_id == user.id,
+    )
+    return stmt
+
+
+def _resolve_log_type(alias: str) -> str:
+    """Map a filename alias (e.g. llm_calls.log) or bare log_type to a validated log_type."""
+    resolved = _FILENAME_TO_LOG_TYPE.get(alias, alias)
+    if resolved not in LOG_TYPES:
+        raise HTTPException(status_code=404, detail=f"Unknown log type: {alias}")
+    return resolved
+
+
+# ── Row serialiser ────────────────────────────────────────────────────────────
+
+def _sl_row(row: ServerLog) -> dict:
+    """Serialise a ServerLog row, surfacing details fields at the top level."""
+    details = row.details or {}
+    return {
+        "id": row.id,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "log_type": row.log_type,
+        "event": row.event,
+        "level": row.level,
+        # Actor
+        "actor": {
+            "user_id": row.actor_user_id,
+            "email": row.actor_email,
+            "role": row.actor_role,
+        },
+        "domain_tag": row.domain_tag,
+        # Resource context
+        "trace_id": row.trace_id,
+        "file_id": row.file_id,
+        "file_name": row.file_name,
+        # HTTP context (populated for audit rows only)
+        "request": {
+            "method": row.method,
+            "path": row.path,
+            "status_code": row.status_code,
+            "duration_ms": row.duration_ms,
+            "ip_address": row.ip_address,
+            # pulled from details JSONB (written by audit_log.py)
+            "route_template": details.get("route_template"),
+            "user_agent": details.get("user_agent"),
+        } if row.log_type == "audit" else None,
+        # Full JSONB payload — always present so callers can access any field
+        "details": details,
+    }
 
 
 # ── Pipeline-specific endpoints ─────────────────────────────────────────────
@@ -134,177 +222,135 @@ async def pipeline_stream(
     )
 
 
-# ── Ingest-specific events endpoint ──────────────────────────────────────────
-
-# Events emitted by the ingest pipeline (ingestion_service + data_preprocessor
-# + analytics_service + parquet_service) — all carry pipeline="ingest" in
-# structlog contextvars so we can filter them out of ai_pipeline.log.
-_INGEST_EVENTS = {
-    "chain_start", "chain_end", "chain_skip", "cleanup", "step",
-    "ingest_stage", "ingest_stage_nonfatal_failed", "metadata_schema_detected",
-    "preprocess", "analytics_compute", "parquet_conversion",
-    "parquet_conversion_job_update_failed", "status_update_failed",
-    "parquet_service",
-}
-
-
 @router.get("/ingest-events")
 async def ingest_events(
     lines: int = Query(default=300, ge=1, le=2000),
+    trace_id: str | None = Query(default=None, max_length=36),
     _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """
-    Return the last N ingestion events from ai_pipeline.log.
+    """Return the last N ingestion pipeline events from server_logs."""
+    stmt = (
+        select(ServerLog)
+        .where(ServerLog.log_type == "ingestion")
+        .order_by(ServerLog.created_at.desc())
+        .limit(lines)
+    )
+    if trace_id:
+        stmt = stmt.where(ServerLog.trace_id == trace_id)
 
-    Filters to lines where pipeline=='ingest' (set by _ensure_trace())
-    or whose event name is a known ingestion event.  Chat events are excluded.
-    """
-    path = LOG_DIR / "ai_pipeline.log"
-    if not path.is_file():
-        return {"total_lines": 0, "returned": 0, "lines": []}
+    rows = (await db.execute(stmt)).scalars().all()
+    # Return chronological order (oldest first) for timeline readability
+    rows_sorted = sorted(rows, key=lambda r: r.created_at)
+    events = []
+    for r in rows_sorted:
+        ev = {
+            "event": r.event,
+            "level": r.level,
+            "timestamp": r.created_at.isoformat() if r.created_at else None,
+            "trace_id": r.trace_id,
+            "file_id": r.file_id,
+            "filename": r.file_name,
+            "domain_tag": r.domain_tag,
+        }
+        ev.update(r.details or {})
+        events.append(ev)
 
-    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    ingest: list[dict] = []
-    for line in all_lines:
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-            if ev.get("pipeline") == "ingest" or ev.get("event") in _INGEST_EVENTS:
-                ingest.append(ev)
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-    tail = ingest[-lines:]
-    return {"total_lines": len(ingest), "returned": len(tail), "lines": tail}
+    return {"total": len(events), "returned": len(events), "lines": events}
 
 
 @router.get("/ingest-timings")
 async def ingest_timings(
     last_n_files: int = Query(default=20, ge=1, le=100),
     _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """
-    Per-file, per-step timing breakdown from ingest events.
-
-    Groups events by file_id (via trace_id) and computes duration for each
-    named step so you can see exactly where time is being spent.
-    Returns the most recently completed files first.
-    """
-    path = LOG_DIR / "ai_pipeline.log"
-    if not path.is_file():
-        return {"files": []}
-
-    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-    # Collect events keyed by trace_id (= file_id set by _ensure_trace)
+    """Per-file, per-step timing breakdown from ingestion events in server_logs."""
     from collections import defaultdict
-    traces: dict[str, list[dict]] = defaultdict(list)
-    for line in all_lines:
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-            if ev.get("pipeline") != "ingest":
-                continue
-            tid = ev.get("trace_id") or ev.get("file_id")
-            if tid:
-                traces[tid].append(ev)
-        except (json.JSONDecodeError, ValueError):
-            pass
 
-    # Build per-file summary
+    stmt = (
+        select(ServerLog)
+        .where(ServerLog.log_type == "ingestion")
+        .order_by(ServerLog.created_at.asc())
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+
+    # Group by trace_id
+    traces: dict[str, list[ServerLog]] = defaultdict(list)
+    for row in rows:
+        tid = row.trace_id or row.file_id
+        if tid:
+            traces[tid].append(row)
+
     files = []
     for tid, events in traces.items():
-        events_sorted = sorted(events, key=lambda e: e.get("timestamp", ""))
+        details_list = [(r, r.details or {}) for r in events]
 
-        # Find chain_start / chain_end for monolithic ingest, or first/complete
-        # stage events for the staged Celery pipeline.
-        start_ev = next((e for e in events_sorted if e.get("event") == "chain_start"), None)
-        end_ev = next((e for e in events_sorted if e.get("event") == "chain_end"), None)
-        if start_ev is None:
-            start_ev = events_sorted[0] if events_sorted else None
-        if end_ev is None:
-            end_ev = next(
-                (
-                    e for e in reversed(events_sorted)
-                    if e.get("event") == "ingest_stage"
-                    and e.get("stage") == "complete"
-                    and e.get("status") == "done"
-                ),
+        def _ev(r, d): return d.get("event") or r.event
+
+        start_row = next((r for r, d in details_list if _ev(r, d) == "chain_start"), None) or events[0]
+        end_row = next((r for r, d in details_list if _ev(r, d) == "chain_end"), None)
+        if end_row is None:
+            end_row = next(
+                (r for r, d in reversed(details_list)
+                 if _ev(r, d) == "ingest_stage"
+                 and d.get("stage") == "complete"
+                 and d.get("status") == "done"),
                 None,
             )
-        filename_ev = next((e for e in events_sorted if e.get("filename")), None)
+        filename_row = next((r for r in events if r.file_name), None)
 
         steps = []
-        for ev in events_sorted:
-            if ev.get("event") == "step":
-                step_entry = {
-                    "step": ev.get("step"),
-                    "name": ev.get("name"),
-                    "status": ev.get("status"),
-                    "duration_ms": ev.get("duration_ms"),
-                    "timestamp": ev.get("timestamp"),
+        for r, d in details_list:
+            ev_name = _ev(r, d)
+            if ev_name == "step":
+                entry = {
+                    "step": d.get("step"),
+                    "name": d.get("name"),
+                    "status": d.get("status"),
+                    "duration_ms": r.duration_ms or d.get("duration_ms"),
+                    "timestamp": r.created_at.isoformat() if r.created_at else None,
                 }
-            elif ev.get("event") == "ingest_stage":
-                step_entry = {
-                    "step": ev.get("stage"),
-                    "name": ev.get("stage"),
-                    "status": ev.get("status"),
-                    "duration_ms": ev.get("duration_ms"),
-                    "timestamp": ev.get("timestamp"),
+            elif ev_name == "ingest_stage":
+                entry = {
+                    "step": d.get("stage"),
+                    "name": d.get("stage"),
+                    "status": d.get("status"),
+                    "duration_ms": r.duration_ms or d.get("duration_ms"),
+                    "timestamp": r.created_at.isoformat() if r.created_at else None,
                 }
             else:
                 continue
-            # Include any extra context fields (encoding, safe_for_raw_sample, etc.)
             for k in ("encoding", "safe_for_raw_sample", "reason", "original_rows",
                       "clean_rows", "clean_blob_path", "error"):
-                if k in ev:
-                    step_entry[k] = ev[k]
-            steps.append(step_entry)
+                if k in d:
+                    entry[k] = d[k]
+            steps.append(entry)
 
-        # Find the probe event (separate from steps)
-        probe_ev = next(
-            (e for e in events_sorted if e.get("event") == "step" and e.get("name") == "probe"),
+        probe_row = next(
+            (r for r, d in details_list if _ev(r, d) == "step" and d.get("name") == "probe"),
             None,
         )
-
-        total_ms = None
-        if start_ev and end_ev:
-            total_ms = end_ev.get("duration_ms")
+        probe_d = probe_row.details or {} if probe_row else None
 
         files.append({
             "file_id": tid,
-            "filename": (filename_ev or start_ev or {}).get("filename"),
-            "status": "done" if end_ev else "in_progress",
-            "total_ms": total_ms,
-            "started_at": start_ev.get("timestamp") if start_ev else None,
+            "filename": (filename_row.file_name if filename_row else None),
+            "status": "done" if end_row else "in_progress",
+            "total_ms": (end_row.details or {}).get("duration_ms") if end_row else None,
+            "started_at": start_row.created_at.isoformat() if start_row.created_at else None,
             "probe": {
-                "safe_for_raw_sample": probe_ev.get("safe_for_raw_sample"),
-                "encoding": probe_ev.get("encoding"),
-                "reason": probe_ev.get("reason"),
-                "duration_ms": probe_ev.get("duration_ms"),
-            } if probe_ev else None,
+                "safe_for_raw_sample": probe_d.get("safe_for_raw_sample"),
+                "encoding": probe_d.get("encoding"),
+                "reason": probe_d.get("reason"),
+                "duration_ms": probe_row.duration_ms or probe_d.get("duration_ms"),
+            } if probe_d is not None else None,
             "steps": steps,
         })
 
-    # Sort by started_at desc, return last N
     files.sort(key=lambda f: f.get("started_at") or "", reverse=True)
     return {"files": files[:last_n_files]}
 
-
-# ── Generic log file endpoints ────────────────────────────────────────────────
-
-@router.get("/files")
-async def list_log_files(_: User = Depends(require_admin)) -> dict:
-    """List available log files with sizes."""
-    files = []
-    for name in sorted(_ALLOWED_FILES):
-        path = LOG_DIR / name
-        if path.exists():
-            size_kb = round(path.stat().st_size / 1024, 1)
-            files.append({"name": name, "size_kb": size_kb})
-    return {"log_dir": str(LOG_DIR), "files": files}
 
 
 @router.get("/file-timings")
@@ -386,81 +432,7 @@ async def file_timings(
     return {"files": rows}
 
 
-# ── Scoped audit log endpoints ───────────────────────────────────────────────
-
-_DOMAIN_LOG_ROLES = {"developer", "manager"}
-
-
-def _has_admin_log_scope(user: User) -> bool:
-    return bool(user.is_admin or user.role == "admin")
-
-
-def _has_domain_log_scope(user: User) -> bool:
-    return user.role in _DOMAIN_LOG_ROLES
-
-
-def _audit_scope_clause(user: User):
-    """Return the row-level visibility predicate for the requesting user."""
-    if _has_admin_log_scope(user):
-        return None
-
-    if _has_domain_log_scope(user):
-        domains = list(user.allowed_domains or [])
-        if not domains:
-            return None
-        return or_(
-            AuditLog.actor_user_id == user.id,
-            AuditLog.domain_tag.in_(domains),
-            AuditLog.actor_allowed_domains.op("&&")(domains),
-        )
-
-    return AuditLog.actor_user_id == user.id
-
-
-def _apply_audit_scope(stmt, user: User):
-    scope = _audit_scope_clause(user)
-    return stmt.where(scope) if scope is not None else stmt
-
-
-def _audit_row(row: AuditLog) -> dict:
-    return {
-        "id": row.id,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "event_type": row.event_type,
-        "action": row.action,
-        "actor": {
-            "user_id": row.actor_user_id,
-            "email": row.actor_email,
-            "name": row.actor_name,
-            "role": row.actor_role,
-            "is_admin": row.actor_is_admin,
-            "allowed_domains": row.actor_allowed_domains,
-            "organization_id": row.actor_organization_id,
-        },
-        "request": {
-            "method": row.method,
-            "path": row.path,
-            "route_template": row.route_template,
-            "status_code": row.status_code,
-            "duration_ms": row.duration_ms,
-            "ip_address": row.ip_address,
-            "user_agent": row.user_agent,
-        },
-        "context": {
-            "domain_tag": row.domain_tag,
-            "container_id": row.container_id,
-            "file_id": row.file_id,
-            "file_name": row.file_name,
-            "folder_id": row.folder_id,
-            "folder_name": row.folder_name,
-            "target_user_id": row.target_user_id,
-            "target_user_email": row.target_user_email,
-            "target_user_name": row.target_user_name,
-        },
-        "details": row.details,
-        "error": row.error,
-    }
-
+# ── Audit log endpoints ───────────────────────────────────────────────────────
 
 @router.get("/audit/users")
 async def audit_users(
@@ -469,34 +441,30 @@ async def audit_users(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Return visible actors for the audit user/name filter."""
-    stmt = select(
-        AuditLog.actor_user_id,
-        AuditLog.actor_email,
-        AuditLog.actor_name,
-        AuditLog.actor_role,
-    ).where(AuditLog.actor_user_id.isnot(None)).distinct()
-    stmt = _apply_audit_scope(stmt, current_user)
+    """Return visible distinct actors from server_logs for the audit user filter."""
+    stmt = (
+        select(
+            ServerLog.actor_user_id,
+            ServerLog.actor_email,
+            ServerLog.actor_role,
+        )
+        .where(
+            ServerLog.log_type == "audit",
+            ServerLog.actor_user_id.isnot(None),
+        )
+        .distinct()
+    )
+    stmt = _build_log_scope(current_user, stmt, log_types=["audit"])
 
     if q:
         term = f"%{q.lower()}%"
-        stmt = stmt.where(
-            or_(
-                func.lower(AuditLog.actor_email).like(term),
-                func.lower(AuditLog.actor_name).like(term),
-            )
-        )
+        stmt = stmt.where(func.lower(ServerLog.actor_email).like(term))
 
-    rows = (await db.execute(stmt.order_by(AuditLog.actor_email).limit(limit))).all()
+    rows = (await db.execute(stmt.order_by(ServerLog.actor_email).limit(limit))).all()
     return {
         "users": [
-            {
-                "user_id": row.actor_user_id,
-                "email": row.actor_email,
-                "name": row.actor_name,
-                "role": row.actor_role,
-            }
-            for row in rows
+            {"user_id": r.actor_user_id, "email": r.actor_email, "role": r.actor_role}
+            for r in rows
         ]
     }
 
@@ -504,136 +472,109 @@ async def audit_users(
 @router.get("/audit")
 async def audit_log(
     lines: int = Query(default=100, ge=1, le=2000),
-    user: str | None = Query(default=None, min_length=1, max_length=120),
     email: str | None = Query(default=None, min_length=1, max_length=320),
-    name: str | None = Query(default=None, min_length=1, max_length=255),
     role: str | None = Query(default=None, min_length=1, max_length=40),
     domain: str | None = Query(default=None, min_length=1, max_length=120),
-    action: str | None = Query(default=None, min_length=1, max_length=160),
-    path: str | None = Query(default=None, min_length=1, max_length=240),
+    event: str | None = Query(default=None, min_length=1, max_length=160),
+    path_filter: str | None = Query(default=None, alias="path", min_length=1, max_length=240),
     status_code: int | None = Query(default=None, ge=100, le=599),
-    event_type: str | None = Query(default=None, min_length=1, max_length=40),
+    level: str | None = Query(default=None, min_length=1, max_length=20),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Return scoped structured audit logs.
+    """Return RBAC-scoped audit rows from server_logs."""
+    stmt = select(ServerLog).where(ServerLog.log_type == "audit")
+    stmt = _build_log_scope(current_user, stmt, log_types=["audit"])
 
-    Visibility:
-      * admin: every row
-      * developer/manager with unrestricted domains: every row
-      * developer/manager with allowed_domains: own rows + matching domains
-      * regular user: own rows only
-    """
-    stmt = select(AuditLog)
-    stmt = _apply_audit_scope(stmt, current_user)
-
-    if user:
-        term = f"%{user.lower()}%"
-        stmt = stmt.where(
-            or_(
-                func.lower(AuditLog.actor_email).like(term),
-                func.lower(AuditLog.actor_name).like(term),
-            )
-        )
     if email:
-        stmt = stmt.where(func.lower(AuditLog.actor_email).like(f"%{email.lower()}%"))
-    if name:
-        stmt = stmt.where(func.lower(AuditLog.actor_name).like(f"%{name.lower()}%"))
+        stmt = stmt.where(func.lower(ServerLog.actor_email).like(f"%{email.lower()}%"))
     if role:
-        stmt = stmt.where(func.lower(AuditLog.actor_role) == role.lower())
+        stmt = stmt.where(func.lower(ServerLog.actor_role) == role.lower())
     if domain:
-        stmt = stmt.where(func.lower(AuditLog.domain_tag) == domain.lower())
-    if action:
-        stmt = stmt.where(func.lower(AuditLog.action).like(f"%{action.lower()}%"))
-    if path:
-        stmt = stmt.where(func.lower(AuditLog.path).like(f"%{path.lower()}%"))
+        stmt = stmt.where(func.lower(ServerLog.domain_tag) == domain.lower())
+    if event:
+        stmt = stmt.where(func.lower(ServerLog.event).like(f"%{event.lower()}%"))
+    if path_filter:
+        stmt = stmt.where(func.lower(ServerLog.path).like(f"%{path_filter.lower()}%"))
     if status_code is not None:
-        stmt = stmt.where(AuditLog.status_code == status_code)
-    if event_type:
-        stmt = stmt.where(func.lower(AuditLog.event_type) == event_type.lower())
+        stmt = stmt.where(ServerLog.status_code == status_code)
+    if level:
+        stmt = stmt.where(func.lower(ServerLog.level) == level.lower())
 
-    rows = (await db.execute(stmt.order_by(AuditLog.created_at.desc()).limit(lines))).scalars().all()
+    rows = (await db.execute(stmt.order_by(ServerLog.created_at.desc()).limit(lines))).scalars().all()
+
+    scope = "admin" if (current_user.is_admin or current_user.role == "admin") \
+        else "domain" if current_user.role == "manager" \
+        else "self"
+
+    return {"scope": scope, "returned": len(rows), "lines": [_sl_row(r) for r in rows]}
+
+
+# ── Generic DB log query endpoints ────────────────────────────────────────────
+# These replace the old file-based /{filename} and /{filename}/search endpoints.
+# The {log_type} path param accepts both bare log types (e.g. "llm") and legacy
+# filename aliases (e.g. "llm_calls.log") for frontend backward compatibility.
+
+@router.get("/{log_type}/search")
+async def search_log(
+    log_type: str,
+    q: str = Query(..., min_length=1, max_length=200),
+    lines: int = Query(default=50, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Full-text search across event name and details JSONB for a given log_type."""
+    resolved = _resolve_log_type(log_type)
+    q_lower = q.lower()
+
+    stmt = select(ServerLog).where(
+        ServerLog.log_type == resolved,
+        or_(
+            func.lower(ServerLog.event).like(f"%{q_lower}%"),
+            # JSONB → text cast so the search covers any nested field value
+            text(
+                "lower(server_logs.details::text) like :q"
+            ).bindparams(q=f"%{q_lower}%"),
+        ),
+    )
+    stmt = _build_log_scope(current_user, stmt, log_types=[resolved])
+
+    rows = (await db.execute(stmt.order_by(ServerLog.created_at.desc()).limit(lines))).scalars().all()
     return {
-        "scope": "admin" if _has_admin_log_scope(current_user) else "domain" if _has_domain_log_scope(current_user) else "self",
-        "returned": len(rows),
-        "lines": [_audit_row(row) for row in rows],
+        "log_type": resolved,
+        "query": q,
+        "matches": len(rows),
+        "lines": [_sl_row(r) for r in rows],
     }
 
 
-@router.get("/{filename}")
+@router.get("/{log_type}")
 async def tail_log(
-    filename: str,
+    log_type: str,
     lines: int = Query(default=100, ge=1, le=2000),
-    _: User = Depends(require_admin),
+    level: str | None = Query(default=None, max_length=20),
+    domain: str | None = Query(default=None, max_length=120),
+    trace_id: str | None = Query(default=None, max_length=36),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Return the last N lines of a log file (default 100, max 2000)."""
-    path = _safe_log_path(filename)
-    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    tail = all_lines[-lines:]
+    """Return the last N rows for the given log_type, RBAC scoped."""
+    resolved = _resolve_log_type(log_type)
 
-    # Try to parse each line as JSON for structured output
-    parsed = []
-    for line in tail:
-        try:
-            parsed.append(json.loads(line))
-        except (json.JSONDecodeError, ValueError):
-            parsed.append({"raw": line})
+    stmt = select(ServerLog)
+    stmt = _build_log_scope(current_user, stmt, log_types=[resolved])
 
-    return {"file": filename, "total_lines": len(all_lines), "returned": len(parsed), "lines": parsed}
+    if level:
+        stmt = stmt.where(func.lower(ServerLog.level) == level.lower())
+    if domain:
+        stmt = stmt.where(func.lower(ServerLog.domain_tag) == domain.lower())
+    if trace_id:
+        stmt = stmt.where(ServerLog.trace_id == trace_id)
 
+    rows = (await db.execute(stmt.order_by(ServerLog.created_at.desc()).limit(lines))).scalars().all()
+    return {
+        "log_type": resolved,
+        "returned": len(rows),
+        "lines": [_sl_row(r) for r in rows],
+    }
 
-@router.get("/{filename}/search")
-async def search_log(
-    filename: str,
-    q: str = Query(..., min_length=1, max_length=200),
-    lines: int = Query(default=50, ge=1, le=500),
-    _: User = Depends(require_admin),
-) -> dict:
-    """Search a log file for lines containing query string (case-insensitive)."""
-    path = _safe_log_path(filename)
-    q_lower = q.lower()
-    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-    matches = []
-    for i, line in enumerate(all_lines):
-        if q_lower in line.lower():
-            try:
-                matches.append({"line_num": i + 1, "data": json.loads(line)})
-            except (json.JSONDecodeError, ValueError):
-                matches.append({"line_num": i + 1, "data": {"raw": line}})
-            if len(matches) >= lines:
-                break
-
-    return {"file": filename, "query": q, "matches": len(matches), "lines": matches}
-
-
-@router.get("/{filename}/download")
-async def download_log(
-    filename: str,
-    _: User = Depends(require_admin),
-) -> FileResponse:
-    """Download a raw log file as a plain-text attachment."""
-    path = _safe_log_path(filename)
-    return FileResponse(
-        path=str(path),
-        filename=filename,
-        media_type="text/plain; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@router.delete("/{filename}", status_code=204)
-async def clear_log(
-    filename: str,
-    _: User = Depends(require_admin),
-) -> None:
-    """Truncate a log file to zero bytes for fresh logging.
-
-    Truncating (instead of deleting) preserves any open file handles held by
-    structlog/the logging module so writes continue to land in the same file.
-    """
-    path = _safe_log_path(filename)
-    # Open in write mode and immediately close — atomically truncates to 0 bytes
-    with open(path, "w", encoding="utf-8"):
-        pass
-    return None

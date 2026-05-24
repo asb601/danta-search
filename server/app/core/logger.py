@@ -480,6 +480,7 @@ _SKIP_DETAIL_KEYS = frozenset({
     "event", "level", "timestamp", "logger",
     "trace_id", "file_id", "file_name", "filename",
     "domain_tag", "actor_user_id", "actor_email", "actor_role",
+    "duration_ms",
 })
 
 
@@ -532,6 +533,7 @@ class _DBHandler(logging.Handler):
                     file_id=ev.get("file_id"),
                     # ingest events use "filename"; chat events may use "file_name"
                     file_name=ev.get("file_name") or ev.get("filename"),
+                    duration_ms=ev.get("duration_ms"),
                     details=details,
                 )
                 db.add(row)
