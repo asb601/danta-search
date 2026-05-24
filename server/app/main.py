@@ -153,6 +153,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("drop_audit_logs_failed", error=str(exc)[:300])
 
+    # Phase 5: Ingestion trustworthiness columns on file_metadata + file_relationships
+    from app.migrations.ingestion_trust_upgrade import run_upgrade as _ingestion_trust_upgrade
+    try:
+        async with engine.begin() as _conn:
+            from sqlalchemy.ext.asyncio import AsyncSession as _AS
+            async with _AS(_conn) as _sess:
+                await _ingestion_trust_upgrade(_sess)
+    except Exception as exc:
+        chat_logger.warning("ingestion_trust_migration_failed", error=str(exc)[:300])
+
     # Pre-warm DataFusion  session pool — pays UDF-registration cost once at startup
     # so the first   N concurrent queries borrow a ready context without overhead.
     try:

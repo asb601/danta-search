@@ -23,6 +23,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select, text
+from sqlalchemy.orm import noload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -412,7 +413,10 @@ async def file_timings(
 ) -> dict:
     """Return upload, ingestion, and parquet conversion timing per file (most recent first)."""
     files_result = await db.execute(
-        select(File).order_by(File.created_at.desc()).limit(limit)
+        select(File)
+        .options(noload("*"))  # prevent lazy-loading relationships in async context
+        .order_by(File.created_at.desc())
+        .limit(limit)
     )
     files = files_result.scalars().all()
     if not files:
