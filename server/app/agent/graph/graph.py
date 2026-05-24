@@ -50,6 +50,7 @@ from app.agent.tools.stats import build_stats_tool
 from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
 from app.core.orchestration_trace import OrchestrationTrace
+import structlog as _structlog
 from app.retrieval.embeddings import build_search_text
 from app.services.semantic_policy import get_semantic_policy
 from app.services.graph_health import score_graph_health
@@ -825,11 +826,18 @@ async def run_agent_query(
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
     prior_files: list[str] | None = None,
+    actor_email: str = "",
+    actor_role: str = "",
 ) -> dict:
     """
     Main entry point for the agentic query pipeline.
     Returns {answer, data, chart, route, row_count, files_used, tool_calls}.
     """
+    _structlog.contextvars.bind_contextvars(
+        actor_user_id=user_id or None,
+        actor_email=actor_email or None,
+        actor_role=actor_role or None,
+    )
     pipeline_start = time.perf_counter()
 
     try:
@@ -947,6 +955,8 @@ async def run_agent_query_stream(
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
     prior_files: list[str] | None = None,
+    actor_email: str = "",
+    actor_role: str = "",
 ) -> AsyncIterator[dict]:
     """
     Streaming variant of run_agent_query.
@@ -957,6 +967,11 @@ async def run_agent_query_stream(
       {"type": "tool_result", "tool": name, "preview": str}
       {"type": "done", "payload": {answer, data, chart, ...}}
     """
+    _structlog.contextvars.bind_contextvars(
+        actor_user_id=user_id or None,
+        actor_email=actor_email or None,
+        actor_role=actor_role or None,
+    )
     pipeline_start = time.perf_counter()
 
     try:
