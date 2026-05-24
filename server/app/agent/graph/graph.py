@@ -50,7 +50,9 @@ from app.agent.tools.stats import build_stats_tool
 from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
 from app.core.orchestration_trace import OrchestrationTrace
+from app.core.db_logger import log_pipeline_event as _db_log
 import structlog as _structlog
+import traceback as _traceback
 from app.retrieval.embeddings import build_search_text
 from app.services.semantic_policy import get_semantic_policy
 from app.services.graph_health import score_graph_health
@@ -247,6 +249,7 @@ async def _build_agent_context(
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
     prior_files: list[str] | None = None,
+    request_trace_id: str | None = None,
 ) -> dict | None:
     """
     Shared setup for both streaming and non-streaming entry points.
@@ -264,6 +267,13 @@ async def _build_agent_context(
     if not cached:
         metrics.inc("catalog_miss_count")
         pipeline_logger.warning("catalog_empty", query=query, reason="no files ingested yet")
+        _db_log(
+            event="catalog_empty",
+            level="warning",
+            trace_id=request_trace_id,
+            actor_user_id=user_id or None,
+            details={"query": query[:500], "reason": "no files ingested yet"},
+        )
         return None
 
     # ── STEP 2: CATALOG LOADED ───────────────────────────────────────────────
@@ -274,6 +284,17 @@ async def _build_agent_context(
         file_count=len(cached["catalog"]),
         parquet_count=len(cached["parquet_paths_all"]),
         files=[f.get("blob_path", "") for f in cached["catalog"]],
+    )
+    _db_log(
+        event="catalog_loaded",
+        level="info",
+        trace_id=request_trace_id,
+        actor_user_id=user_id or None,
+        details={
+            "file_count": len(cached["catalog"]),
+            "container": cached["container_name"],
+            "parquet_count": len(cached["parquet_paths_all"]),
+        },
     )
 
     full_catalog = cached["catalog"]
@@ -302,7 +323,8 @@ async def _build_agent_context(
     # ── Create per-request orchestration trace ────────────────────────────────
     # Trace accumulates decision telemetry at each stage and is emitted once
     # at pipeline completion. Created here so it can be passed through ctx.
-    req_id_for_trace = uuid.uuid4().hex
+    # Use the caller-supplied trace_id when available so all events share one id.
+    req_id_for_trace = request_trace_id or uuid.uuid4().hex
     trace = OrchestrationTrace(request_id=req_id_for_trace)
     trace.set_planner(intent_plan)
 
@@ -839,11 +861,34 @@ async def run_agent_query(
         actor_role=actor_role or None,
     )
     pipeline_start = time.perf_counter()
+    _req_trace_id = uuid.uuid4().hex
+    _db_log(
+        event="query_received",
+        level="info",
+        trace_id=_req_trace_id,
+        actor_user_id=user_id or None,
+        actor_email=actor_email or None,
+        actor_role=actor_role or None,
+        details={"query": query[:500], "has_context": bool(conversation_context)},
+    )
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
+        _db_log(
+            event="agent_context_error",
+            level="error",
+            trace_id=_req_trace_id,
+            actor_user_id=user_id or None,
+            actor_email=actor_email or None,
+            actor_role=actor_role or None,
+            details={
+                "error": str(exc)[:2000],
+                "traceback": _traceback.format_exc()[:8000],
+                "query_preview": query[:200],
+            },
+        )
         return {
             "answer": "An error occurred while preparing your query. Please try again.",
             "data": [], "chart": None,
@@ -926,6 +971,23 @@ async def run_agent_query(
         duration_ms=total_ms,
     )
     trace.emit()
+    _db_log(
+        event="final_answer",
+        level="info",
+        trace_id=_req_trace_id,
+        actor_user_id=user_id or None,
+        actor_email=actor_email or None,
+        actor_role=actor_role or None,
+        duration_ms=total_ms,
+        details={
+            "query": query[:500],
+            "answer": answer[:500],
+            "tool_calls": tool_calls_made,
+            "row_count": sql_total_rows,
+            "total_duration_ms": total_ms,
+            "route": "agent",
+        },
+    )
 
     return {
         "answer": answer,
@@ -973,11 +1035,34 @@ async def run_agent_query_stream(
         actor_role=actor_role or None,
     )
     pipeline_start = time.perf_counter()
+    _req_trace_id = uuid.uuid4().hex
+    _db_log(
+        event="query_received",
+        level="info",
+        trace_id=_req_trace_id,
+        actor_user_id=user_id or None,
+        actor_email=actor_email or None,
+        actor_role=actor_role or None,
+        details={"query": query[:500], "has_context": bool(conversation_context)},
+    )
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
+        _db_log(
+            event="agent_context_error",
+            level="error",
+            trace_id=_req_trace_id,
+            actor_user_id=user_id or None,
+            actor_email=actor_email or None,
+            actor_role=actor_role or None,
+            details={
+                "error": str(exc)[:2000],
+                "traceback": _traceback.format_exc()[:8000],
+                "query_preview": query[:200],
+            },
+        )
         yield {
             "type": "done",
             "payload": {
@@ -1088,6 +1173,14 @@ async def run_agent_query_stream(
                     iteration=tool_calls_made,
                     input=tool_input,  # full args, no truncation
                 )
+                _db_log(
+                    event="tool_call_start",
+                    level="info",
+                    trace_id=_req_trace_id,
+                    actor_user_id=user_id or None,
+                    actor_role=actor_role or None,
+                    details={"tool": tool_name, "iteration": tool_calls_made},
+                )
                 yield {"type": "thinking", "tool": tool_name}
 
             elif kind == "on_tool_end":
@@ -1099,6 +1192,14 @@ async def run_agent_query_stream(
                     iteration=tool_calls_made,
                     output=str(tool_output),  # full output, no truncation
                 )
+                _db_log(
+                    event="tool_call_end",
+                    level="info",
+                    trace_id=_req_trace_id,
+                    actor_user_id=user_id or None,
+                    actor_role=actor_role or None,
+                    details={"tool": tool_name, "iteration": tool_calls_made},
+                )
                 tool_output_str = tool_output if isinstance(tool_output, str) else str(tool_output)
                 if isinstance(tool_output, str):
                     files_used.update(extract_blob_paths(tool_output))
@@ -1107,6 +1208,20 @@ async def run_agent_query_stream(
 
     except Exception as exc:
         chat_logger.exception("agent_stream_error", error=str(exc)[:400])
+        _db_log(
+            event="agent_stream_error",
+            level="error",
+            trace_id=_req_trace_id,
+            actor_user_id=user_id or None,
+            actor_email=actor_email or None,
+            actor_role=actor_role or None,
+            details={
+                "error": str(exc)[:2000],
+                "traceback": _traceback.format_exc()[:8000],
+                "query_preview": query[:200],
+                "tool_calls_made": tool_calls_made,
+            },
+        )
         trace.set_execution_outcome(rows=0, total=0, duration_ms=0.0, error=str(exc)[:200])
         trace.emit()
         yield {
@@ -1210,6 +1325,23 @@ async def run_agent_query_stream(
         duration_ms=total_ms,
     )
     trace.emit()
+    _db_log(
+        event="final_answer",
+        level="info",
+        trace_id=_req_trace_id,
+        actor_user_id=user_id or None,
+        actor_email=actor_email or None,
+        actor_role=actor_role or None,
+        duration_ms=total_ms,
+        details={
+            "query": query[:500],
+            "answer": final_answer[:500],
+            "tool_calls": tool_calls_made,
+            "row_count": sql_total_rows,
+            "total_duration_ms": total_ms,
+            "route": "agent",
+        },
+    )
 
     yield {
         "type": "done",

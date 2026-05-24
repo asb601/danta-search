@@ -244,6 +244,15 @@ async def chat_message_stream(
                 background_tasks.add_task(bg_title_and_summary, conv_id)
 
         except Exception:
+            import traceback as _tb
+            _pipeline_log.error(
+                "chat_stream_unhandled_exception",
+                user_id=str(user.id),
+                conversation_id=str(conv_id),
+                query_preview=query[:200],
+                exc_info=True,
+                traceback=_tb.format_exc(),
+            )
             try:
                 async with async_session() as err_db:
                     err_db.add(Message(
