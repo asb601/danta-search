@@ -40,6 +40,7 @@ import app.models.conversation  # ensure Conversation + Message tables are creat
 import app.models.organization  # ensure Organization table is created
 import app.models.schema_dictionary  # ensure SchemaDictionary table is created
 import app.models.audit_log  # ensure AuditLog table is created
+import app.models.server_log  # ensure ServerLog table is created
 
 
 async def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
