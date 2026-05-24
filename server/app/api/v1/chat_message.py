@@ -126,6 +126,8 @@ async def chat_message(
             query, db,
             conversation_context=conversation_context,
             user_id=user.id,
+            actor_email=getattr(user, "email", ""),
+            actor_role=getattr(user, "role", ""),
             is_admin=getattr(user, "is_admin", False),
             allowed_domains=user_allowed_domains,
             container_id=effective_container_id,

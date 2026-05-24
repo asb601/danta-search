@@ -247,6 +247,10 @@ async def list_containers(
     start = time.perf_counter()
     container_logger.info("list_requested")
 
+    # No-domain members see no containers until a domain is assigned
+    if not user.is_admin and not user.allowed_domains:
+        return []
+
     result = await db.execute(
         select(
             ContainerConfig,

@@ -95,6 +95,9 @@ def _run_stage(
         file_id=file_id,
         stage=stage_value,
         worker="celery",
+        actor_user_id=stage_payload.get("actor_user_id"),
+        actor_email=stage_payload.get("actor_email"),
+        actor_role=stage_payload.get("actor_role"),
     )
 
     try:
@@ -179,8 +182,14 @@ def run_ingest_pipeline(self, file_id: str) -> Payload:
         return prepared
 
     ordered_tasks = [_TASK_BY_STAGE[spec.stage] for spec in INGEST_STAGE_SPECS]
+    initial_payload: Payload = {
+        "file_id": file_id,
+        "actor_user_id": prepared.get("actor_user_id"),
+        "actor_email": prepared.get("actor_email"),
+        "actor_role": prepared.get("actor_role"),
+    }
     workflow = chain(
-        ordered_tasks[0].s({"file_id": file_id}),
+        ordered_tasks[0].s(initial_payload),
         *(task.s() for task in ordered_tasks[1:]),
     ).apply_async()
 

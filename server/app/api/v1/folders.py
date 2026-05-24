@@ -34,6 +34,10 @@ async def get_folder_contents(
 
     is_root = folder_id == "root"
 
+    # Members with no assigned domains see nothing — empty folder until a higher
+    # role grants them at least one domain.
+    if not user.is_admin and not user.allowed_domains:
+        return FolderContents(folders=[], files=[])
     # Resolve effective domain restriction by walking ancestors. A subfolder
     # without its own domain_tag inherits the tag of its nearest tagged
     # ancestor. This prevents bypass via "untagged subfolder inside a tagged

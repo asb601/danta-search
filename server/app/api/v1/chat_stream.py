@@ -173,6 +173,8 @@ async def chat_message_stream(
                     query, db,
                     conversation_context=conversation_context,
                     user_id=user.id,
+                    actor_email=getattr(user, "email", ""),
+                    actor_role=getattr(user, "role", ""),
                     is_admin=user_is_admin,
                     allowed_domains=user_allowed_domains,
                     container_id=effective_container_id,

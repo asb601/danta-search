@@ -27,6 +27,23 @@ from app.schemas.file import FileMoveRequest, FileOut, FileRenameRequest
 router = APIRouter(prefix="/files", tags=["files"])
 
 
+async def _assert_file_access(file: File, user: User, db: AsyncSession) -> None:
+    """Raise 403 if a non-admin user with no allowed_domains tries to access a file,
+    or if the file's folder domain is outside the user's allowed domains."""
+    if user.is_admin:
+        return
+    if not user.allowed_domains:
+        raise HTTPException(status_code=403, detail="No domain access assigned")
+    # Resolve the file's effective domain via its folder
+    if file.folder_id:
+        folder = await db.get(Folder, file.folder_id)
+        domain = folder.domain_tag if folder else None
+    else:
+        domain = None
+    # Root-level files (no folder/no domain) are admin-only
+    if not domain or domain not in user.allowed_domains:
+        raise HTTPException(status_code=403, detail="Access to this file is restricted")
+
 def _parse_connection_string(conn_str: str) -> tuple[str, str]:
     """Extract AccountName and AccountKey from an Azure connection string."""
     parts = dict(part.split("=", 1) for part in conn_str.split(";") if "=" in part)
@@ -300,6 +317,7 @@ async def get_signed_url(
     file = await db.get(File, file_id)
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
+    await _assert_file_access(file, user, db)
     if not file.blob_path:
         raise HTTPException(status_code=400, detail="File has no blob path")
     if not file.container_id:
@@ -451,6 +469,7 @@ async def get_job_status(
     file = await db.get(File, file_id)
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
+    await _assert_file_access(file, user, db)
 
     result = await db.execute(
         select(BackgroundJob)

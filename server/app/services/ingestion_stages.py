@@ -95,9 +95,20 @@ async def prepare_pipeline(file_id: str) -> Payload:
         if file.ingest_status == IngestStatus.RUNNING.value:
             return {"file_id": file_id, "status": PayloadStatus.ALREADY_RUNNING.value}
 
+        # Resolve actor fields for RBAC-aware log rows
+        from app.models.user import User  # local import to avoid circular
+        owner_id = file.uploaded_by_id or file.owner_id
+        actor: User | None = await db.get(User, owner_id) if owner_id else None
+
         file.ingest_status = IngestStatus.RUNNING.value
         await db.commit()
-        return {"file_id": file_id, "status": PayloadStatus.QUEUED.value}
+        return {
+            "file_id": file_id,
+            "status": PayloadStatus.QUEUED.value,
+            "actor_user_id": str(actor.id) if actor else None,
+            "actor_email": actor.email if actor else None,
+            "actor_role": actor.role if actor else None,
+        }
 
 
 async def clean_file_stage(payload: Payload) -> Payload:
