@@ -220,8 +220,6 @@ async def log_requests(request: Request, call_next):
             container_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
         elif "/auth" in path:
             auth_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
-        elif "/chat" in path:
-            chat_logger.info("request", method=method, path=path, status=status_code, duration_ms=duration_ms)
 
         await record_request_audit(
             request,

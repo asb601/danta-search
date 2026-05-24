@@ -148,7 +148,8 @@ async def chat_message_stream(
         yield f"data: {_json.dumps({'event': 'started', 'conversation_id': conv_id})}\n\n"
 
         # Serve from cache — emit full answer as a single token burst, then done.
-        if cached is not None:
+        # Only serve from cache if the answer is non-empty (don't return a blank/failed cached result).
+        if cached is not None and cached.get("answer", "").strip():
             answer_text = cached.get("answer", "")
             _pipeline_log.info(
                 "response_cache_hit",
@@ -168,7 +169,7 @@ async def chat_message_stream(
         try:
             final_payload = None
 
-            async with _LLM_SEMAPHORE:
+            async with asyncio.timeout(180), _LLM_SEMAPHORE:
                 async for evt in run_agent_query_stream(
                     query, db,
                     conversation_context=conversation_context,

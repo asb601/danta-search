@@ -36,7 +36,6 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.logger import chat_logger
 from app.models.container import ContainerConfig
 from app.models.file import File
 from app.models.file_analytics import FileAnalytics
@@ -51,7 +50,6 @@ _MAX_COLUMN_NAMES = 80
 
 def invalidate_catalog_cache() -> None:
     """No-op — cache removed. Kept for call-site compatibility."""
-    chat_logger.info("catalog_cache_invalidated", note="no-op: cache removed")
 
 
 def _truncate(text: str | None, n: int) -> str:
@@ -247,14 +245,6 @@ async def _query_filtered_catalog(
             blob_to_parquet[entry["blob_path"]] = pq
             if first_parquet is None:
                 first_parquet = pq
-
-    chat_logger.info(
-        "catalog_loaded",
-        file_count=len(catalog),
-        container=container.container_name,
-        allowed_domains=allowed_domains,
-        container_id_filter=container_id,
-    )
 
     return {
         "catalog": catalog,
