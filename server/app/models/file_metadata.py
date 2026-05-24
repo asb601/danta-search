@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone, date
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import String, BigInteger, Text, Date, DateTime, ForeignKey
+from sqlalchemy import Float, String, BigInteger, Text, Date, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -40,6 +40,17 @@ class FileMetadata(Base):
     # role_source: "llm" | "llm_dynamic" | future resolver source labels
     column_semantic_roles: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
     role_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    # Phase 5: Role confidence evidence (ingestion-time, permanent)
+    # Schema: {"source_col": {"confidence": 0.92, "signals": ["column_name", "value_pattern"], "source": "llm"}}
+    # Only populated for files ingested after Phase 5 roll-out. Older files have None.
+    column_role_evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
+
+    # Phase 5: Per-file ingestion confidence score (computed at end of pipeline)
+    # overall: 0.0–1.0 aggregate of role quality + edge quality + metadata completeness
+    # signals: breakdown dict for observability / admin UI
+    ingestion_confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ingestion_confidence_signals: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
 
     # Retrieval-engine columns (PHASE 1)
     search_text: Mapped[str | None] = mapped_column(Text, nullable=True)

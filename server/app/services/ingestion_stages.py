@@ -400,7 +400,7 @@ async def ontology_stage(payload: Payload) -> Payload:
         from app.services.column_role_resolver import resolve_column_roles  # noqa: PLC0415
 
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
-        col_roles, role_src = await resolve_column_roles(
+        col_roles, role_src, role_evidence = await resolve_column_roles(
             columns_info=metadata.columns_info or [],
             filename=file.name,
             glossary=column_glossary or None,
@@ -408,6 +408,7 @@ async def ontology_stage(payload: Payload) -> Payload:
         )
         metadata.column_semantic_roles = col_roles or None
         metadata.role_source = role_src
+        metadata.column_role_evidence = role_evidence or None
         await db.commit()
 
         ingest_logger.info(
@@ -419,10 +420,7 @@ async def ontology_stage(payload: Payload) -> Payload:
             source=role_src,
             duration_ms=_ms(start),
         )
-        return _next(payload, stage=stage)
-
-
-async def embedding_stage(payload: Payload) -> Payload:
+        return _next(payload, stage=stage)(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
     stage = StageName.EMBEDDING.value
@@ -603,6 +601,41 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
         if file:
             file.ingest_status = IngestStatus.INGESTED.value
             await db.commit()
+
+        # ── Compute and persist ingestion confidence score ────────────────────────
+        # Runs after all stages so both role evidence and relationships are present.
+        try:
+            from app.models.file_relationship import FileRelationship  # noqa: PLC0415
+            from app.services.ingestion_confidence import compute_ingestion_confidence  # noqa: PLC0415
+
+            meta = (
+                await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+            ).scalar_one_or_none()
+            rels = (
+                await db.execute(
+                    select(FileRelationship).where(
+                        (FileRelationship.file_a_id == file_id)
+                        | (FileRelationship.file_b_id == file_id)
+                    )
+                )
+            ).scalars().all()
+
+            if meta:
+                ing_conf = compute_ingestion_confidence(meta, list(rels))
+                meta.ingestion_confidence_score = ing_conf.overall
+                meta.ingestion_confidence_signals = ing_conf.signals
+                await db.commit()
+                ingest_logger.info(
+                    "ingestion_confidence",
+                    file_id=file_id,
+                    overall=ing_conf.overall,
+                    level=ing_conf.level,
+                    signals=ing_conf.signals,
+                )
+        except Exception as exc:
+            ingest_logger.warning(
+                "ingestion_confidence_failed", file_id=file_id, error=str(exc)[:200]
+            )
 
     try:
         from app.agent.catalog_cache import invalidate_catalog_cache  # noqa: PLC0415

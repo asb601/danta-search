@@ -54,10 +54,70 @@ from app.retrieval.graph_expand import graph_expand
 from app.retrieval.opensearch_search import opensearch_retrieve_with_scores
 from app.retrieval.rrf import rrf_fuse
 from app.retrieval.temporal import parse_temporal
+from app.policies.retrieval_policy import get_retrieval_policy as _get_retrieval_policy
+from app.services.trust_propagation import retrieval_trust_weight as _rtw
 
-# How many results to pull from each individual stage before fusion.
-# More results per stage → better RRF coverage, but more DB work.
-_STAGE_LIMIT = 50
+# ── Retrieval stage bounds ─────────────────────────────────────────────────────
+# All retrieval caps and score floors are governed by RetrievalPolicy.
+# See server/app/policies/retrieval_policy.py for rationale on each value.
+# Module-level aliases are kept so integration tests can monkeypatch them.
+_rp = _get_retrieval_policy()
+_STAGE_LIMIT           = _rp.stage_limit
+_MAX_BM25_CANDIDATES   = _rp.bm25_candidates
+_MAX_VECTOR_CANDIDATES = _rp.vector_candidates
+_MAX_FUZZY_CANDIDATES  = _rp.fuzzy_candidates
+_RETRIEVAL_MIN_SCORE   = _rp.min_score
+# Phase 7: Scale hardening — cap caller-requested top_k and total candidate pool
+_MAX_TOP_K             = _rp.max_top_k
+_MAX_RRF_CANDIDATES    = _rp.max_rrf_candidates
+
+
+# ── Phase 6: Post-RRF trust attenuation ──────────────────────────────────
+# After RRF fusion, multiply each file's RRF score by its ingestion trust
+# weight.  Files in weak-ingestion regions contribute less to orchestration
+# without being hard-excluded from the shortlist.
+# Non-raising: any error returns the original fused list unchanged.
+def _trust_attenuate(
+    fused: list[tuple[FileMetadata, float]],
+) -> list[tuple[FileMetadata, float]]:
+    """Apply ingestion-confidence trust weights to post-RRF scores.
+
+    Multiplies each file's RRF score by retrieval_trust_weight(ingestion_score)
+    and re-sorts descending.  Files with no ingestion score (pre-Phase-5) are
+    neutral (weight 1.0) and are never penalised.
+    """
+    try:
+        attenuated = [
+            (meta, score * _rtw(meta.ingestion_confidence_score))
+            for meta, score in fused
+        ]
+        attenuated.sort(key=lambda x: x[1], reverse=True)
+        return attenuated
+    except Exception:
+        return fused  # never block retrieval
+
+
+# ── Internal helpers ───────────────────────────────────────────────────────────
+
+def _prune_and_dedup(
+    results: list[tuple[FileMetadata, float]],
+    min_score: float,
+) -> list[tuple[FileMetadata, float]]:
+    """Drop low-score entries and remove per-channel file_id duplicates.
+
+    Keeps the first (highest-score) occurrence of each file_id, since results
+    are already sorted descending by score from the DB/search layer.
+    """
+    seen: set[str] = set()
+    pruned: list[tuple[FileMetadata, float]] = []
+    for meta, score in results:
+        if score < min_score:
+            break   # sorted descending — no point continuing
+        if meta.file_id in seen:
+            continue
+        seen.add(meta.file_id)
+        pruned.append((meta, score))
+    return pruned
 
 
 async def retrieve_with_scores(
@@ -67,6 +127,7 @@ async def retrieve_with_scores(
     db: AsyncSession,
     top_k: int = 20,
     container_id: str | None = None,
+    anchor_file_ids: list[str] | None = None,
 ) -> list[tuple[FileMetadata, float]]:
     """
     Full 9-stage retrieval pipeline.
@@ -76,11 +137,19 @@ async def retrieve_with_scores(
 
     container_id: when set, retrieval is restricted to files in that
     container. Used by the chat container picker.
+
+    anchor_file_ids: resolver-pinned file IDs from EntityResolver. When
+    provided, these IDs are merged into the graph_expand seed list so
+    their relationship neighbors enter RRF fusion alongside the retrieval
+    candidates. This makes relationship neighbors of high-confidence
+    entity tables rank-eligible via RRF without bypassing retrieval.
     """
     if not query or not query.strip():
         return []
 
-    # ── Load user's domain restrictions (PHASE 15) ───────────────────────────
+    # Phase 7: Clamp top_k to policy ceiling to prevent oversized result sets
+    # from stressing RRF fusion, graph expansion, and trust propagation.
+    top_k = min(top_k, _MAX_TOP_K)
     # Admin users are unrestricted. Regular users may have allowed_domains set.
     allowed_domains: list[str] | None = None
     if not is_admin and user_id:
@@ -113,8 +182,13 @@ async def retrieve_with_scores(
         )
         if os_results:
             try:
+                _os_seed_ids = [meta.file_id for meta, _ in os_results]
+                if anchor_file_ids:
+                    # Merge resolver anchors so THEIR neighbors also enter RRF.
+                    # dict.fromkeys preserves insertion order and deduplicates.
+                    _os_seed_ids = list(dict.fromkeys(_os_seed_ids + anchor_file_ids))
                 graph_results = await graph_expand(
-                    seed_file_ids=[meta.file_id for meta, _ in os_results],
+                    seed_file_ids=_os_seed_ids,
                     user_id=user_id,
                     is_admin=is_admin,
                     db=db,
@@ -125,9 +199,8 @@ async def retrieve_with_scores(
             except Exception as exc:
                 chat_logger.warning("retrieval_graph_expand_error", error=str(exc)[:200])
                 graph_results = []
-            return rrf_fuse([os_results, graph_results], top_k=top_k)
+            return _trust_attenuate(rrf_fuse([os_results, graph_results], top_k=top_k))
 
-    # ── Stages 4-6: sequential retrieval ─────────────────────────────────────
     # SQLAlchemy async sessions share one connection and do not support
     # concurrent operations. Run BM25, fuzzy, vector sequentially.
     # Each stage is wrapped independently — a failing stage returns [] instead
@@ -136,7 +209,7 @@ async def retrieve_with_scores(
         bm25_results = await bm25_search(
             query, user_id, is_admin, db,
             date_from=date_from, date_to=date_to,
-            limit=_STAGE_LIMIT,
+            limit=_MAX_BM25_CANDIDATES,
             allowed_domains=allowed_domains,
             container_id=container_id,
         )
@@ -148,7 +221,7 @@ async def retrieve_with_scores(
         fuzzy_results = await fuzzy_search(
             query, user_id, is_admin, db,
             date_from=date_from, date_to=date_to,
-            limit=_STAGE_LIMIT,
+            limit=_MAX_FUZZY_CANDIDATES,
             allowed_domains=allowed_domains,
             container_id=container_id,
         )
@@ -160,13 +233,21 @@ async def retrieve_with_scores(
         vector_results = await vector_search(
             query, user_id, is_admin, db,
             date_from=date_from, date_to=date_to,
-            limit=_STAGE_LIMIT,
+            limit=_MAX_VECTOR_CANDIDATES,
             allowed_domains=allowed_domains,
             container_id=container_id,
         )
     except Exception as exc:
         chat_logger.warning("retrieval_vector_error", error=str(exc)[:200])
         vector_results = []
+
+    # ── Score floor + deduplication ───────────────────────────────────────────
+    # Drop candidates below the minimum score floor to reduce RRF list noise.
+    # Then deduplicate by file_id within each channel so one file can't rank
+    # twice in the same channel due to multiple fuzzy/keyword matches.
+    bm25_results   = _prune_and_dedup(bm25_results,   _RETRIEVAL_MIN_SCORE)
+    fuzzy_results  = _prune_and_dedup(fuzzy_results,  _RETRIEVAL_MIN_SCORE)
+    vector_results = _prune_and_dedup(vector_results, _RETRIEVAL_MIN_SCORE)
 
     # ── Stage 7: approved semantic graph expansion ────────────────────────────
     try:
@@ -175,6 +256,10 @@ async def retrieve_with_scores(
             top_k=min(_STAGE_LIMIT, max(top_k, 1)),
         )
         seed_file_ids = [meta.file_id for meta, _ in seed_results]
+        if anchor_file_ids:
+            # Merge resolver anchors into graph-expand seeds so relationship
+            # neighbors of pinned entity tables participate in final RRF.
+            seed_file_ids = list(dict.fromkeys(seed_file_ids + anchor_file_ids))
         graph_results = await graph_expand(
             seed_file_ids=seed_file_ids,
             user_id=user_id,
@@ -189,10 +274,20 @@ async def retrieve_with_scores(
         graph_results = []
 
     # ── Stage 8: RRF fusion ───────────────────────────────────────────────────
-    fused = rrf_fuse(
-        [bm25_results, fuzzy_results, vector_results, graph_results],
-        top_k=top_k,
-    )
+    # Phase 7: Cap total candidate pool before fusion to bound RRF complexity.
+    # Each rank list is already bounded by stage caps; this trims the combined
+    # pool when an unusually large catalog produces many near-tied candidates.
+    _all_candidates = [bm25_results, fuzzy_results, vector_results, graph_results]
+    _total = sum(len(r) for r in _all_candidates)
+    if _total > _MAX_RRF_CANDIDATES:
+        # Trim the noisiest/lowest-signal list (fuzzy) first, then vector, then BM25.
+        for _trim_idx in (1, 2, 0, 3):  # fuzzy, vector, bm25, graph
+            _excess = sum(len(r) for r in _all_candidates) - _MAX_RRF_CANDIDATES
+            if _excess <= 0:
+                break
+            _trim = min(_excess, len(_all_candidates[_trim_idx]))
+            _all_candidates[_trim_idx] = _all_candidates[_trim_idx][:-_trim]
+    fused = _trust_attenuate(rrf_fuse(_all_candidates, top_k=top_k))
 
     chat_logger.info(
         "retrieval_complete",
@@ -202,6 +297,7 @@ async def retrieve_with_scores(
         vector=len(vector_results),
         graph=len(graph_results),
         fused=len(fused),
+        anchor_seeds=len(anchor_file_ids) if anchor_file_ids else 0,
         date_from=str(date_from) if date_from else None,
         date_to=str(date_to) if date_to else None,
     )

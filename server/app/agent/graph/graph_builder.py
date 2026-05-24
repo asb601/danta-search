@@ -68,9 +68,13 @@ def build_agent_node(all_tools: list):
         if count >= MAX_TOOL_CALLS:
             return {"messages": [AIMessage(content="I've gathered enough data. Let me summarise.")]}
 
-        # Model selection: use gpt-4o (primary model).
-        active_llm = get_llm()
-        _ = get_llm_mini  # kept for import compatibility
+        # Model selection: always use gpt-4o-mini.
+        # gpt-4o-mini has higher quota, lower latency (~3x faster than gpt-4o),
+        # and sufficient capability for SQL generation and ERP data answering.
+        # gpt-4o escalation is disabled — it has lower RPM quota which becomes
+        # the bottleneck under concurrent load, making slowdowns worse.
+        active_llm = get_llm_mini()
+        _ = get_llm  # kept for import compatibility
         llm_with_tools = active_llm.bind_tools(all_tools)
 
         # ── Log every message going into the LLM this iteration ──────────────

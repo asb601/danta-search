@@ -18,6 +18,8 @@ from app.core.config import get_settings
 from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
 from app.agent.tools.sql_safety import validate_and_normalise
+import app.services.sql_repair as _repair
+from app.services.execution_guards import ExecutionGuard, ExecutionGuardError
 
 
 def _execute(sql: str, connection_string: str, container_name: str, max_rows: int) -> tuple:
@@ -33,6 +35,7 @@ def build_sql_tools(
     parquet_blob_path: str | None,
     state_store: dict,
     allowed_blob_paths: set[str] | None = None,
+    sql_ctx=None,  # SQLContext | None — passed to repair layer
 ) -> list:
     """Return SQL tools bound to connection context.
 
@@ -55,77 +58,79 @@ def build_sql_tools(
         except ValueError as ve:
             return json.dumps({"error": str(ve)})
 
+        # ── Execution safety guards (pre-execution, deterministic) ─────────────
+        # Checks: SQL length, JOIN count, Cartesian joins, file scan count.
+        # Raises ExecutionGuardError when a structural safety limit is breached.
+        # These are structural checks only — no cost model, no query planning.
+        _guard = ExecutionGuard()
+        try:
+            _guard.check_pre_execution(sql)
+        except ExecutionGuardError as ge:
+            pipeline_logger.error("execution_guard_rejected", reason=str(ge)[:200], sql_preview=sql[:200])
+            return json.dumps({"error": str(ge)})
+
         sql_upper = sql.upper()
 
         # ── Log the complete SQL before execution ──────────────────────────────
         pipeline_logger.info("sql_execute_start", sql=sql)
 
+        # ── Bounded repair loop (max 2 repair attempts after the first failure) ──
+        # Tier 1: deterministic pattern rewrites (zero cost).
+        # Tier 2: focused LLM call with approved joins/columns as constraints.
+        # Re-validates repaired SQL through validate_and_normalise each time.
+        # Never retries on data-shape errors (dtype/Int64) — those need schema
+        # inspection, not SQL repair.
+        _MAX_REPAIR = 2
+        current_sql = sql
+        last_exc: Exception | None = None
+        final_rows: list | None = None
+        final_total: int | None = None
+
         t_exec = time.perf_counter()
-        try:
-            rows, total = _execute(sql, connection_string, container_name, max_rows=20)
-            duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
-
-            # ── Log full result: columns + first 20 rows + timing ──────────────
-            pipeline_logger.info(
-                "sql_execute_done",
-                sql=sql,
-                duration_ms=duration_ms,
-                rows_returned=len(rows),
-                total_rows=total,
-                columns=list(rows[0].keys()) if rows else [],
-                preview_rows=rows[:20],  # first 20 rows in the log
-            )
-
-            chat_logger.info("run_sql_result",
-                             sql_preview=sql[:300],
-                             rows_returned=len(rows),
-                             total_rows=total,
-                             duration_ms=duration_ms)
-
-            state_store["sql_results"] = rows
-            state_store["sql_total_rows"] = total
-            resp: dict = {
-                "row_count": len(rows),
-                "total_rows": total,
-                "columns": list(rows[0].keys()) if rows else [],
-                "rows": rows,
-            }
-            if total > len(rows):
-                resp["warning"] = (
-                    f"Results truncated: showing {len(rows)} of {total} total rows. "
-                    "Add a LIMIT, WHERE, or GROUP BY to get complete results."
+        for _repair_attempt in range(_MAX_REPAIR + 1):
+            try:
+                final_rows, final_total = _execute(
+                    current_sql, connection_string, container_name, max_rows=20
                 )
-            # Detect failed join: SQL has JOIN but joined columns came back entirely null
-            if rows and "JOIN" in sql_upper:
-                all_null_cols = [
-                    col for col in rows[0].keys()
-                    if all(
-                        row.get(col) is None or row.get(col) == ""
-                        for row in rows
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                _exc_ms = round((time.perf_counter() - t_exec) * 1000, 2)
+                metrics.inc("llm_sql_failure_count")
+                pipeline_logger.error(
+                    "sql_execute_error",
+                    sql=current_sql,
+                    duration_ms=_exc_ms,
+                    error=str(exc),
+                    repair_attempt=_repair_attempt,
+                )
+                # Parquet dtype errors require schema inspection, not SQL repair;
+                # skip the repair loop and surface the hint directly.
+                if any(tok in str(exc) for tok in ("dtype", "Int64", "Invalid value ''")):
+                    break
+                if _repair_attempt < _MAX_REPAIR:
+                    repaired = _repair.attempt_repair(
+                        current_sql, exc, sql_ctx, attempt_number=_repair_attempt
                     )
-                ]
-                if all_null_cols:
-                    resp["join_warning"] = (
-                        f"JOIN produced 0 matches: columns {all_null_cols} are entirely null. "
-                        "The two files use incompatible ID systems — do NOT retry or recast the join. "
-                        "STOP. Query the primary file alone using its own IDs, return that data, "
-                        "and tell the user which columns could not be enriched and why."
-                    )
-            return json.dumps(resp, default=str)
-        except Exception as exc:
-            duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
-            metrics.inc("llm_sql_failure_count")
-            pipeline_logger.error(
-                "sql_execute_error",
-                sql=sql,
-                duration_ms=duration_ms,
-                error=str(exc),  # full error, no truncation
-            )
-            error_msg = str(exc)[:500]
-            # Parquet Int64 dtype errors mean the file has empty strings in nullable
-            # integer columns — a Parquet conversion issue, not a SQL logic error.
-            # Give the LLM an explicit recovery hint so it tries specific columns
-            # instead of retrying SELECT *.
+                    if repaired and repaired != current_sql:
+                        try:
+                            repaired = validate_and_normalise(
+                                repaired, allowed_blob_paths=allowed_blob_paths
+                            )
+                            pipeline_logger.info(
+                                "sql_repair_retry",
+                                repair_attempt=_repair_attempt + 1,
+                                sql=repaired,
+                            )
+                            current_sql = repaired
+                            continue
+                        except ValueError:
+                            pass  # repair introduced forbidden keywords — stop
+                break  # no repair possible
+
+        if last_exc is not None:
+            error_msg = str(last_exc)[:500]
             if any(tok in error_msg for tok in ("dtype", "Int64", "Invalid value ''")):
                 return json.dumps({
                     "error": error_msg,
@@ -140,5 +145,63 @@ def build_sql_tools(
                     ),
                 })
             return json.dumps({"error": error_msg})
+
+        rows, total = final_rows, final_total  # type: ignore[assignment]
+        duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
+        # Refresh sql_upper in case the SQL was repaired during the loop
+        sql_upper = current_sql.upper()
+
+        # ── Post-execution guard: large result set warning ─────────────────────
+        _exec_warning = _guard.check_post_execution(rows, total)
+
+        # ── Log full result: columns + first 20 rows + timing ─────────────────
+        pipeline_logger.info(
+            "sql_execute_done",
+            sql=current_sql,
+            duration_ms=duration_ms,
+            rows_returned=len(rows),
+            total_rows=total,
+            columns=list(rows[0].keys()) if rows else [],
+            preview_rows=rows[:20],
+        )
+
+        chat_logger.info("run_sql_result",
+                         sql_preview=current_sql[:300],
+                         rows_returned=len(rows),
+                         total_rows=total,
+                         duration_ms=duration_ms)
+
+        state_store["sql_results"] = rows
+        state_store["sql_total_rows"] = total
+        resp: dict = {
+            "row_count": len(rows),
+            "total_rows": total,
+            "columns": list(rows[0].keys()) if rows else [],
+            "rows": rows,
+        }
+        if _exec_warning:
+            resp["execution_warning"] = _exec_warning
+        if total > len(rows):
+            resp["warning"] = (
+                f"Results truncated: showing {len(rows)} of {total} total rows. "
+                "Add a LIMIT, WHERE, or GROUP BY to get complete results."
+            )
+        # Detect failed join: SQL has JOIN but joined columns came back entirely null
+        if rows and "JOIN" in sql_upper:
+            all_null_cols = [
+                col for col in rows[0].keys()
+                if all(
+                    row.get(col) is None or row.get(col) == ""
+                    for row in rows
+                )
+            ]
+            if all_null_cols:
+                resp["join_warning"] = (
+                    f"JOIN produced 0 matches: columns {all_null_cols} are entirely null. "
+                    "The two files use incompatible ID systems — do NOT retry or recast the join. "
+                    "STOP. Query the primary file alone using its own IDs, return that data, "
+                    "and tell the user which columns could not be enriched and why."
+                )
+        return json.dumps(resp, default=str)
 
     return [run_sql]

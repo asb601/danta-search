@@ -10,6 +10,7 @@ This module orchestrates the pipeline:
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import threading
@@ -23,7 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.catalog_cache import invalidate_catalog_cache, load_catalog  # re-export
 from app.agent.catalog_hydration import hydrate_files, merge_hydrated
 from app.agent.graph.graph_builder import build_graph
-from app.agent.llm import get_llm
+from app.agent.llm import get_llm_mini
+from app.services.business_intent_planner import BusinessIntentPlan, build_business_intent_plan
+from app.services.entity_resolver import EntityCandidate, resolve_entities
+from app.services.sql_context_builder import build_sql_context
+from app.services.execution_strategy import plan_execution_strategy
 from app.agent.prompts.prompt_builder import build_system_prompt
 from app.agent.search_normalization import tokenize_search_query
 from app.retrieval.orchestrator import retrieve_with_scores
@@ -44,8 +49,12 @@ from app.agent.tools.sql import build_sql_tools, _execute as _sql_execute
 from app.agent.tools.stats import build_stats_tool
 from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
+from app.core.orchestration_trace import OrchestrationTrace
 from app.retrieval.embeddings import build_search_text
 from app.services.semantic_policy import get_semantic_policy
+from app.services.graph_health import score_graph_health
+from app.services.trust_propagation import avg_ingestion_confidence as _avg_ing_conf
+from app.services.query_confidence import compute_confidence
 
 # Lazy import — planner is only loaded when first query arrives (avoids circular
 # import at module level; semantic_planner imports FileMetadata / FileRelationship).
@@ -166,7 +175,7 @@ async def _try_planner(
             "Write a concise, precise analytical response. Include key totals, "
             "top values, and observations. Use numbers. Be direct."
         )
-        llm_resp = await get_llm().ainvoke([
+        llm_resp = await get_llm_mini().ainvoke([
             SystemMessage(content=(
                 "You are an enterprise ERP data analyst. Answer the user's question "
                 "based ONLY on the data provided. Be specific with numbers."
@@ -212,15 +221,13 @@ async def _try_planner(
         )
         return None
 
-# How many files to surface in the prompt shortlist.
-# Reduced from 12 → 7 to cut ~2K tokens of fat per turn. The remaining files
-# stay reachable via search_catalog when the agent decides it needs them.
-_SHORTLIST_TOP_K = 7
-
-# How many slots in the shortlist to reserve for "lookup / master" files —
-# generic dimension tables (parties, accounts, masters, dim_*) that almost
-# every entity-lookup query needs but which may not rank well on metric tokens.
-_LOOKUP_RESERVED_SLOTS = 3
+# ── Shortlist sizing (governed by RetrievalPolicy) ────────────────────────────────────────────
+# See server/app/policies/retrieval_policy.py for rationale on each value.
+from app.policies.retrieval_policy import get_retrieval_policy as _get_retrieval_policy  # noqa: E402
+from app.policies.confidence_policy import get_confidence_policy as _get_confidence_policy  # noqa: E402
+_rp = _get_retrieval_policy()
+_SHORTLIST_TOP_K       = _rp.shortlist_top_k
+_LOOKUP_RESERVED_SLOTS = _rp.lookup_reserved_slots
 
 # Lookup-file detection lives in search_normalization so the search_catalog
 # tool can apply the same heuristic.  Re-exported here under the old private
@@ -281,9 +288,53 @@ async def _build_agent_context(
     resolved_container_id = container_id or (
         full_catalog[0].get("container_id") if full_catalog else None
     )
-    field_definitions = await load_schema_registry(
-        db, resolved_container_id, connection_string, container_name
+
+    # ── STEP 2b + 2.4 (PARALLEL): Schema registry + Business intent plan ─────
+    # These two are independent: one is an async DB query, the other is an LLM
+    # call. Running in parallel saves the latency of whichever completes first.
+    field_definitions, intent_plan = await asyncio.gather(
+        load_schema_registry(db, resolved_container_id, connection_string, container_name),
+        build_business_intent_plan(query),
     )
+    intent_plan: BusinessIntentPlan  # type narrowing hint
+
+    # ── Create per-request orchestration trace ────────────────────────────────
+    # Trace accumulates decision telemetry at each stage and is emitted once
+    # at pipeline completion. Created here so it can be passed through ctx.
+    req_id_for_trace = uuid.uuid4().hex
+    trace = OrchestrationTrace(request_id=req_id_for_trace)
+    trace.set_planner(intent_plan)
+
+    # ── STEP 2.45: ENTITY RESOLUTION ─────────────────────────────────────────
+    # Deterministic, metadata-driven. Answers WHERE each planner entity lives.
+    # One batch DB query (column_semantic_roles). No LLM. No schema-wide scans.
+    # Phase 2 (future): entity_resolution will constrain retrieve_with_scores()
+    # scoring so files matching resolved entities rank higher in the shortlist.
+    entity_resolution: dict[str, list[EntityCandidate]] = await resolve_entities(
+        intent_plan.entities, full_catalog, db
+    )
+    trace.set_entity_resolver(entity_resolution)
+
+    # ── Resolver pins: files that MUST survive retrieval pruning ─────────────
+    # Threshold governed by ConfidencePolicy.resolver_pin_threshold (0.85).
+    # Only "semantic_role_match" and strong dimension matches qualify.
+    # Below this, results are probabilistic overlaps that shouldn't override
+    # retrieval ranking (avoids false positives from partial matches).
+    _RESOLVER_PIN_THRESHOLD = _get_confidence_policy().resolver_pin_threshold
+    resolver_pinned_blobs: set[str] = {
+        c.table
+        for candidates in entity_resolution.values()
+        for c in candidates
+        if c.confidence >= _RESOLVER_PIN_THRESHOLD
+    }
+    # file_ids for the same anchors — passed to retrieve_with_scores so
+    # graph_expand uses them as extra seeds and their relationship neighbors
+    # enter RRF fusion (depth-1 expansion via SemanticRelationship).
+    resolver_pinned_file_ids: list[str] = [
+        e["file_id"]
+        for e in full_catalog
+        if e.get("blob_path") in resolver_pinned_blobs and e.get("file_id")
+    ] if resolver_pinned_blobs else []
 
     # ── STEP 2.5: RETRIEVAL — filter catalog to top-K relevant files ─────────
     # Run the 9-stage retrieval pipeline (temporal → BM25 → fuzzy → vector →
@@ -297,6 +348,7 @@ async def _build_agent_context(
             retrieved_with_scores = await retrieve_with_scores(
                 query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K,
                 container_id=container_id,
+                anchor_file_ids=resolver_pinned_file_ids or None,
             )
         except Exception as exc:
             retrieval_error = str(exc)[:200]
@@ -373,6 +425,26 @@ async def _build_agent_context(
         retrieved_ids = {meta.file_id for meta, _ in retrieved_with_scores}
         catalog = [e for e in full_catalog if e.get("file_id") in retrieved_ids]
 
+        # ── Inject resolver-pinned files ──────────────────────────────────────
+        # Entity tables with high resolver confidence (≥0.85) are prepended so
+        # embeddings ranking cannot accidentally prune the authoritative source.
+        # Deduplication: skip any file already present in the retrieval result.
+        if resolver_pinned_blobs:
+            _retrieved_file_ids = {e.get("file_id") for e in catalog}
+            _resolver_injected = [
+                e for e in full_catalog
+                if e.get("blob_path") in resolver_pinned_blobs
+                and e.get("file_id") not in _retrieved_file_ids
+            ]
+            if _resolver_injected:
+                catalog = _resolver_injected + catalog
+                pipeline_logger.info(
+                    "resolver_pins_injected",
+                    pinned=[e.get("blob_path") for e in _resolver_injected],
+                    entities=list(entity_resolution.keys()),
+                    path="retrieval",
+                )
+
         # ── Pin files from the previous turn ─────────────────────────────────
         # If the user is asking a follow-up ("give me 20 rows", "filter by X"),
         # retrieval may rank unrelated files higher. Force any blob_path that
@@ -414,6 +486,12 @@ async def _build_agent_context(
             top_scores=[(meta.file_id, round(s, 4)) for meta, s in retrieved_with_scores[:5]],
             lookup_slots_added=[e.get("blob_path") for e in injected_lookups],
         )
+        trace.set_retrieval_fusion(
+            retrieved_with_scores=retrieved_with_scores,
+            shortlist=catalog,
+            resolver_pins=list(resolver_pinned_blobs),
+            fallback=False,
+        )
     else:
         # Fallback: retrieval returned 0 (or errored) — do in-memory keyword
         # match on the catalog so we still show a reasonable shortlist.
@@ -428,6 +506,23 @@ async def _build_agent_context(
             if _is_lookup_file(e) and e.get("blob_path") not in primary_blobs
         ]
         catalog = primary + lookup_pool[:_LOOKUP_RESERVED_SLOTS]
+
+        # ── Inject resolver-pinned files (fallback path) ──────────────────────
+        if resolver_pinned_blobs:
+            _fallback_file_ids = {e.get("file_id") for e in catalog}
+            _resolver_injected = [
+                e for e in full_catalog
+                if e.get("blob_path") in resolver_pinned_blobs
+                and e.get("file_id") not in _fallback_file_ids
+            ]
+            if _resolver_injected:
+                catalog = _resolver_injected + catalog
+                pipeline_logger.info(
+                    "resolver_pins_injected",
+                    pinned=[e.get("blob_path") for e in _resolver_injected],
+                    entities=list(entity_resolution.keys()),
+                    path="fallback",
+                )
 
         # Pin prior files in the fallback path too
         if prior_files:
@@ -454,6 +549,12 @@ async def _build_agent_context(
             reason=reason,
             total_files=len(full_catalog),
             fallback_files=[e.get("blob_path") for e in catalog],
+        )
+        trace.set_retrieval_fusion(
+            retrieved_with_scores=[],
+            shortlist=catalog,
+            resolver_pins=list(resolver_pinned_blobs),
+            fallback=True,
         )
         metrics.inc("catalog_fallback_count")
 
@@ -503,8 +604,105 @@ async def _build_agent_context(
         sample_rows_files=len(sample_rows_by_blob),
     )
 
+    # ── STEP 2.7: VALIDATED SQL CONTEXT ──────────────────────────────────────
+    # Two batch queries (approved joins + column_semantic_roles) scoped to the
+    # final shortlisted files. Result is injected into the system prompt as a
+    # read-only constraint block so the LLM uses validated join paths and
+    # column bindings instead of free-form semantic guessing.
+    # Non-fatal: an empty SQLContext produces no prompt section.
+    sql_ctx = await build_sql_context(catalog, db)
+    sql_context_note = sql_ctx.to_prompt_section()
+    trace.set_approved_joins(sql_ctx)
+
+    # ── STEP 2.8: EXECUTION STRATEGY ─────────────────────────────────────────
+    # Pure graph-connectivity analysis — no LLM calls, no DB queries.
+    # Runs Union-Find over approved_joins to find connected components in the
+    # shortlist. Determines whether to execute as a single joined SQL, multiple
+    # per-cluster SQLs, or fully independent analyses.
+    # Prevents the LLM from hallucinating joins between unrelated domains.
+    exec_strategy = plan_execution_strategy(catalog, sql_ctx)
+    exec_strategy_note = exec_strategy.to_prompt_section()
+    pipeline_logger.info(
+        "execution_strategy_planned",
+        mode=exec_strategy.mode,
+        clusters=len(exec_strategy.clusters),
+        cluster_sizes=[len(c.file_ids) for c in exec_strategy.clusters],
+    )
+    trace.set_execution_strategy(exec_strategy)
+    # Both constraint sections are injected at the same prompt location
+    # (before HOW TO WORK), so combine them into a single note.
+    sql_context_note = "\n\n".join(filter(None, [sql_context_note, exec_strategy_note]))
+
+    # ── STEP 2.9: GRAPH HEALTH + ORCHESTRATION CONFIDENCE ───────────────────
+    # Both run after sql_ctx + exec_strategy are known. Zero I/O — operate on
+    # data already fetched above. Non-blocking: failures silently produce
+    # neutral scores and never prevent execution.
+    graph_health = score_graph_health(catalog, sql_ctx)
+    if graph_health.health_level in ("degraded", "poor"):
+        metrics.inc("graph_health_degraded_count")
+        pipeline_logger.warning(
+            "graph_health_issue",
+            health_level=graph_health.health_level,
+            anomaly_flags=graph_health.anomaly_flags,
+            edge_coverage=graph_health.edge_coverage,
+            confidence_p50=graph_health.confidence_p50,
+            weak_edge_ratio=graph_health.weak_edge_ratio,
+        )
+
+    confidence = compute_confidence(
+        retrieved_with_scores=retrieved_with_scores,
+        sql_ctx=sql_ctx,
+        entity_resolution=entity_resolution,
+        exec_strategy=exec_strategy,
+        repair_attempts=0,   # initial pre-execution pass; sql.py increments this counter separately
+        graph_health=graph_health,
+    )
+    if confidence.level == "low":
+        metrics.inc("low_confidence_query_count")
+
+    pipeline_logger.info(
+        "orchestration_confidence",
+        score=confidence.score,
+        level=confidence.level,
+        signals=confidence.signals,
+        graph_health=graph_health.health_level,
+    )
+
+    # ── Policy snapshot: capture active thresholds for offline debugging ──────
+    trace.set_policy_snapshot()
+
+    # ── Phase 6: Trust propagation trace ──────────────────────────────────
+    # Summarise ingestion trust across the shortlisted files and emit the
+    # degradation chain so operators can trace WHY confidence degraded.
+    _meta_list = [m for m, _ in retrieved_with_scores] if retrieved_with_scores else []
+    _avg_ing = _avg_ing_conf(_meta_list)
+    _cp_snap = _get_confidence_policy()
+    _attenuated_count = sum(
+        1 for m in _meta_list
+        if m.ingestion_confidence_score is not None
+        and m.ingestion_confidence_score < _cp_snap.ingestion_neutral
+    )
+    trace.set_trust_propagation(
+        avg_ingestion_confidence=_avg_ing,
+        attenuated_file_count=_attenuated_count,
+        degradation_chain=confidence.degradation_chain,
+    )
+    if confidence.degradation_chain:
+        pipeline_logger.info(
+            "confidence_degradation",
+            chain=confidence.degradation_chain,
+            score=confidence.score,
+            avg_ingestion=round(_avg_ing, 3),
+        )
+
+    # ── Phase 8: Calibration diagnostics ─────────────────────────────────────
+    # Records modifier_breakdown + replay_inputs from the ConfidenceScore into
+    # the orchestration trace.  Enables offline score reproduction and modifier
+    # attribution without re-running the pipeline.
+    trace.set_calibration_diagnostics(confidence)
+
     # Per-request state store
-    req_id = uuid.uuid4().hex
+    req_id = req_id_for_trace   # reuse the trace correlation ID as the request ID
     store: dict = {}
     with _stores_lock:
         _request_stores[req_id] = store
@@ -526,6 +724,7 @@ async def _build_agent_context(
     all_tools.extend(build_sql_tools(
         connection_string, container_name, parquet_blob_path, store,
         allowed_blob_paths=allowed_blob_paths,
+        sql_ctx=sql_ctx,  # repair layer uses approved joins/columns as constraints
     ))
     # search_catalog uses the lean full catalog so it can find any file
     # without paying the heavy-field cost.
@@ -557,7 +756,8 @@ async def _build_agent_context(
     # Build graph
     graph = build_graph(all_tools)
 
-    # Build system prompt
+    # Build system prompt — sql_context_note carries both the validated SQL
+    # context (Step 2.7) and the execution strategy (Step 2.8).
     system_prompt = build_system_prompt(
         catalog=catalog,
         parquet_paths_all=parquet_paths_all,
@@ -567,6 +767,7 @@ async def _build_agent_context(
         conversation_context=conversation_context,
         total_file_count=len(full_catalog),
         mentioned_files=mentioned_file_names or None,
+        sql_context_note=sql_context_note,
     )
 
     # ── Log the complete system prompt so we can audit exactly what the LLM sees ──
@@ -600,10 +801,15 @@ async def _build_agent_context(
         "initial_state": initial_state,
         "store": store,
         "req_id": req_id,
+        "trace": trace,
         "catalog_len": len(catalog),
         "total_files": len(full_catalog),
         "container_name": container_name,
         "parquet_blob_path": parquet_blob_path,
+        "intent_plan": intent_plan,
+        "entity_resolution": entity_resolution,
+        "graph_health": graph_health,
+        "confidence": confidence,
     }
 
 
@@ -649,6 +855,7 @@ async def run_agent_query(
     initial_state = ctx["initial_state"]
     store = ctx["store"]
     req_id = ctx["req_id"]
+    trace: OrchestrationTrace = ctx["trace"]
 
     chat_logger.info("agent_start",
                      query=query[:200],
@@ -660,6 +867,8 @@ async def run_agent_query(
         final_state = await graph.ainvoke(initial_state)
     except Exception as exc:
         chat_logger.exception("agent_error", error=str(exc)[:400])
+        trace.set_execution_outcome(rows=0, total=0, duration_ms=0.0, error=str(exc)[:200])
+        trace.emit()
         return {
             "answer": "An error occurred while processing your query. Please try again.",
             "data": [], "chart": None,
@@ -701,6 +910,14 @@ async def run_agent_query(
 
     chart = infer_chart(answer, sql_results)
     sql_total_rows = store.get("sql_total_rows", len(sql_results))
+
+    # Emit orchestration trace for this request
+    trace.set_execution_outcome(
+        rows=len(sql_results),
+        total=sql_total_rows,
+        duration_ms=total_ms,
+    )
+    trace.emit()
 
     return {
         "answer": answer,
@@ -790,6 +1007,7 @@ async def run_agent_query_stream(
     initial_state = ctx["initial_state"]
     store = ctx["store"]
     req_id = ctx["req_id"]
+    trace: OrchestrationTrace = ctx["trace"]
 
     chat_logger.info("agent_stream_start", query=query[:200], file_count=ctx["catalog_len"])
 
@@ -874,6 +1092,8 @@ async def run_agent_query_stream(
 
     except Exception as exc:
         chat_logger.exception("agent_stream_error", error=str(exc)[:400])
+        trace.set_execution_outcome(rows=0, total=0, duration_ms=0.0, error=str(exc)[:200])
+        trace.emit()
         yield {
             "type": "done",
             "payload": {
@@ -933,7 +1153,7 @@ async def run_agent_query_stream(
             )
         if _context_parts:
             try:
-                _synth_resp = await get_llm().ainvoke([
+                _synth_resp = await get_llm_mini().ainvoke([
                     SystemMessage(content=(
                         "You are an ERP data analyst. The user asked a question and the "
                         "system executed queries to find the answer. Write a clear, direct "
@@ -967,6 +1187,14 @@ async def run_agent_query_stream(
 
     chart = infer_chart(final_answer, sql_results)
     sql_total_rows = store.get("sql_total_rows", len(sql_results))
+
+    # Emit orchestration trace for this request (streaming path)
+    trace.set_execution_outcome(
+        rows=len(sql_results),
+        total=sql_total_rows,
+        duration_ms=total_ms,
+    )
+    trace.emit()
 
     yield {
         "type": "done",

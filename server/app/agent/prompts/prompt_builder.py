@@ -243,6 +243,7 @@ def build_system_prompt(
     conversation_context: str = "",
     total_file_count: int | None = None,
     mentioned_files: list[str] | None = None,
+    sql_context_note: str = "",
 ) -> str:
     """Assemble the full system prompt for the agent."""
     parquet_note = build_parquet_note(
@@ -309,6 +310,17 @@ def build_system_prompt(
         last_30_start=last_30_start.isoformat(),
     )
 
+    # Inject validated SQL context right before the HOW TO WORK behavioural rules
+    # so the LLM reads its constraints alongside its work instructions.
+    if sql_context_note:
+        _marker = "--- HOW TO WORK ---"
+        if _marker in system_prompt:
+            system_prompt = system_prompt.replace(
+                _marker, sql_context_note + "\n\n" + _marker, 1
+            )
+        else:
+            system_prompt += "\n\n" + sql_context_note
+
     if conversation_context:
         system_prompt += (
             "\n\n--- CONVERSATION HISTORY ---\n"
@@ -326,3 +338,21 @@ def build_system_prompt(
                      has_conversation_context=bool(conversation_context))
 
     return system_prompt
+
+
+# ── Entity extraction prompt ──────────────────────────────────────────────────
+
+def build_entity_extraction_prompt(query: str) -> str:
+    """
+    Build the user message for GPT-4o-mini entity extraction.
+
+    No system message — the instruction is embedded directly in the user turn
+    to keep the call minimal (matches the llm_tasks single-message convention).
+    Output contract: strict JSON {"entities": ["snake_case_noun", ...]}.
+    """
+    return (
+        "Extract business entity nouns from the following query.\n"
+        'Return ONLY valid JSON: {"entities": ["entity_1", "entity_2"]}.\n'
+        "Normalize to snake_case. No prose, no SQL, no schema names.\n\n"
+        f"Query: {query}"
+    )

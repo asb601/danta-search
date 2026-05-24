@@ -142,6 +142,7 @@ async def _query_filtered_catalog(
         FileMetadata.columns_info,   # needed only to extract column names; not hydrated
         FileMetadata.date_range_start,
         FileMetadata.date_range_end,
+        FileMetadata.ingestion_confidence_score,  # Phase 6: trust propagation weight
     )
     if container_id:
         meta_stmt = meta_stmt.where(FileMetadata.container_id == container_id)
@@ -211,6 +212,7 @@ async def _query_filtered_catalog(
             "column_names": _extract_column_names(r.columns_info),
             "date_range_start": str(r.date_range_start) if r.date_range_start else None,
             "date_range_end": str(r.date_range_end) if r.date_range_end else None,
+            "ingestion_confidence_score": r.ingestion_confidence_score,  # Phase 6
         })
 
     if not catalog:

@@ -6,7 +6,7 @@ import json
 import time
 
 from app.core.config import get_settings
-from app.core.logger import ingest_logger
+from app.core.logger import chat_logger, ingest_logger
 from app.core.openai_client import get_client
 from app.core.token_counter import count_tokens, elapsed_ms, track_and_log
 
@@ -175,3 +175,37 @@ Sample rows: {json.dumps(sample_rows[:description_sample_rows], default=str)}"""
         good_for=result.get("good_for", []),
     )
     return result
+
+
+async def extract_entities_for_query(query: str) -> list[str]:
+    """Extract business entity nouns from a user query using GPT-4o-mini.
+
+    Prompt is sourced from prompt_builder (local import to keep core→agent
+    dependency at function level, not module level).
+    Uses the shared AzureOpenAI client; mini deployment for low cost.
+    Never raises; returns [] on any error.
+    """
+    def _run() -> list[str]:
+        from app.agent.prompts.prompt_builder import build_entity_extraction_prompt  # noqa: PLC0415
+        client, _ = get_client()
+        deployment = get_settings().AZURE_OPENAI_DEPLOYMENT_MINI
+        prompt = build_entity_extraction_prompt(query)
+        resp = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            max_completion_tokens=80,
+            temperature=0,
+        )
+        raw = (resp.choices[0].message.content or "{}").strip()
+        parsed = safe_parse_json(raw)
+        entities = parsed.get("entities", [])
+        if isinstance(entities, list):
+            return [str(e).strip().lower() for e in entities if e and str(e).strip()]
+        return []
+
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception as exc:
+        chat_logger.warning("entity_extraction_error", error=str(exc)[:200])
+        return []

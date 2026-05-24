@@ -47,6 +47,25 @@ _counters: dict[str, int | float] = {
     # Ingestion
     "parquet_conversions":      0,
     "parquet_conversion_errors": 0,
+    # SQL repair telemetry
+    "sql_repair_tier1_count":      0,   # deterministic Tier-1 repair applied
+    "sql_repair_tier2_count":      0,   # LLM Tier-2 repair applied
+    "sql_repair_declined_count":   0,   # repair attempted, returned None (no fix found)
+    "sql_repair_intent_rejected":  0,   # _validate_repair_intent check failed
+    # Graph + join telemetry
+    "weak_join_surfaced_count":    0,   # joins below soft floor but above hard floor
+    "graph_health_degraded_count": 0,   # graph health computed as degraded or poor
+    "orphan_entity_count":         0,   # orphan entities detected
+    # Retrieval telemetry
+    "retrieval_miss_count":        0,   # retrieval returned 0 results
+    "resolver_miss_count":         0,   # entity resolver returned 0 candidates
+    # Execution infrastructure
+    "execution_timeout_count":     0,   # query_executor timeout fired
+    "execution_guard_rejection":   0,   # execution guard hard pre-execution rejection
+    "execution_concurrency_peak":  0,   # peak concurrent queries (gauge, not cumulative)
+    # Confidence telemetry
+    "low_confidence_query_count":  0,   # orchestration confidence < 0.50
+    "ingestion_audit_error_count": 0,   # ingestion audit found error-level findings
 }
 
 
