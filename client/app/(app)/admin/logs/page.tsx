@@ -1292,11 +1292,11 @@ function AuditRow({ row }: { row: AuditEntry }) {
             <span className="text-muted-foreground">duration</span><span className="text-foreground">{formatDuration(req?.duration_ms ?? undefined)}</span>
             <span className="text-muted-foreground">ip</span><span className="text-foreground break-all">{req?.ip_address || "—"}</span>
             <span className="text-muted-foreground">route</span><span className="text-foreground break-all">{req?.route_template || "—"}</span>
-            <span className="text-muted-foreground">file</span><span className="text-foreground break-all">{row?.file_name || row?.file_id || details.file_name as string || "—"}</span>
-            <span className="text-muted-foreground">folder</span><span className="text-foreground break-all">{details.folder_name as string || details.folder_id as string || "—"}</span>
-            <span className="text-muted-foreground">container</span><span className="text-foreground break-all">{details.container_id as string || "—"}</span>
-            <span className="text-muted-foreground">target_user</span><span className="text-foreground break-all">{details.target_user_email as string || details.target_user_id as string || "—"}</span>
-            {details.error && <><span className="text-muted-foreground">error</span><span className="text-red-700 break-all">{String(details.error)}</span></>}
+            <span className="text-muted-foreground">file</span><span className="text-foreground break-all">{row?.file_name || row?.file_id || String(details.file_name ?? "") || "—"}</span>
+            <span className="text-muted-foreground">folder</span><span className="text-foreground break-all">{String(details.folder_name ?? "") || String(details.folder_id ?? "") || "—"}</span>
+            <span className="text-muted-foreground">container</span><span className="text-foreground break-all">{String(details.container_id ?? "") || "—"}</span>
+            <span className="text-muted-foreground">target_user</span><span className="text-foreground break-all">{String(details.target_user_email ?? "") || String(details.target_user_id ?? "") || "—"}</span>
+            {details.error != null && <><span className="text-muted-foreground">error</span><span className="text-red-700 break-all">{String(details.error)}</span></>}
             {Object.keys(details).filter(k => !["route_template","user_agent","folder_id","folder_name","container_id","target_user_id","target_user_email","target_user_name","file_name","error"].includes(k)).length > 0 && (
               <><span className="text-muted-foreground">details</span><span className="text-foreground break-all">{JSON.stringify(details)}</span></>
             )}
