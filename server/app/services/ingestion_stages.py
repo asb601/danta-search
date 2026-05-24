@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ai_client import generate_file_description
 from app.core.database import async_session as _async_session
+from app.core.db_logger import log_ingest_event as _db_log
 from app.core.duckdb_client import sample_file
 from app.core.logger import ingest_logger
 from app.models.container import ContainerConfig
@@ -102,13 +103,26 @@ async def prepare_pipeline(file_id: str) -> Payload:
 
         file.ingest_status = IngestStatus.RUNNING.value
         await db.commit()
-        return {
+
+        payload_out = {
             "file_id": file_id,
             "status": PayloadStatus.QUEUED.value,
             "actor_user_id": str(actor.id) if actor else None,
             "actor_email": actor.email if actor else None,
             "actor_role": actor.role if actor else None,
         }
+        await _db_log(
+            event="chain_start",
+            level="info",
+            trace_id=file_id,
+            file_id=file_id,
+            file_name=file.name,
+            actor_user_id=payload_out["actor_user_id"],
+            actor_email=payload_out["actor_email"],
+            actor_role=payload_out["actor_role"],
+            details={"filename": file.name, "blob_path": file.blob_path},
+        )
+        return payload_out
 
 
 async def clean_file_stage(payload: Payload) -> Payload:
@@ -153,6 +167,7 @@ async def clean_file_stage(payload: Payload) -> Payload:
             analytics_row.cleaning_audit = prep.cleaning_audit
             await db.commit()
 
+            dur = _ms(start)
             ingest_logger.info(
                 "ingest_stage",
                 stage=stage,
@@ -161,7 +176,26 @@ async def clean_file_stage(payload: Payload) -> Payload:
                 clean_blob_path=prep.clean_blob_path,
                 original_rows=prep.original_rows,
                 clean_rows=prep.clean_rows,
-                duration_ms=_ms(start),
+                duration_ms=dur,
+            )
+            await _db_log(
+                event="ingest_stage",
+                level="info",
+                trace_id=file_id,
+                file_id=file_id,
+                file_name=file.name,
+                duration_ms=dur,
+                actor_user_id=payload.get("actor_user_id"),
+                actor_email=payload.get("actor_email"),
+                actor_role=payload.get("actor_role"),
+                details={
+                    "stage": stage,
+                    "status": "done",
+                    "original_rows": prep.original_rows,
+                    "clean_rows": prep.clean_rows,
+                    "quarantine_count": prep.quarantine_count,
+                    "clean_blob_path": prep.clean_blob_path,
+                },
             )
             return _next(payload, stage=stage, clean_blob_path=prep.clean_blob_path)
 
@@ -170,13 +204,26 @@ async def clean_file_stage(payload: Payload) -> Payload:
             await db.commit()
             raise RuntimeError(f"source blob missing in Azure: {file.blob_path}")
 
+        dur = _ms(start)
         ingest_logger.info(
             "ingest_stage",
             stage=stage,
             status="skipped",
             reason="already_preprocessed_or_not_supported",
             file_id=file_id,
-            duration_ms=_ms(start),
+            duration_ms=dur,
+        )
+        await _db_log(
+            event="ingest_stage",
+            level="info",
+            trace_id=file_id,
+            file_id=file_id,
+            file_name=file.name,
+            duration_ms=dur,
+            actor_user_id=payload.get("actor_user_id"),
+            actor_email=payload.get("actor_email"),
+            actor_role=payload.get("actor_role"),
+            details={"stage": stage, "status": "skipped", "reason": "already_preprocessed_or_not_supported"},
         )
         return _next(payload, stage=stage, clean_blob_path=file.blob_path)
 
@@ -230,13 +277,25 @@ async def parquet_stage(payload: Payload) -> Payload:
         ).scalar_one_or_none()
         parquet_blob_path = analytics.parquet_blob_path if analytics else None
 
+    dur = _ms(start)
     ingest_logger.info(
         "ingest_stage",
         stage=stage,
         status="done",
         file_id=file_id,
         parquet_blob_path=parquet_blob_path,
-        duration_ms=_ms(start),
+        duration_ms=dur,
+    )
+    await _db_log(
+        event="ingest_stage",
+        level="info",
+        trace_id=file_id,
+        file_id=file_id,
+        duration_ms=dur,
+        actor_user_id=payload.get("actor_user_id"),
+        actor_email=payload.get("actor_email"),
+        actor_role=payload.get("actor_role"),
+        details={"stage": stage, "status": "done", "parquet_blob_path": parquet_blob_path},
     )
     return _next(payload, stage=stage, parquet_blob_path=parquet_blob_path)
 
@@ -287,6 +346,7 @@ async def metadata_stage(payload: Payload) -> Payload:
             column_types=column_types,
         )
 
+        dur = _ms(start)
         ingest_logger.info(
             "ingest_stage",
             stage=stage,
@@ -294,7 +354,24 @@ async def metadata_stage(payload: Payload) -> Payload:
             file_id=file_id,
             columns=len(sample["columns_info"]),
             row_count=sample["row_count"],
-            duration_ms=_ms(start),
+            duration_ms=dur,
+        )
+        await _db_log(
+            event="ingest_stage",
+            level="info",
+            trace_id=file_id,
+            file_id=file_id,
+            file_name=file.name,
+            duration_ms=dur,
+            actor_user_id=payload.get("actor_user_id"),
+            actor_email=payload.get("actor_email"),
+            actor_role=payload.get("actor_role"),
+            details={
+                "stage": stage,
+                "status": "done",
+                "row_count": sample["row_count"],
+                "columns": len(sample["columns_info"]),
+            },
         )
         return _next(payload, stage=stage)
 
@@ -357,12 +434,20 @@ async def ai_description_stage(payload: Payload) -> Payload:
         metadata.ingest_error = None
         await db.commit()
 
+        dur = _ms(start)
         ingest_logger.info(
             "ingest_stage",
             stage=stage,
             status="done",
             file_id=file_id,
-            duration_ms=_ms(start),
+            duration_ms=dur,
+        )
+        await _db_log(
+            event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+            file_name=file.name, duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+            actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+            domain_tag=domain_tag,
+            details={"stage": stage, "status": "done", "summary_length": len(metadata.ai_description or "")},
         )
 
         try:
@@ -411,6 +496,7 @@ async def ontology_stage(payload: Payload) -> Payload:
         metadata.column_role_evidence = role_evidence or None
         await db.commit()
 
+        dur = _ms(start)
         ingest_logger.info(
             "ingest_stage",
             stage=stage,
@@ -418,9 +504,18 @@ async def ontology_stage(payload: Payload) -> Payload:
             file_id=file_id,
             resolved=len(col_roles),
             source=role_src,
-            duration_ms=_ms(start),
+            duration_ms=dur,
         )
-        return _next(payload, stage=stage)(payload: Payload) -> Payload:
+        await _db_log(
+            event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+            file_name=file.name, duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+            actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+            details={"stage": stage, "status": "done", "resolved": len(col_roles), "source": role_src},
+        )
+        return _next(payload, stage=stage)
+
+
+async def embedding_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
     stage = StageName.EMBEDDING.value
@@ -438,13 +533,20 @@ async def ontology_stage(payload: Payload) -> Payload:
         metadata.description_embedding = await embed_text(search_text)
         await db.commit()
 
+        dur = _ms(start)
         ingest_logger.info(
             "ingest_stage",
             stage=stage,
             status="done",
             file_id=file_id,
             search_text_len=len(search_text),
-            duration_ms=_ms(start),
+            duration_ms=dur,
+        )
+        await _db_log(
+            event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+            duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+            actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+            details={"stage": stage, "status": "done", "search_text_len": len(search_text)},
         )
         return _next(payload, stage=stage)
 
@@ -466,12 +568,19 @@ async def opensearch_stage(payload: Payload) -> Payload:
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         await index_metadata_document(metadata, db)
 
+    dur = _ms(start)
     ingest_logger.info(
         "ingest_stage",
         stage=stage,
         status="done",
         file_id=file_id,
-        duration_ms=_ms(start),
+        duration_ms=dur,
+    )
+    await _db_log(
+        event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+        duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+        actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+        details={"stage": stage, "status": "done"},
     )
     return _next(payload, stage=stage)
 
@@ -499,13 +608,20 @@ async def analytics_stage(payload: Payload) -> Payload:
             db=db,
         )
 
+        dur = _ms(start)
         ingest_logger.info(
             "ingest_stage",
             stage=stage,
             status="done",
             file_id=file_id,
             row_count=analytics.row_count,
-            duration_ms=_ms(start),
+            duration_ms=dur,
+        )
+        await _db_log(
+            event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+            duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+            actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+            details={"stage": stage, "status": "done", "row_count": analytics.row_count},
         )
         return _next(payload, stage=stage)
 
@@ -538,13 +654,20 @@ async def relationship_stage(payload: Payload) -> Payload:
             await db.execute(delete(ColumnKeyRegistry).where(ColumnKeyRegistry.file_id == file_id))
             await db.commit()
 
+            dur = _ms(start)
             ingest_logger.info(
                 "ingest_stage",
                 stage=stage,
                 status="skipped",
                 reason="dictionary_file_not_joinable",
                 file_id=file_id,
-                duration_ms=_ms(start),
+                duration_ms=dur,
+            )
+            await _db_log(
+                event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+                duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+                actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+                details={"stage": stage, "status": "skipped", "reason": "dictionary_file_not_joinable"},
             )
             return _next(payload, stage=stage, relationships_created=0)
 
@@ -558,13 +681,20 @@ async def relationship_stage(payload: Payload) -> Payload:
             db=db,
         )
 
+        dur = _ms(start)
         ingest_logger.info(
             "ingest_stage",
             stage=stage,
             status="done",
             file_id=file_id,
             relationships_created=relationship_count,
-            duration_ms=_ms(start),
+            duration_ms=dur,
+        )
+        await _db_log(
+            event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+            duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+            actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+            details={"stage": stage, "status": "done", "relationships_created": relationship_count},
         )
         return _next(payload, stage=stage, relationships_created=relationship_count)
 
@@ -580,6 +710,7 @@ async def semantic_layer_stage(payload: Payload) -> Payload:
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         result = await build_semantic_layer_for_file(file_id, db)
 
+    dur = _ms(start)
     ingest_logger.info(
         "ingest_stage",
         stage=stage,
@@ -587,7 +718,17 @@ async def semantic_layer_stage(payload: Payload) -> Payload:
         file_id=file_id,
         entity=result.get("entity"),
         relationships=result.get("relationships"),
-        duration_ms=_ms(start),
+        duration_ms=dur,
+    )
+    await _db_log(
+        event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+        duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+        actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+        details={
+            "stage": stage, "status": "done",
+            "entity": result.get("entity"),
+            "relationships": result.get("relationships"),
+        },
     )
     return _next(payload, stage=stage, semantic_layer=result)
 
@@ -645,6 +786,16 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
         ingest_logger.warning("catalog_invalidate_failed", file_id=file_id, error=str(exc)[:200])
 
     ingest_logger.info("ingest_stage", stage=stage, status="done", file_id=file_id)
+    await _db_log(
+        event="chain_end",
+        level="info",
+        trace_id=file_id,
+        file_id=file_id,
+        actor_user_id=payload.get("actor_user_id"),
+        actor_email=payload.get("actor_email"),
+        actor_role=payload.get("actor_role"),
+        details={"stage": stage, "status": "done"},
+    )
     return _next(payload, stage=stage, status=PayloadStatus.DONE.value)
 
 
@@ -670,3 +821,11 @@ async def mark_ingestion_failed(file_id: str, stage: str, exc: BaseException) ->
             ))
 
         await db.commit()
+
+    await _db_log(
+        event="ingest_failed",
+        level="error",
+        trace_id=file_id,
+        file_id=file_id,
+        details={"stage": stage, "error": error},
+    )

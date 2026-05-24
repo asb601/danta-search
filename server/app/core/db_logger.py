@@ -71,3 +71,42 @@ def log_pipeline_event(
         asyncio.get_running_loop().create_task(_write(row_kwargs))
     except RuntimeError:
         pass  # no running event loop (test context) — skip silently
+
+
+async def log_ingest_event(
+    *,
+    event: str,
+    level: str = "info",
+    trace_id: str | None = None,
+    file_id: str | None = None,
+    file_name: str | None = None,
+    domain_tag: str | None = None,
+    actor_user_id: str | None = None,
+    actor_email: str | None = None,
+    actor_role: str | None = None,
+    duration_ms: float | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Write an ingestion event to server_logs.
+
+    This is an awaitable (not fire-and-forget) so it works correctly inside
+    Celery worker async stages called via _run_async().  DB errors are silently
+    discarded — a log failure never aborts the ingestion pipeline.
+    """
+    row_kwargs: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc),
+        "log_type": "ingestion",
+        "event": event[:80],
+        "level": level if level in _VALID_LEVELS else "info",
+        "trace_id": trace_id or None,
+        "actor_user_id": actor_user_id or None,
+        "actor_email": actor_email or None,
+        "actor_role": actor_role or None,
+        "file_id": file_id or None,
+        "file_name": file_name or None,
+        "domain_tag": domain_tag or None,
+        "duration_ms": duration_ms,
+        "details": details if details else None,
+    }
+    await _write(row_kwargs)

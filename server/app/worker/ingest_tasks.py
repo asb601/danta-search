@@ -105,6 +105,7 @@ def _run_stage(
     except (SoftTimeLimitExceeded, Exception) as exc:
         if stage_value in _NON_FATAL_STAGES:
             from app.core.logger import ingest_logger
+            from app.core.db_logger import log_ingest_event as _db_log_ev
 
             error = str(exc)[:500]
             ingest_logger.warning(
@@ -113,6 +114,16 @@ def _run_stage(
                 file_id=file_id,
                 error=error,
             )
+            _run_async(_db_log_ev(
+                event="ingest_stage",
+                level="warning",
+                trace_id=file_id,
+                file_id=file_id,
+                actor_user_id=stage_payload.get("actor_user_id"),
+                actor_email=stage_payload.get("actor_email"),
+                actor_role=stage_payload.get("actor_role"),
+                details={"stage": stage_value, "status": "nonfatal_error", "error": error},
+            ))
             nonfatal_errors = list(stage_payload.get("nonfatal_errors") or [])
             nonfatal_errors.append({"stage": stage_value, "error": error})
             return {
@@ -122,6 +133,7 @@ def _run_stage(
             }
 
         from app.core.logger import ingest_logger
+        from app.core.db_logger import log_ingest_event as _db_log_ev
         import traceback as _tb
 
         error_str = str(exc)[:500]
@@ -136,6 +148,23 @@ def _run_stage(
             max_retries=task.max_retries,
             traceback=_tb.format_exc()[-1000:],
         )
+        _run_async(_db_log_ev(
+            event="ingest_stage",
+            level="error",
+            trace_id=file_id,
+            file_id=file_id,
+            actor_user_id=stage_payload.get("actor_user_id"),
+            actor_email=stage_payload.get("actor_email"),
+            actor_role=stage_payload.get("actor_role"),
+            details={
+                "stage": stage_value,
+                "status": "fatal_error",
+                "error": error_str,
+                "exc_type": exc_type,
+                "attempt": task.request.retries + 1,
+                "traceback": _tb.format_exc()[-2000:],
+            },
+        ))
 
         if task.request.retries >= task.max_retries:
             from app.services.ingestion_stages import mark_ingestion_failed
