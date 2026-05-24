@@ -496,13 +496,14 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
         ingest_logger.info("step", step="3b/6", name="resolve_roles", status="started")
         try:
             from app.services.column_role_resolver import resolve_column_roles  # noqa: PLC0415
-            col_roles, role_src = await resolve_column_roles(
+            col_roles, role_src, role_evidence = await resolve_column_roles(
                 columns_info=sample["columns_info"],
                 filename=file.name,
                 glossary=column_glossary or None,
             )
             metadata.column_semantic_roles = col_roles or None
             metadata.role_source = role_src
+            metadata.column_role_evidence = role_evidence or None
             await db.commit()
             ingest_logger.info("step", step="3b/6", name="resolve_roles", status="done",
                                resolved=len(col_roles),

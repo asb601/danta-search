@@ -148,6 +148,18 @@ async def detect_relationships(
             )
         )
         rel = existing.scalar_one_or_none()
+
+        # Build edge provenance — key context for audit and debugging
+        edge_prov = {
+            "card_a":      int(match.get("card_a") or 0),
+            "card_b":      int(match.get("card_b") or 0),
+            "role_a":      match.get("role_a"),
+            "role_b":      match.get("role_b"),
+            "key_kind_a":  match.get("key_kind_a"),
+            "key_kind_b":  match.get("key_kind_b"),
+        }
+        ev_count = int(match.get("overlap_count") or 0)
+
         if not rel:
             rel = FileRelationship(
                 id=str(uuid.uuid4()),
@@ -162,6 +174,8 @@ async def detect_relationships(
                 confidence_score=confidence,
                 value_overlap_pct=overlap_pct,
                 join_type=join_type,
+                evidence_count=ev_count,
+                edge_provenance=edge_prov,
             )
             db.add(rel)
             created += 1
@@ -172,6 +186,8 @@ async def detect_relationships(
             rel.role_source = "fingerprint_index"
             rel.value_overlap_pct = max(rel.value_overlap_pct or 0.0, overlap_pct)
             rel.join_type = "INNER JOIN" if (rel.value_overlap_pct or 0.0) >= policy.inner_join_overlap else "LEFT JOIN"
+            rel.evidence_count = max(rel.evidence_count or 0, ev_count)
+            rel.edge_provenance = edge_prov
 
     if matches:
         ingest_logger.info(
