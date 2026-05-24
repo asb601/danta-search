@@ -1,14 +1,12 @@
 import json
 import logging
-import logging.handlers
 import textwrap
 from pathlib import Path
 
 import structlog
 
-# ── Log directory ────────────────────────────────────────────────────────────
+# ── Log directory (read-only reference; still used by logs.py for file reads until Step 4) ──
 LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
 
 # ── Logger categories ────────────────────────────────────────────────────────
 _SYSTEM_LOGGERS = {"upload", "folder", "container", "auth", "blob", "db", "users"}
@@ -445,10 +443,10 @@ _pretty_formatter = _PipelinePrettyFormatter()
 
 
 def format_pipeline_line(json_line: str) -> str:
-    """Format a single pipeline.log JSON line into human-readable text.
+    """Format a single pipeline JSON line into human-readable text.
 
-    Used by the /logs/pipeline/stream and /logs/pipeline/tail HTTP endpoints
-    so developers can view live pipeline traces without SSH access.
+    Used by the /logs/pipeline/stream and /logs/pipeline/tail HTTP endpoints.
+    Will be removed in Step 4 once those endpoints are rewritten to query server_logs.
     """
     record = logging.LogRecord(
         name="pipeline", level=logging.INFO, pathname="", lineno=0,
@@ -456,66 +454,117 @@ def format_pipeline_line(json_line: str) -> str:
     )
     return _pretty_formatter.format(record)
 
-# ── JSON file handler factory ────────────────────────────────────────────────
-def _make_json_handler(
-    filename: str, allowed: set[str]
-) -> logging.handlers.RotatingFileHandler:
-    handler = logging.handlers.RotatingFileHandler(
-        LOG_DIR / filename,
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=5,
-        encoding="utf-8",
-    )
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    handler.addFilter(_NameFilter(allowed))
-    return handler
+# ── Logger name → server_logs.log_type mapping (single source of truth) ──────
+# Audit is excluded — those rows are written directly by services/audit_log.py.
+_LOGGER_TO_LOG_TYPE: dict[str, str] = {
+    # system loggers
+    "upload":    "system",
+    "folder":    "system",
+    "container": "system",
+    "auth":      "system",
+    "blob":      "system",
+    "db":        "system",
+    "users":     "system",
+    # AI pipeline loggers
+    "chat":      "ai_pipeline",
+    "ingest":    "ingestion",
+    "pipeline":  "ai_pipeline",
+    # LLM + cost loggers
+    "llm":       "llm",
+    "cost":      "cost",
+}
+
+# Structlog metadata fields that have dedicated columns — excluded from details JSONB
+# to avoid storing the same value twice.
+_SKIP_DETAIL_KEYS = frozenset({
+    "event", "level", "timestamp", "logger",
+    "trace_id", "file_id", "file_name", "filename",
+    "domain_tag", "actor_user_id", "actor_email", "actor_role",
+})
 
 
-# System logs       → logs/system.log
-_system_handler = _make_json_handler("system.log", _SYSTEM_LOGGERS)
+# ── Async DB handler ──────────────────────────────────────────────────────────
+class _DBHandler(logging.Handler):
+    """
+    Writes every structlog JSON record to the server_logs table.
 
-# AI pipeline logs  → logs/ai_pipeline.log
-_ai_handler = _make_json_handler("ai_pipeline.log", _AI_LOGGERS)
+    emit() is synchronous (logging API requirement) so it schedules an async
+    coroutine on the running event loop via create_task().  If no loop is
+    running yet (e.g. during module import), the record is silently dropped —
+    this only happens for log lines emitted before the FastAPI lifespan starts.
+    """
 
-# LLM call logs     → logs/llm_calls.log  (every individual LLM invocation)
-_llm_handler = _make_json_handler("llm_calls.log", _LLM_LOGGERS)
+    def emit(self, record: logging.LogRecord) -> None:
+        log_type = _LOGGER_TO_LOG_TYPE.get(record.name)
+        if log_type is None:
+            return  # not a logger we manage (e.g. audit, third-party)
+        try:
+            ev = json.loads(record.getMessage())
+        except (json.JSONDecodeError, ValueError):
+            ev = {"raw": record.getMessage()}
 
-# Cost / money logs  → logs/costs.log  (every LLM + Azure blob cost event)
-_cost_handler = _make_json_handler("costs.log", _COST_LOGGERS)
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._write(log_type, ev))
+        except Exception:
+            pass  # never crash the application due to logging
 
-# Pipeline deep-trace logs  → logs/pipeline.log
-# Contains: full prompts, full SQL, full LLM tool-call args, full tool outputs
-_pipeline_handler = _make_json_handler("pipeline.log", _PIPELINE_LOGGERS)
+    @staticmethod
+    async def _write(log_type: str, ev: dict) -> None:
+        import uuid
+        from app.core.database import async_session
+        from app.models.server_log import ServerLog
+        try:
+            async with async_session() as db:
+                details = {k: v for k, v in ev.items() if k not in _SKIP_DETAIL_KEYS} or None
+                row = ServerLog(
+                    id=str(uuid.uuid4()),
+                    log_type=log_type,
+                    event=str(ev.get("event", "unknown"))[:80],
+                    level=str(ev.get("level", "info")),
+                    actor_user_id=ev.get("actor_user_id"),
+                    actor_email=ev.get("actor_email"),
+                    actor_role=ev.get("actor_role"),
+                    domain_tag=ev.get("domain_tag"),
+                    trace_id=ev.get("trace_id"),
+                    file_id=ev.get("file_id"),
+                    # ingest events use "filename"; chat events may use "file_name"
+                    file_name=ev.get("file_name") or ev.get("filename"),
+                    details=details,
+                )
+                db.add(row)
+                await db.commit()
+        except Exception:
+            pass  # never crash the application due to logging
 
-# Audit logs → logs/audit.log
-# Contains: every API request/action with actor identity and target context.
-_audit_handler = _make_json_handler("audit.log", _AUDIT_LOGGERS)
 
-# Console (non-pipeline) — raw JSON, no filter except exclude pipeline
+# ── Console handlers ──────────────────────────────────────────────────────────
+# Non-pipeline logs → raw JSON on stdout
 _console_handler = logging.StreamHandler()
 _console_handler.setLevel(logging.DEBUG)
 _console_handler.setFormatter(logging.Formatter("%(message)s"))
 _console_handler.addFilter(_ExcludeFilter(_PIPELINE_LOGGERS))
 
-# Console (pipeline only) — pretty human-readable formatter
+# Pipeline logs → pretty human-readable formatter on stdout
 _pipeline_console_handler = logging.StreamHandler()
 _pipeline_console_handler.setLevel(logging.DEBUG)
 _pipeline_console_handler.setFormatter(_PipelinePrettyFormatter())
 _pipeline_console_handler.addFilter(_NameFilter(_PIPELINE_LOGGERS))
 
-# Root stdlib logger receives structlog output and fans out to all handlers
+# DB handler — accepts all managed loggers, routes each to the correct log_type
+_db_handler = _DBHandler()
+_db_handler.setLevel(logging.DEBUG)
+_db_handler.addFilter(_NameFilter(set(_LOGGER_TO_LOG_TYPE.keys())))
+
+# Root stdlib logger receives structlog output and fans out
 logging.basicConfig(
     level=logging.DEBUG,
     handlers=[
         _console_handler,
         _pipeline_console_handler,
-        _system_handler,
-        _ai_handler,
-        _llm_handler,
-        _cost_handler,
-        _pipeline_handler,
-        _audit_handler,
+        _db_handler,
     ],
     force=True,
 )

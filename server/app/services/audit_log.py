@@ -5,15 +5,14 @@ import uuid
 from typing import Any
 
 from fastapi import Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session
 from app.core.logger import audit_logger
 from app.core.security import decode_access_token
-from app.models.audit_log import AuditLog
 from app.models.file import File
 from app.models.folder import Folder
+from app.models.server_log import ServerLog
 from app.models.user import User
 
 _SECRET_QUERY_KEYS = {"token", "access_token", "code", "state", "password", "secret", "key"}
@@ -73,27 +72,11 @@ async def _target_context_from_request(
     params = dict(request.path_params or {})
     context: dict[str, Any] = {}
 
-    container_id = params.get("container_id") or request.query_params.get("container_id")
-    if container_id:
-        context["container_id"] = str(container_id)
-
-    target_user_id = params.get("user_id")
-    if target_user_id:
-        user = await db.get(User, str(target_user_id))
-        context["target_user_id"] = str(target_user_id)
-        if user:
-            context["target_user_email"] = user.email
-            context["target_user_name"] = user.name
-
     folder_id = params.get("folder_id") or request.query_params.get("folder_id")
     if folder_id:
         folder = await db.get(Folder, str(folder_id))
-        context["folder_id"] = str(folder_id)
         if folder:
-            context["folder_name"] = folder.name
             context["domain_tag"] = folder.domain_tag
-            if not context.get("container_id") and folder.container_id:
-                context["container_id"] = folder.container_id
 
     file_id = params.get("file_id") or request.query_params.get("file_id")
     if file_id:
@@ -101,14 +84,9 @@ async def _target_context_from_request(
         context["file_id"] = str(file_id)
         if file:
             context["file_name"] = file.name
-            if not context.get("container_id") and file.container_id:
-                context["container_id"] = file.container_id
-            if not context.get("folder_id") and file.folder_id:
-                context["folder_id"] = file.folder_id
-            if file.folder_id and not context.get("domain_tag"):
+            if not context.get("domain_tag") and file.folder_id:
                 folder = await db.get(Folder, file.folder_id)
                 if folder:
-                    context["folder_name"] = folder.name
                     context["domain_tag"] = folder.domain_tag
 
     return context
@@ -119,54 +97,13 @@ def _actor_fields(actor: User | None) -> dict[str, Any]:
         return {
             "actor_user_id": None,
             "actor_email": None,
-            "actor_name": None,
             "actor_role": None,
-            "actor_is_admin": False,
-            "actor_allowed_domains": None,
-            "actor_organization_id": None,
         }
     return {
         "actor_user_id": actor.id,
         "actor_email": actor.email,
-        "actor_name": actor.name,
         "actor_role": "admin" if actor.is_admin else actor.role,
-        "actor_is_admin": bool(actor.is_admin),
-        "actor_allowed_domains": _as_list(actor.allowed_domains),
-        "actor_organization_id": actor.organization_id,
     }
-
-
-def _log_to_file(row: AuditLog) -> None:
-    audit_logger.info(
-        "audit_event",
-        audit_id=row.id,
-        event_type=row.event_type,
-        action=row.action,
-        actor_user_id=row.actor_user_id,
-        actor_email=row.actor_email,
-        actor_name=row.actor_name,
-        actor_role=row.actor_role,
-        actor_is_admin=row.actor_is_admin,
-        actor_allowed_domains=row.actor_allowed_domains,
-        actor_organization_id=row.actor_organization_id,
-        method=row.method,
-        path=row.path,
-        route_template=row.route_template,
-        status_code=row.status_code,
-        duration_ms=row.duration_ms,
-        ip_address=row.ip_address,
-        domain_tag=row.domain_tag,
-        container_id=row.container_id,
-        file_id=row.file_id,
-        file_name=row.file_name,
-        folder_id=row.folder_id,
-        folder_name=row.folder_name,
-        target_user_id=row.target_user_id,
-        target_user_email=row.target_user_email,
-        target_user_name=row.target_user_name,
-        details=row.details,
-        error=row.error,
-    )
 
 
 async def record_audit_event(
@@ -193,33 +130,47 @@ async def record_audit_event(
     target_user_name: str | None = None,
     details: dict[str, Any] | None = None,
     error: str | None = None,
-) -> AuditLog:
-    row = AuditLog(
+) -> ServerLog:
+    # Pack context fields that don't have dedicated columns into details
+    extra: dict[str, Any] = {}
+    if route_template:
+        extra["route_template"] = route_template
+    if user_agent:
+        extra["user_agent"] = user_agent
+    if container_id:
+        extra["container_id"] = container_id
+    if folder_id:
+        extra["folder_id"] = folder_id
+    if folder_name:
+        extra["folder_name"] = folder_name
+    if target_user_id:
+        extra["target_user_id"] = target_user_id
+    if target_user_email:
+        extra["target_user_email"] = target_user_email
+    if target_user_name:
+        extra["target_user_name"] = target_user_name
+    if error:
+        extra["error"] = error[:1000]
+
+    merged_details = {**(details or {}), **extra} or None
+
+    row = ServerLog(
         id=str(uuid.uuid4()),
-        event_type=event_type,
-        action=action[:160],
+        log_type="audit",
+        event=action[:80],
+        level="error" if (status_code and status_code >= 500) else "warning" if (status_code and status_code >= 400) else "info",
         **_actor_fields(actor),
+        domain_tag=domain_tag,
+        file_id=file_id,
+        file_name=file_name,
         method=method,
         path=path,
-        route_template=route_template,
         status_code=status_code,
         duration_ms=duration_ms,
         ip_address=ip_address,
-        user_agent=user_agent,
-        domain_tag=domain_tag,
-        container_id=container_id,
-        file_id=file_id,
-        file_name=file_name,
-        folder_id=folder_id,
-        folder_name=folder_name,
-        target_user_id=target_user_id,
-        target_user_email=target_user_email,
-        target_user_name=target_user_name,
-        details=details,
-        error=error[:1000] if error else None,
+        details=merged_details,
     )
     db.add(row)
-    _log_to_file(row)
     return row
 
 
@@ -287,11 +238,10 @@ async def record_audit_event_safe(
 
 
 # GET-only paths that are polled frequently and would flood the audit table.
-# These are all read-only endpoints — nothing meaningful to audit.
 _SKIP_AUDIT_GET_PREFIXES = (
     "/api/health",
     "/api/metrics",
-    "/api/logs/",   # log-viewing endpoints polled every few seconds by the UI
+    "/api/logs/",
 )
 
 _ANONYMOUS_404_EXEMPT_PREFIXES = (
@@ -309,15 +259,11 @@ async def record_request_audit(
     if request.method == "OPTIONS":
         return
 
-    # Skip noisy read-only polling routes to keep audit logs meaningful.
     if request.method == "GET":
         path = request.url.path
         if any(path.startswith(prefix) for prefix in _SKIP_AUDIT_GET_PREFIXES):
             return
 
-    # Public servers are constantly scanned for paths like /.env, /wp-admin,
-    # /server/.env, test.php, etc. Those anonymous 404s are security noise,
-    # not product audit events.
     if (
         request.method in {"GET", "HEAD"}
         and status_code == 404
@@ -363,11 +309,3 @@ async def record_request_audit(
             error=str(exc)[:300],
         )
 
-
-async def visible_user_ids_for_domains(db: AsyncSession, domains: list[str]) -> set[str]:
-    if not domains:
-        return set()
-    result = await db.execute(
-        select(User.id).where(User.allowed_domains.op("&&")(domains))
-    )
-    return set(result.scalars().all())
