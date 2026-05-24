@@ -39,7 +39,6 @@ import app.models.background_job  # ensure BackgroundJob table is created
 import app.models.conversation  # ensure Conversation + Message tables are created
 import app.models.organization  # ensure Organization table is created
 import app.models.schema_dictionary  # ensure SchemaDictionary table is created
-import app.models.audit_log  # ensure AuditLog table is created
 import app.models.server_log  # ensure ServerLog table is created
 
 
@@ -147,12 +146,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("semantic_layer_migration_failed", error=str(exc)[:300])
 
-    # Queryable API audit logs
-    from app.migrations.audit_log_schema_upgrade import migrate as _audit_log_migrate
+    # Drop legacy audit_logs table — all audit events now go to server_logs
+    from app.migrations.drop_audit_logs import migrate as _drop_audit_logs
     try:
-        await _audit_log_migrate()
+        await _drop_audit_logs()
     except Exception as exc:
-        chat_logger.warning("audit_log_migration_failed", error=str(exc)[:300])
+        chat_logger.warning("drop_audit_logs_failed", error=str(exc)[:300])
 
     # Pre-warm DataFusion  session pool — pays UDF-registration cost once at startup
     # so the first   N concurrent queries borrow a ready context without overhead.
