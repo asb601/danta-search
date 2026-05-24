@@ -103,12 +103,17 @@ def _resolve_log_type(alias: str) -> str:
 def _sl_row(row: ServerLog) -> dict:
     """Serialise a ServerLog row, surfacing details fields at the top level."""
     details = row.details or {}
+    created = row.created_at.isoformat() if row.created_at else None
     return {
         "id": row.id,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "created_at": created,
+        # `timestamp` alias so LogLine and IngestEventRow components work without changes
+        "timestamp": created,
         "log_type": row.log_type,
         "event": row.event,
         "level": row.level,
+        # duration_ms exposed at top level for all log types so LogLine can render it
+        "duration_ms": row.duration_ms if row.duration_ms is not None else details.get("duration_ms"),
         # Actor
         "actor": {
             "user_id": row.actor_user_id,
@@ -253,6 +258,52 @@ async def ingest_events(
             "filename": r.file_name,
             "domain_tag": r.domain_tag,
         }
+        ev.update(r.details or {})
+        events.append(ev)
+
+    return {"total": len(events), "returned": len(events), "lines": events}
+
+
+@router.get("/ai-pipeline-events")
+async def ai_pipeline_events(
+    lines: int = Query(default=300, ge=1, le=2000),
+    trace_id: str | None = Query(default=None, max_length=36),
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return the last N AI pipeline query events from server_logs, details flattened.
+
+    Mirrors the shape of ingest-events so the PipelineEventRow component can
+    access fields like ev.query, ev.sql, ev.answer directly at the top level.
+    """
+    stmt = (
+        select(ServerLog)
+        .where(ServerLog.log_type == "ai_pipeline")
+        .order_by(ServerLog.created_at.desc())
+        .limit(lines)
+    )
+    if trace_id:
+        stmt = stmt.where(ServerLog.trace_id == trace_id)
+
+    rows = (await db.execute(stmt)).scalars().all()
+    # Chronological order for timeline readability
+    rows_sorted = sorted(rows, key=lambda r: r.created_at)
+    events = []
+    for r in rows_sorted:
+        ev = {
+            "event": r.event,
+            "level": r.level,
+            "timestamp": r.created_at.isoformat() if r.created_at else None,
+            "duration_ms": r.duration_ms,
+            "trace_id": r.trace_id,
+            "file_id": r.file_id,
+            "file_name": r.file_name,
+            "domain_tag": r.domain_tag,
+            "actor_user_id": r.actor_user_id,
+            "actor_email": r.actor_email,
+            "actor_role": r.actor_role,
+        }
+        # Flatten details so PipelineEventRow can access query, sql, answer etc. directly
         ev.update(r.details or {})
         events.append(ev)
 
@@ -543,6 +594,7 @@ async def search_log(
     return {
         "log_type": resolved,
         "query": q,
+        "returned": len(rows),
         "matches": len(rows),
         "lines": [_sl_row(r) for r in rows],
     }
