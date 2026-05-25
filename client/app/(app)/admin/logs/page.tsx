@@ -348,6 +348,19 @@ const PIPELINE_STEPS: Record<string, StepConfig> = {
   ingest_llm_prompt:     { num: "i", label: "Ingest Prompt",    color: "bg-zinc-100 text-zinc-700 border-zinc-300",       short: "ingest_p" },
   ingest_llm_response:   { num: "i", label: "Ingest Reply",     color: "bg-zinc-100 text-zinc-700 border-zinc-300",       short: "ingest_r" },
   final_answer:          { num: "✓", label: "Final Answer",     color: "bg-emerald-50 text-emerald-800 border-emerald-200", short: "answer" },
+
+  // ── Orchestration pipeline stages ─────────────────────────────────────────
+  retrieval_filtered:          { num: "2", label: "Retrieval",      color: "bg-blue-50 text-blue-800 border-blue-200",         short: "retrieval" },
+  retrieval_fallback:          { num: "2", label: "Ret Fallback",   color: "bg-orange-50 text-orange-800 border-orange-200",   short: "ret_fallback" },
+  resolver_pins_injected:      { num: "2", label: "Resolver Pins",  color: "bg-blue-50 text-blue-800 border-blue-200",         short: "resolver_pins" },
+  prior_files_pinned:          { num: "2", label: "Prior Files",    color: "bg-blue-50 text-blue-800 border-blue-200",         short: "prior_files" },
+  explicit_file_pinned:        { num: "2", label: "File Pinned",    color: "bg-blue-50 text-blue-800 border-blue-200",         short: "file_pinned" },
+  catalog_hydrated:            { num: "2", label: "Hydrated",       color: "bg-blue-50 text-blue-800 border-blue-200",         short: "hydrated" },
+  execution_strategy_planned:  { num: "2", label: "Exec Strategy",  color: "bg-indigo-50 text-indigo-800 border-indigo-200",   short: "exec_strat" },
+  orchestration_confidence:    { num: "2", label: "Confidence",     color: "bg-teal-50 text-teal-800 border-teal-200",         short: "confidence" },
+  confidence_degradation:      { num: "2", label: "Conf Degraded",  color: "bg-orange-50 text-orange-800 border-orange-200",   short: "conf_deg" },
+  graph_health_issue:          { num: "2", label: "Graph Health ⚠", color: "bg-red-50 text-red-700 border-red-200",            short: "graph_health" },
+  broaden_nudge_injected:      { num: "4", label: "Broaden Nudge",  color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "nudge" },
 };
 
 function pipelineSummary(ev: LogEntry): string {
@@ -356,7 +369,7 @@ function pipelineSummary(ev: LogEntry): string {
     case "query_received":      return String(ev.query ?? "");
     case "catalog_loaded":      return `${ev.file_count} files in '${ev.container}' (${ev.parquet_count} parquet, ${ev.relationship_count} relationships)`;
     case "catalog_empty":       return "No files ingested yet — agent cannot answer";
-    case "system_prompt_built": return `${ev.catalog_file_count} files | ${ev.parquet_file_count} parquet | rels:${ev.has_relationships ? "yes" : "no"}`;
+    case "system_prompt_built": return `${ev.catalog_file_count} files | ${ev.parquet_file_count} parquet | ctx:${ev.has_conversation_context ? "yes" : "no"} | ${String(ev.system_prompt ?? "").length.toLocaleString()} chars`;
     case "search_catalog":      return `query="${ev.query}" → ${ev.files_found ?? (Array.isArray(ev.matched_files) ? (ev.matched_files as unknown[]).length : 0)} matches`;
     case "get_file_schema":     return `${ev.blob_path}${ev.found ? "" : " (NOT FOUND)"}`;
     case "llm_input":
@@ -381,6 +394,36 @@ function pipelineSummary(ev: LogEntry): string {
     case "ingest_llm_prompt":   return `${ev.filename} (~${ev.estimated_prompt_tokens} tok)`;
     case "ingest_llm_response": return `${ev.filename} · ${ev.duration_ms} ms`;
     case "final_answer":        return `${ev.tool_calls} tool calls · ${ev.row_count} rows · ${ev.total_duration_ms} ms`;
+
+    // ── Orchestration pipeline stages ──────────────────────────────────────
+    case "retrieval_filtered": {
+      const topScores = (ev.top_scores as [string, number][]) || [];
+      const top = topScores.length > 0 ? topScores[0][1] : "?";
+      return `${ev.retrieved_files}/${ev.total_files} files · top RRF: ${top}`;
+    }
+    case "retrieval_fallback":
+      return `fallback · ${ev.reason} · ${Array.isArray(ev.fallback_files) ? (ev.fallback_files as unknown[]).length : "?"} files`;
+    case "resolver_pins_injected":
+      return `pinned ${Array.isArray(ev.pinned) ? (ev.pinned as unknown[]).length : 0} files (${ev.path} path)`;
+    case "prior_files_pinned":
+      return `re-pinned ${Array.isArray(ev.pinned) ? (ev.pinned as unknown[]).length : 0} prior-turn files`;
+    case "explicit_file_pinned":
+      return `pinned: ${Array.isArray(ev.pinned) ? (ev.pinned as string[]).join(", ") : "?"}`;
+    case "catalog_hydrated":
+      return `shortlist ${ev.shortlist_size} · hydrated ${ev.hydrated_files} · ${ev.sample_rows_files} with sample rows`;
+    case "execution_strategy_planned":
+      return `mode=${ev.mode} · ${ev.clusters} cluster(s) [${Array.isArray(ev.cluster_sizes) ? (ev.cluster_sizes as number[]).join(", ") : "?"}]`;
+    case "orchestration_confidence": {
+      const level = ev.level as string;
+      return `${level} · score ${ev.score} · graph=${ev.graph_health}`;
+    }
+    case "confidence_degradation":
+      return `score ${ev.score} · ${Array.isArray(ev.chain) ? (ev.chain as string[]).join(" → ") : "?"}`;
+    case "graph_health_issue":
+      return `${ev.health_level} · coverage=${ev.edge_coverage} · p50=${ev.confidence_p50}`;
+    case "broaden_nudge_injected":
+      return `reason: ${ev.reason} · after ${ev.tool_call_count} tool calls`;
+
     default:                    return "";
   }
 }
@@ -463,17 +506,21 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
   }
 
   if (e === "system_prompt_built") {
+    const prompt = String(ev.system_prompt ?? "");
+    const chars = prompt.length;
+    const words = prompt.split(/\s+/).filter(Boolean).length;
     return (
       <div className="space-y-2">
         <div className="grid grid-cols-2 gap-2 text-[11px]">
           <div><span className="text-muted-foreground">Container:</span> <span className="text-foreground font-mono">{String(ev.container)}</span></div>
           <div><span className="text-muted-foreground">Files in catalog:</span> <span className="text-foreground font-mono">{String(ev.catalog_file_count)}</span></div>
           <div><span className="text-muted-foreground">Parquet-ready:</span> <span className="text-foreground font-mono">{String(ev.parquet_file_count)}</span></div>
-          <div><span className="text-muted-foreground">Has relationships:</span> <span className="text-foreground font-mono">{ev.has_relationships ? "yes" : "no"}</span></div>
+          <div><span className="text-muted-foreground">Conv context:</span> <span className="text-foreground font-mono">{ev.has_conversation_context ? "yes" : "no"}</span></div>
+          <div><span className="text-muted-foreground">Prompt size:</span> <span className="text-foreground font-mono">{chars.toLocaleString()} chars · ~{words.toLocaleString()} words</span></div>
         </div>
         <div className="text-[11px] text-muted-foreground">Full prompt sent to LLM:</div>
         <div className="max-h-72 overflow-auto">
-          <PipelineCodeBlock>{String(ev.system_prompt ?? "")}</PipelineCodeBlock>
+          <PipelineCodeBlock>{prompt}</PipelineCodeBlock>
         </div>
       </div>
     );
@@ -641,6 +688,229 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
         </div>
         <div className="text-[11px] text-muted-foreground">Answer delivered to user:</div>
         <PipelineCodeBlock>{String(ev.answer ?? "")}</PipelineCodeBlock>
+      </div>
+    );
+  }
+
+  // ── Orchestration pipeline events ─────────────────────────────────────────
+
+  if (e === "retrieval_filtered") {
+    const topScores = (ev.top_scores as [string, number][]) || [];
+    const lookups = (ev.lookup_slots_added as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Total catalog:</span> <span className="font-mono">{String(ev.total_files)}</span></div>
+          <div><span className="text-muted-foreground">Shortlisted:</span> <span className="font-mono text-emerald-700">{String(ev.retrieved_files)}</span></div>
+        </div>
+        {topScores.length > 0 && (
+          <>
+            <div className="text-[11px] text-muted-foreground">Top RRF scores:</div>
+            <div className="border border-border rounded overflow-x-auto">
+              <table className="w-full text-[10px] font-mono">
+                <thead className="bg-surface-raised text-muted-foreground">
+                  <tr><th className="px-2 py-1 text-left">file_id</th><th className="px-2 py-1 text-left">RRF score</th></tr>
+                </thead>
+                <tbody>
+                  {topScores.map(([fid, score], i) => (
+                    <tr key={i} className="border-t border-border/50">
+                      <td className="px-2 py-1 text-foreground font-mono">{fid}</td>
+                      <td className="px-2 py-1 text-cyan-700">{score}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+        {lookups.length > 0 && (
+          <>
+            <div className="text-[11px] text-muted-foreground">Lookup slots added ({lookups.length}):</div>
+            <div className="border border-border rounded p-2 bg-[#0d1117]">
+              {lookups.map((f, i) => <div key={i} className="text-[11px] font-mono text-zinc-200">• {f}</div>)}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "retrieval_fallback") {
+    const files = (ev.fallback_files as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Total catalog:</span> <span className="font-mono">{String(ev.total_files)}</span></div>
+          <div><span className="text-muted-foreground">Fallback files:</span> <span className="font-mono text-orange-700">{String(files.length)}</span></div>
+        </div>
+        <div className="text-[11px]"><span className="text-muted-foreground">Reason:</span> <span className="font-mono text-orange-700">{String(ev.reason ?? "")}</span></div>
+        {files.length > 0 && (
+          <>
+            <div className="text-[11px] text-muted-foreground">Selected files:</div>
+            <div className="border border-border rounded p-2 bg-[#0d1117] max-h-48 overflow-auto">
+              {files.map((f, i) => <div key={i} className="text-[11px] font-mono text-zinc-200">• {f}</div>)}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "resolver_pins_injected") {
+    const pinned = (ev.pinned as string[]) || [];
+    const entities = (ev.entities as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Path:</span> <span className="font-mono">{String(ev.path)}</span></div>
+          <div><span className="text-muted-foreground">Files injected:</span> <span className="font-mono text-blue-700">{String(pinned.length)}</span></div>
+        </div>
+        <div className="text-[11px]"><span className="text-muted-foreground">Entities resolved:</span> <span className="font-mono">{entities.length > 0 ? entities.join(", ") : "—"}</span></div>
+        <div className="text-[11px] text-muted-foreground">Pinned files:</div>
+        <div className="border border-border rounded p-2 bg-[#0d1117]">
+          {pinned.map((f, i) => <div key={i} className="text-[11px] font-mono text-zinc-200">• {f}</div>)}
+        </div>
+      </div>
+    );
+  }
+
+  if (e === "prior_files_pinned") {
+    const pinned = (ev.pinned as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px] text-muted-foreground">Files re-pinned from prior turns:</div>
+        <div className="border border-border rounded p-2 bg-[#0d1117]">
+          {pinned.length === 0
+            ? <div className="text-[11px] text-muted-foreground">(none)</div>
+            : pinned.map((f, i) => <div key={i} className="text-[11px] font-mono text-zinc-200">• {f}</div>)}
+        </div>
+      </div>
+    );
+  }
+
+  if (e === "explicit_file_pinned") {
+    const pinned = (ev.pinned as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px]"><span className="text-muted-foreground">User query:</span> <span className="font-mono text-foreground">{String(ev.query ?? "")}</span></div>
+        <div className="text-[11px] text-muted-foreground">Files explicitly mentioned in query:</div>
+        <div className="border border-border rounded p-2 bg-[#0d1117]">
+          {pinned.map((f, i) => <div key={i} className="text-[11px] font-mono text-emerald-400">• {f}</div>)}
+        </div>
+      </div>
+    );
+  }
+
+  if (e === "catalog_hydrated") {
+    return (
+      <div className="grid grid-cols-3 gap-3 text-[11px]">
+        <div><span className="text-muted-foreground">Shortlist size:</span> <span className="font-mono">{String(ev.shortlist_size)}</span></div>
+        <div><span className="text-muted-foreground">Hydrated:</span> <span className="font-mono text-emerald-700">{String(ev.hydrated_files)}</span></div>
+        <div><span className="text-muted-foreground">With sample rows:</span> <span className="font-mono">{String(ev.sample_rows_files)} files</span></div>
+      </div>
+    );
+  }
+
+  if (e === "execution_strategy_planned") {
+    const sizes = (ev.cluster_sizes as number[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Mode:</span> <span className="font-mono font-medium text-indigo-700">{String(ev.mode)}</span></div>
+          <div><span className="text-muted-foreground">Clusters:</span> <span className="font-mono">{String(ev.clusters)}</span></div>
+        </div>
+        {sizes.length > 0 && (
+          <div className="text-[11px]">
+            <span className="text-muted-foreground">Cluster sizes:</span>{" "}
+            <span className="font-mono">[{sizes.join(", ")}]</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "orchestration_confidence") {
+    const signals = (ev.signals as string[]) || [];
+    const level = ev.level as string;
+    const levelColor = level === "high" ? "text-emerald-700" : level === "medium" ? "text-amber-700" : "text-red-700";
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-3 gap-2 text-[11px]">
+          <div>
+            <span className="text-muted-foreground">Score:</span>{" "}
+            <span className={cn("font-mono font-medium", levelColor)}>{String(ev.score)}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">Level:</span>{" "}
+            <span className={cn("font-mono font-medium", levelColor)}>{level}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">Graph health:</span>{" "}
+            <span className="font-mono">{String(ev.graph_health)}</span>
+          </div>
+        </div>
+        {signals.length > 0 && (
+          <>
+            <div className="text-[11px] text-muted-foreground">Confidence signals:</div>
+            <div className="border border-border rounded p-2 bg-[#0d1117]">
+              {signals.map((s, i) => <div key={i} className="text-[11px] font-mono text-zinc-200">• {s}</div>)}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "confidence_degradation") {
+    const chain = (ev.chain as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Final score:</span> <span className="font-mono text-orange-700">{String(ev.score)}</span></div>
+          <div><span className="text-muted-foreground">Avg ingestion:</span> <span className="font-mono">{String(ev.avg_ingestion)}</span></div>
+        </div>
+        {chain.length > 0 && (
+          <>
+            <div className="text-[11px] text-muted-foreground">Degradation chain:</div>
+            <div className="border border-orange-200 bg-orange-50 rounded p-2">
+              {chain.map((step, i) => (
+                <div key={i} className="text-[11px] font-mono text-orange-800">
+                  {i > 0 && <span className="text-orange-400 mr-1">→</span>}{step}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "graph_health_issue") {
+    const flags = (ev.anomaly_flags as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-3 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Health level:</span> <span className="font-mono text-red-700">{String(ev.health_level)}</span></div>
+          <div><span className="text-muted-foreground">Edge coverage:</span> <span className="font-mono">{String(ev.edge_coverage)}</span></div>
+          <div><span className="text-muted-foreground">Conf p50:</span> <span className="font-mono">{String(ev.confidence_p50)}</span></div>
+        </div>
+        {flags.length > 0 && (
+          <>
+            <div className="text-[11px] text-muted-foreground">Anomaly flags:</div>
+            <div className="border border-red-200 bg-red-50 rounded p-2">
+              {flags.map((f, i) => <div key={i} className="text-[11px] font-mono text-red-700">• {f}</div>)}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "broaden_nudge_injected") {
+    return (
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div><span className="text-muted-foreground">Reason:</span> <span className="font-mono text-fuchsia-700">{String(ev.reason ?? "")}</span></div>
+        <div><span className="text-muted-foreground">Tool calls used:</span> <span className="font-mono">{String(ev.tool_call_count)}</span></div>
       </div>
     );
   }
