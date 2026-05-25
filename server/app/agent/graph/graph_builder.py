@@ -62,20 +62,19 @@ def _should_escalate_to_primary(messages: list) -> bool:
 
 def build_agent_node(all_tools: list):
     """Create the async agent node closure with all tools pre-bound."""
+    # Bind tools once at graph-construction time — avoids repeated LangChain
+    # tool-schema serialisation on every agent iteration (typically 2-4x per request).
+    _ = get_llm  # kept for import compatibility
+    _active_llm = get_llm_mini()
+    _llm_with_tools = _active_llm.bind_tools(all_tools)
 
     async def agent_node(state: AgentState) -> dict:
         count = state.get("tool_call_count", 0)
         if count >= MAX_TOOL_CALLS:
             return {"messages": [AIMessage(content="I've gathered enough data. Let me summarise.")]}
 
-        # Model selection: always use gpt-4o-mini.
-        # gpt-4o-mini has higher quota, lower latency (~3x faster than gpt-4o),
-        # and sufficient capability for SQL generation and ERP data answering.
-        # gpt-4o escalation is disabled — it has lower RPM quota which becomes
-        # the bottleneck under concurrent load, making slowdowns worse.
-        active_llm = get_llm_mini()
-        _ = get_llm  # kept for import compatibility
-        llm_with_tools = active_llm.bind_tools(all_tools)
+        # gpt-4o-mini: higher quota, lower latency. gpt-4o escalation disabled.
+        llm_with_tools = _llm_with_tools
 
         # ── Log every message going into the LLM this iteration ──────────────
         pipeline_logger.debug(
@@ -134,7 +133,7 @@ def build_agent_node(all_tools: list):
 
         llm_logger.info("llm_call",
                         function="agent_node",
-                        model=active_llm.deployment_name,
+                        model=_active_llm.deployment_name,
                         prompt_tokens=p_tok,
                         completion_tokens=c_tok,
                         total_tokens=p_tok + c_tok,

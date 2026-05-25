@@ -395,14 +395,17 @@ async def _build_agent_context(
     # very common tokens, gives unique tokens (df=1) the largest weight.
     _idf = {w: math.log((_N + 1) / (_doc_freq.get(w, 0) + 1)) + 1.0 for w in q_words}
 
+    # O(1) reverse index: blob_path → array position. Eliminates the O(N)
+    # list.index() scan that _kw_score previously performed on every file lookup.
+    _blob_to_idx: dict[str, int] = {bp: i for i, bp in enumerate(_file_blobs)}
+
     def _kw_score(e: dict) -> float:
-        # Find this entry in the precomputed arrays by blob_path (cheap).
         bp = (e.get("blob_path") or "").lower()
-        try:
-            idx = _file_blobs.index(bp)
+        idx = _blob_to_idx.get(bp)
+        if idx is not None:
             search_text = _file_search_text[idx]
             column_text = _file_col_text[idx]
-        except ValueError:
+        else:
             search_text = build_search_text(e).lower()
             cnames: list[str] = []
             for c in (e.get("columns_info") or []):
@@ -581,6 +584,19 @@ async def _build_agent_context(
             pinned=mentioned_file_names,
         )
 
+    # ── Top-ranked blobs for focused system-prompt context ───────────────────
+    # Top-3 files by RRF retrieval score receive full column_stats context in
+    # the prompt. All other shortlisted files get a compact summary to keep
+    # total token load bounded without dropping any file from the shortlist.
+    if retrieved_with_scores:
+        _top_rrf_ids = {meta.file_id for meta, _ in retrieved_with_scores[:3]}
+        top_blob_paths: set[str] = {
+            e.get("blob_path") for e in catalog
+            if e.get("file_id") in _top_rrf_ids and e.get("blob_path")
+        }
+    else:
+        top_blob_paths = {e.get("blob_path") for e in catalog[:3] if e.get("blob_path")}
+
     # ── STEP 2.6: HYDRATE HEAVY FIELDS for the shortlist only ───────────────
     # The cached catalog is intentionally lean (no columns_info samples,
     # sample_rows, or column_stats). We now load those heavy fields ONLY for
@@ -638,10 +654,16 @@ async def _build_agent_context(
     sql_context_note = "\n\n".join(filter(None, [sql_context_note, exec_strategy_note]))
 
     # ── STEP 2.9: GRAPH HEALTH + ORCHESTRATION CONFIDENCE ───────────────────
-    # Both run after sql_ctx + exec_strategy are known. Zero I/O — operate on
-    # data already fetched above. Non-blocking: failures silently produce
-    # neutral scores and never prevent execution.
-    graph_health = score_graph_health(catalog, sql_ctx)
+    # graph_health (pure CPU) and _avg_ing_conf (pure math) are independent of
+    # each other — compute concurrently in a thread-pool executor. Both depend
+    # only on data already fetched above. Non-blocking: failures produce neutral
+    # scores and never prevent execution.
+    _meta_list = [m for m, _ in retrieved_with_scores] if retrieved_with_scores else []
+    _gh_loop = asyncio.get_running_loop()
+    graph_health, _avg_ing = await asyncio.gather(
+        _gh_loop.run_in_executor(None, score_graph_health, catalog, sql_ctx),
+        _gh_loop.run_in_executor(None, _avg_ing_conf, _meta_list),
+    )
     if graph_health.health_level in ("degraded", "poor"):
         metrics.inc("graph_health_degraded_count")
         pipeline_logger.warning(
@@ -678,8 +700,6 @@ async def _build_agent_context(
     # ── Phase 6: Trust propagation trace ──────────────────────────────────
     # Summarise ingestion trust across the shortlisted files and emit the
     # degradation chain so operators can trace WHY confidence degraded.
-    _meta_list = [m for m, _ in retrieved_with_scores] if retrieved_with_scores else []
-    _avg_ing = _avg_ing_conf(_meta_list)
     _cp_snap = _get_confidence_policy()
     _attenuated_count = sum(
         1 for m in _meta_list
@@ -710,6 +730,21 @@ async def _build_agent_context(
     store: dict = {}
     with _stores_lock:
         _request_stores[req_id] = store
+
+    # ── Request-local orchestration scratchpad ────────────────────────────────
+    # Stores deterministic computations produced during context-build so that
+    # tools and downstream code can reuse them without re-derivation.
+    # Request-local only — never shared across users, never persisted.
+    # Destroyed unconditionally in the `finally` block of the entry point.
+    store["_scratchpad"] = {
+        "blob_to_idx": _blob_to_idx,            # O(1) blob_path → array index
+        "file_search_text": _file_search_text,  # precomputed per-file search text
+        "file_col_text": _file_col_text,        # precomputed per-file column text
+        "idf": _idf,                            # query-term IDF weights
+        "intent_entities": list(intent_plan.entities) if intent_plan else [],
+        "confidence_level": confidence.level,
+        "confidence_score": confidence.score,
+    }
 
     # Authorised blob paths for this request — all files visible to this user
     # in the full catalog (not just the retrieval shortlist).  search_catalog can
@@ -757,21 +792,26 @@ async def _build_agent_context(
         full_catalog, all_parquet_paths, container_name, connection_string,
     ))
 
-    # Build graph
-    graph = build_graph(all_tools)
-
-    # Build system prompt — sql_context_note carries both the validated SQL
-    # context (Step 2.7) and the execution strategy (Step 2.8).
-    system_prompt = build_system_prompt(
-        catalog=catalog,
-        parquet_paths_all=parquet_paths_all,
-        parquet_blob_path=parquet_blob_path,
-        container_name=container_name,
-        sample_rows_by_blob=sample_rows_by_blob,
-        conversation_context=conversation_context,
-        total_file_count=len(full_catalog),
-        mentioned_files=mentioned_file_names or None,
-        sql_context_note=sql_context_note,
+    # Build graph and system prompt concurrently — both are pure CPU computation
+    # with no shared mutable state. Overlapping them hides whichever is slower.
+    _build_loop = asyncio.get_running_loop()
+    graph, system_prompt = await asyncio.gather(
+        _build_loop.run_in_executor(None, build_graph, all_tools),
+        _build_loop.run_in_executor(
+            None,
+            lambda: build_system_prompt(
+                catalog=catalog,
+                parquet_paths_all=parquet_paths_all,
+                parquet_blob_path=parquet_blob_path,
+                container_name=container_name,
+                sample_rows_by_blob=sample_rows_by_blob,
+                conversation_context=conversation_context,
+                total_file_count=len(full_catalog),
+                mentioned_files=mentioned_file_names or None,
+                sql_context_note=sql_context_note,
+                top_blob_paths=top_blob_paths,
+            ),
+        ),
     )
 
     # ── Log the complete system prompt so we can audit exactly what the LLM sees ──

@@ -141,13 +141,24 @@ Max {max_calls} tool calls total.
 """
 
 
+_DESC_MAX_CHARS = 200  # max characters shown per file description in the prompt
+_DIM_METRIC_LIMIT = 4  # max key_dimensions / key_metrics shown per file
+
+
 def build_parquet_note(
     catalog: list[dict],
     parquet_paths_all: dict[str, str],
     parquet_blob_path: str | None,
     container_name: str,
+    *,
+    top_blob_paths: set[str] | None = None,
 ) -> str:
-    """Build the file-listing section of the system prompt."""
+    """Build the file-listing section of the system prompt.
+
+    top_blob_paths: blobs that receive full column_stats context (top-N by
+    retrieval score). All other files get a compact description to reduce
+    total token load without removing any file from the shortlist.
+    """
     catalog_by_blob: dict[str, dict] = {}
     for entry in catalog:
         bp = entry.get("blob_path")
@@ -162,13 +173,16 @@ def build_parquet_note(
 
             desc = _neutralize_description(entry.get("ai_description") if entry else "")
             if desc:
+                # Truncate description to keep per-file token cost bounded.
+                if len(desc) > _DESC_MAX_CHARS:
+                    desc = desc[:_DESC_MAX_CHARS].rsplit(" ", 1)[0] + "…"
                 line += f"\n    Description: {desc}"
             key_dimensions = (entry.get("key_dimensions") or []) if entry else []
             if key_dimensions:
-                line += f"\n    Key dimensions: {', '.join(key_dimensions[:6])}"
+                line += f"\n    Key dimensions: {', '.join(key_dimensions[:_DIM_METRIC_LIMIT])}"
             key_metrics = (entry.get("key_metrics") or []) if entry else []
             if key_metrics:
-                line += f"\n    Key metrics: {', '.join(key_metrics[:6])}"
+                line += f"\n    Key metrics: {', '.join(key_metrics[:_DIM_METRIC_LIMIT])}"
 
             # Surface date range so LLM knows what period the file covers
             dr_start = entry.get("date_range_start") if entry else None
@@ -176,20 +190,22 @@ def build_parquet_note(
             if dr_start or dr_end:
                 line += f"\n    Date range: {dr_start or '?'} \u2192 {dr_end or '?'}"
 
-            # Surface min/max for year/period/date-like numeric columns so LLM
-            # knows the column type (float vs int) and data range on first query.
-            _DATE_HINTS = ("year", "date", "period", "month", "fiscal", "quarter", "fy")
-            col_stats = (entry.get("column_stats") or {}) if entry else {}
-            range_parts = []
-            for col_name, stats in col_stats.items():
-                if stats.get("dtype") == "numeric" and any(
-                    h in col_name.lower() for h in _DATE_HINTS
-                ):
-                    mn, mx = stats.get("min"), stats.get("max")
-                    if mn is not None and mx is not None:
-                        range_parts.append(f"{col_name}: {mn}\u2013{mx}")
-            if range_parts:
-                line += f"\n    Column ranges: {', '.join(range_parts[:4])}"
+            # Surface column stats only for top-retrieved files to keep prompt
+            # token load bounded. Lower-ranked files get date range only.
+            _is_priority = top_blob_paths is None or blob in top_blob_paths
+            if _is_priority:
+                _DATE_HINTS = ("year", "date", "period", "month", "fiscal", "quarter", "fy")
+                col_stats = (entry.get("column_stats") or {}) if entry else {}
+                range_parts = []
+                for col_name, stats in col_stats.items():
+                    if stats.get("dtype") == "numeric" and any(
+                        h in col_name.lower() for h in _DATE_HINTS
+                    ):
+                        mn, mx = stats.get("min"), stats.get("max")
+                        if mn is not None and mx is not None:
+                            range_parts.append(f"{col_name}: {mn}\u2013{mx}")
+                if range_parts:
+                    line += f"\n    Column ranges: {', '.join(range_parts[:4])}"
 
             lines.append(line)
 
@@ -234,6 +250,9 @@ def build_parquet_note(
     return ""
 
 
+_CONV_CONTEXT_MAX_CHARS = 2000  # cap conversation history to bound token growth
+
+
 def build_system_prompt(
     catalog: list[dict],
     parquet_paths_all: dict[str, str],
@@ -244,10 +263,13 @@ def build_system_prompt(
     total_file_count: int | None = None,
     mentioned_files: list[str] | None = None,
     sql_context_note: str = "",
+    *,
+    top_blob_paths: set[str] | None = None,
 ) -> str:
     """Assemble the full system prompt for the agent."""
     parquet_note = build_parquet_note(
         catalog, parquet_paths_all, parquet_blob_path, container_name,
+        top_blob_paths=top_blob_paths,
     )
 
     sample_note = ""
@@ -322,12 +344,21 @@ def build_system_prompt(
             system_prompt += "\n\n" + sql_context_note
 
     if conversation_context:
+        # Truncate conversation history to bound per-request token cost.
+        # Long conversations grow linearly; most context is in the last few turns.
+        _ctx = conversation_context
+        if len(_ctx) > _CONV_CONTEXT_MAX_CHARS:
+            _ctx = _ctx[-_CONV_CONTEXT_MAX_CHARS:]
+            # Avoid starting mid-word after truncation
+            nl = _ctx.find("\n")
+            if 0 < nl < 200:
+                _ctx = _ctx[nl + 1:]
         system_prompt += (
             "\n\n--- CONVERSATION HISTORY ---\n"
             "The user is continuing a conversation. Use this context to understand "
             "follow-up questions, pronouns ('it', 'that', 'those'), and references "
             "to previous queries or results.\n\n"
-            f"{conversation_context}\n"
+            f"{_ctx}\n"
             "---\n"
         )
 
