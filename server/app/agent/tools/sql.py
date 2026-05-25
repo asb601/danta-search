@@ -20,6 +20,7 @@ from app.core import metrics
 from app.agent.tools.sql_safety import validate_and_normalise
 import app.services.sql_repair as _repair
 from app.services.execution_guards import ExecutionGuard, ExecutionGuardError
+from app.services.sql_plan_signature import compute_plan_signature as _compute_plan_sig
 
 
 def _execute(sql: str, connection_string: str, container_name: str, max_rows: int) -> tuple:
@@ -71,6 +72,39 @@ def build_sql_tools(
         except ExecutionGuardError as ge:
             pipeline_logger.error("execution_guard_rejected", reason=str(ge)[:200], sql_preview=sql[:200])
             return json.dumps({"error": str(ge)})
+
+        # ── Retry governance: structural plan-signature deduplication ──────────
+        # Compute a logical-plan fingerprint from the normalized SQL.  If this
+        # exact plan was already executed and returned 0 rows in this request,
+        # skip execution and return a terminal response.  None fingerprints
+        # (sqlglot unavailable or parse failure) are fail-open — never block.
+        _plan_sig = _compute_plan_sig(sql)
+        if _plan_sig is not None:
+            _zero_sigs: set[str] = state_store.get("_zero_row_plan_sigs", set())
+            if _plan_sig in _zero_sigs:
+                pipeline_logger.info(
+                    "sql_plan_duplicate_zero_row",
+                    plan_signature=_plan_sig,
+                    sql_preview=sql[:200],
+                )
+                return json.dumps({
+                    "row_count": 0,
+                    "total_rows": 0,
+                    "columns": [],
+                    "rows": [],
+                    "terminal_note": (
+                        "This query has the same logical structure as a prior query "
+                        "that returned 0 rows (same source files, same join graph, "
+                        "same aggregation shape, same filter predicates). "
+                        "Executing it again will return the same empty result. "
+                        "CONCLUDE: no matching records exist for this analytical plan. "
+                        "Do NOT retry with cosmetic SQL changes (aliases, LIMIT, "
+                        "column order, TRY_CAST). "
+                        "If a genuinely different angle is needed, use search_catalog "
+                        "to find alternative files or reformulate with different "
+                        "filter logic, aggregation, or source files."
+                    ),
+                })
 
         sql_upper = sql.upper()
 
@@ -153,6 +187,16 @@ def build_sql_tools(
         duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
         # Refresh sql_upper in case the SQL was repaired during the loop
         sql_upper = current_sql.upper()
+
+        # ── Record 0-row plan signature for retry governance ───────────────────
+        # Use the final (possibly repaired) SQL for the recorded signature so
+        # that the exact plan that ran — not the original pre-repair plan — is
+        # what gets deduplicated on future attempts.
+        if total == 0:
+            _final_sig = _compute_plan_sig(current_sql)
+            if _final_sig is not None:
+                state_store.setdefault("_zero_row_plan_sigs", set()).add(_final_sig)
+                pipeline_logger.debug("sql_zero_row_plan_recorded", plan_signature=_final_sig)
 
         # ── Post-execution guard: large result set warning ─────────────────────
         _exec_warning = _guard.check_post_execution(rows, total)
