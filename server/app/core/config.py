@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     # Switch to "datafusion" once shadow testing confirms correctness.
     QUERY_ENGINE: str = "duckdb"
 
+    # SQL validator AST mode — runtime override for the sqlglot structural validator.
+    # "primary"  — AST is authoritative; regex runs as shadow (default, production).
+    # "shadow"   — AST runs for telemetry only; regex remains authoritative.
+    #              Use this to roll back to regex during an incident.
+    # "disabled" — AST completely bypassed; regex only.
+    SQL_VALIDATOR_AST_MODE: str = "primary"
+
     # Ingestion behavior is policy, not core application settings. The default
     # policy is external JSON, and production can replace it with a deployment
     # file or INGESTION_POLICY_JSON. Individual legacy env vars still override

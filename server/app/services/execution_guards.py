@@ -53,6 +53,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.core.logger import chat_logger
+from app.core.config import get_settings as _get_settings
 from app.policies.execution_policy import get_execution_policy as _get_execution_policy
 from app.services.sql_ast_validator import (
     AstValidationConfig,
@@ -83,9 +84,8 @@ _AZ_PATH_RE = re.compile(r"az://[^\s'\"]+", re.IGNORECASE)
 # producing false positives on valid queries like:
 #   FROM read_parquet(...) AS t LEFT JOIN ... ON t.id = u.id GROUP BY t.id, t.name
 #
-# MIGRATION TARGET: replace with sqlglot AST inspection once sqlglot is added
-# as a dependency. Structural FROM/JOIN node inspection is the correct long-term
-# solution; regex cannot correctly handle all SQL dialects.
+# MIGRATION TARGET: replace with sqlglot AST inspection (now complete —
+# see sql_ast_validator.py).  Regex retained as shadow/fallback only.
 _FROM_COMMA_RE = re.compile(
     r"\bFROM\b(?:(?!\b(?:WHERE|JOIN|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT)\b)[^;])*?,",
     re.IGNORECASE,
@@ -124,6 +124,9 @@ class ExecutionGuardConfig:
 
 # Singleton default — built from ExecutionPolicy so all guard limits share
 # one source of truth with the executor and agent bounds.
+# ast_mode reads from Settings.SQL_VALIDATOR_AST_MODE so it can be overridden
+# at the deployment level without a code change (set env var to "shadow" or
+# "disabled" for a hot rollback if AST causes unexpected issues in production).
 # Direct instantiation of ExecutionGuardConfig() still works for custom configs.
 _ep = _get_execution_policy()
 _DEFAULT_CONFIG = ExecutionGuardConfig(
@@ -132,6 +135,7 @@ _DEFAULT_CONFIG = ExecutionGuardConfig(
     max_scan_files  = _ep.max_scan_files,
     max_result_rows = _ep.max_result_rows,
     allow_cross_join= _ep.allow_cross_join,
+    ast_mode        = _get_settings().SQL_VALIDATOR_AST_MODE,
 )
 
 
@@ -220,7 +224,12 @@ class ExecutionGuard:
 
         # Run AST validator
         ast_report: AstValidationReport = validate_sql_ast(sql, self._ast_cfg)
-        chat_logger.info("validator_ast_result", **ast_report.to_telemetry())
+        # Log at DEBUG on the allow path to avoid flooding INFO in production;
+        # elevate to WARNING when the validator denies or fails to parse.
+        if ast_report.decision == "deny" or ast_report.parse_error:
+            chat_logger.warning("validator_ast_result", **ast_report.to_telemetry())
+        else:
+            chat_logger.debug("validator_ast_result", **ast_report.to_telemetry())
 
         if ast_report.parse_ok and mode == AstValidatorMode.PRIMARY:
             # ── AST is authoritative ─────────────────────────────────────────

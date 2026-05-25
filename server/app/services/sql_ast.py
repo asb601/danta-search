@@ -15,19 +15,11 @@ PROBLEM STATEMENT:
   expression tree, apply targeted mutations, regenerate.
 
 CURRENT STATUS:
-  sqlglot is NOT yet a project dependency (pyproject.toml, May 2026).
-  This module provides a thin shim that:
-    - Tries sqlglot if available (try-import)
-    - Falls back to the existing regex approach if sqlglot is absent
-    - Exposes a stable interface so sql_repair.py can import from here
-      and automatically get the AST path once sqlglot is added
-
-HOW TO ACTIVATE AST MODE:
-  Add sqlglot to pyproject.toml:
-    [tool.poetry.dependencies]
-    sqlglot = "^23"
-  Then: pip install sqlglot
-  The shim detects it at import time — no code changes required.
+  sqlglot is a project dependency (installed via uv add sqlglot).
+  This module uses sqlglot when available for AST-level CAST rewrites and
+  GROUP BY mutations, falling back to regex if sqlglot is ever removed.
+  The sql_ast_validator.py module handles pre-execution structural validation;
+  this module handles post-execution SQL repair rewrites only.
 
 INTERFACE:
   cast_to_try_cast(sql) -> str | None

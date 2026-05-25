@@ -43,6 +43,10 @@ def build_sql_tools(
     this request.  Derived from the catalog shortlist in graph.py and used
     by validate_and_normalise to close the prompt-injection gap.
     """
+    # Build the execution guard once per tool instantiation (per request), not once
+    # per SQL call. ExecutionGuard.__init__ constructs AstValidationConfig and reads
+    # ExecutionPolicy — hoisting avoids that cost on every run_sql invocation.
+    _guard = ExecutionGuard()
 
     @tool
     def run_sql(sql: str) -> str:
@@ -62,7 +66,6 @@ def build_sql_tools(
         # Checks: SQL length, JOIN count, Cartesian joins, file scan count.
         # Raises ExecutionGuardError when a structural safety limit is breached.
         # These are structural checks only — no cost model, no query planning.
-        _guard = ExecutionGuard()
         try:
             _guard.check_pre_execution(sql)
         except ExecutionGuardError as ge:

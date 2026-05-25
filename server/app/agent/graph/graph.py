@@ -896,18 +896,25 @@ async def run_agent_query(
     if not ctx:
         return {"answer": _NO_FILES_MSG, "data": [], "chart": None}
 
+    # Pull req_id early so we can clean up the request store on every exit path
+    # (planner fast-path, agent path, and exception paths all converge here).
+    req_id = ctx["req_id"]
+
     # ── Semantic Planner fast path ────────────────────────────────────────────
     # For deterministic structured queries (aggregations, time-filtered analytics),
     # the planner resolves join paths from the ontology layer and generates SQL
     # directly — bypassing the full LangGraph agent. Falls back automatically.
     planner_result = await _try_planner(query, ctx, db, pipeline_start)
     if planner_result:
+        # Store was registered during _build_agent_context; clean it up here
+        # since the agent try/finally block below is never reached on this path.
+        with _stores_lock:
+            _request_stores.pop(req_id, None)
         return planner_result
 
     graph = ctx["graph"]
     initial_state = ctx["initial_state"]
     store = ctx["store"]
-    req_id = ctx["req_id"]
     trace: OrchestrationTrace = ctx["trace"]
 
     chat_logger.info("agent_start",
@@ -1053,12 +1060,19 @@ async def run_agent_query_stream(
         "total_files": ctx["total_files"],
     }
 
+    # Pull req_id early so we can clean up the request store on every exit path.
+    req_id = ctx["req_id"]
+
     # ── Semantic Planner fast path (streaming) ────────────────────────────────
     # Try the planner before spinning up the LangGraph agent. If it produces a
     # high-confidence plan, we execute + synthesize without any agent tool calls.
     yield {"type": "thinking", "tool": "semantic_planner"}
     planner_result = await _try_planner(query, ctx, db, pipeline_start)
     if planner_result:
+        # Store was registered during _build_agent_context; clean it up here
+        # since the agent try/finally block below is never reached on this path.
+        with _stores_lock:
+            _request_stores.pop(req_id, None)
         # Stream the answer tokens then emit done
         for ch in planner_result["answer"].split():
             yield {"type": "token", "content": ch + " "}
@@ -1068,7 +1082,6 @@ async def run_agent_query_stream(
     graph = ctx["graph"]
     initial_state = ctx["initial_state"]
     store = ctx["store"]
-    req_id = ctx["req_id"]
     trace: OrchestrationTrace = ctx["trace"]
 
     chat_logger.info("agent_stream_start", query=query[:200], file_count=ctx["catalog_len"])
