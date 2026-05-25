@@ -28,8 +28,16 @@ DESIGN CONSTRAINTS:
   - Post-execution guards return a warning string or None — no exceptions.
   - All limits are config-driven (ExecutionGuardConfig) so they can be overridden
     per deployment via environment without touching code.
-  - No SQL parsing: regex + counting only. sqlglot is the migration target if
-    more precise structural analysis is ever needed.
+  - Structural checks (JOIN safety) use AST-based validation via sqlglot
+    (sql_ast_validator.py).  Regex checks remain as fallback when sqlglot
+    cannot parse the SQL.  See sql_ast_validator.py for the migration status
+    and dual-run telemetry schema.
+
+MIGRATION STATUS:
+  Phase 1 (current): AST validator is PRIMARY for structural checks when
+  sqlglot parses successfully.  Regex checks run as shadow validators;
+  disagreements are logged as "validator_disagreement" events.
+  If sqlglot fails to parse, regex guards remain the safety fallback.
 
 INTEGRATION (sql.py):
   Before _execute():
@@ -46,6 +54,13 @@ from dataclasses import dataclass, field
 
 from app.core.logger import chat_logger
 from app.policies.execution_policy import get_execution_policy as _get_execution_policy
+from app.services.sql_ast_validator import (
+    AstValidationConfig,
+    AstValidationReport,
+    AstValidatorMode,
+    SQLGLOT_AVAILABLE,
+    validate_sql_ast,
+)
 
 
 # ── Regex patterns ─────────────────────────────────────────────────────────────
@@ -59,12 +74,27 @@ _CROSS_JOIN_RE = re.compile(r"\bCROSS\s+JOIN\b", re.IGNORECASE)
 # az:// file references — each unique path counts as one scanned file
 _AZ_PATH_RE = re.compile(r"az://[^\s'\"]+", re.IGNORECASE)
 
-# FROM clause with comma (possible implicit Cartesian)
-# Matches: FROM a, b  /  FROM a AS x, b AS y  — i.e. comma inside FROM before WHERE/JOIN
+# FROM clause with comma (possible implicit Cartesian).
+# Matches: FROM a, b  /  FROM a AS x, b AS y
+#
+# IMPORTANT — negative lookahead stops the scan at any SQL clause keyword:
+#   WHERE / JOIN (any variant) / GROUP BY / HAVING / ORDER BY / LIMIT
+# Without this, [^;]*? would lazily scan past GROUP BY and match commas there,
+# producing false positives on valid queries like:
+#   FROM read_parquet(...) AS t LEFT JOIN ... ON t.id = u.id GROUP BY t.id, t.name
+#
+# MIGRATION TARGET: replace with sqlglot AST inspection once sqlglot is added
+# as a dependency. Structural FROM/JOIN node inspection is the correct long-term
+# solution; regex cannot correctly handle all SQL dialects.
 _FROM_COMMA_RE = re.compile(
-    r"\bFROM\b[^;]*?,",
+    r"\bFROM\b(?:(?!\b(?:WHERE|JOIN|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT)\b)[^;])*?,",
     re.IGNORECASE,
 )
+
+# ON keyword — word-boundary safe for use in the Cartesian-join condition check.
+# The space-padded " ON " string check fails when ON starts a new line
+# (the LLM writes "\nON col = col", not " ON col = col").
+_ON_WORD_RE = re.compile(r"\bON\b", re.IGNORECASE)
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -76,12 +106,20 @@ class ExecutionGuardConfig:
 
     Defaults are appropriate for a single-VM deployment with limited RAM.
     Override per-deployment by constructing with different values.
+
+    ast_mode controls the sqlglot AST validator:
+      "primary"  — AST is authoritative for structural checks when parse
+                   succeeds; regex runs as comparison shadow (default).
+      "shadow"   — AST runs and emits telemetry but never blocks; regex
+                   remains authoritative.  Use during initial roll-out.
+      "disabled" — AST completely bypassed; regex only.
     """
-    max_sql_length: int     = 8_000    # characters
-    max_joins: int          = 5        # explicit JOIN keywords
-    max_scan_files: int     = 8        # unique az:// paths in FROM
-    max_result_rows: int    = 2_000    # post-execution soft warning threshold
-    allow_cross_join: bool  = False    # CROSS JOIN always forbidden by default
+    max_sql_length:  int   = 8_000    # characters
+    max_joins:       int   = 5        # explicit JOIN keywords
+    max_scan_files:  int   = 8        # unique az:// paths in FROM
+    max_result_rows: int   = 2_000    # post-execution soft warning threshold
+    allow_cross_join: bool = False    # CROSS JOIN always forbidden by default
+    ast_mode:        str   = "primary"  # "primary" | "shadow" | "disabled"
 
 
 # Singleton default — built from ExecutionPolicy so all guard limits share
@@ -128,6 +166,12 @@ class ExecutionGuard:
 
     def __init__(self, config: ExecutionGuardConfig | None = None) -> None:
         self._cfg = config or _DEFAULT_CONFIG
+        self._ast_cfg = AstValidationConfig(
+            max_joins        = self._cfg.max_joins,
+            max_scan_files   = self._cfg.max_scan_files,
+            allow_cross_join = self._cfg.allow_cross_join,
+            mode             = AstValidatorMode(self._cfg.ast_mode),
+        )
 
     # ── Pre-execution (structural, raises on violation) ────────────────────────
 
@@ -136,13 +180,102 @@ class ExecutionGuard:
         Run all structural safety checks before execution.
 
         Raises ExecutionGuardError on the first violation found.
-        All checks are O(N) regex + counting — no query planning.
+
+        Execution order:
+          1. SQL length  — character count, always regex (not SQL-structural).
+          2. Structural  — AST-primary when sqlglot parses; regex fallback.
+          3. Scan files  — az:// blob-path count, always regex (no AST needed).
         """
         self._check_sql_length(sql)
-        self._check_cross_join(sql)
-        self._check_from_comma(sql)
-        self._check_join_count(sql)
+        self._run_structural_checks(sql)
         self._check_scan_files(sql)
+
+    def _run_structural_checks(self, sql: str) -> None:
+        """
+        Dispatch structural checks (JOIN safety, JOIN count) to the AST
+        validator or the regex fallback depending on AstValidatorMode.
+
+        PRIMARY mode (default):
+          sqlglot parse succeeds → AST result is authoritative; regex runs
+          in shadow mode and any disagreement is logged as
+          "validator_disagreement".
+
+          sqlglot parse fails    → regex guards run as the safety fallback;
+          "ast_parse_failure_regex_fallback" is logged so the failure is
+          visible in the admin log viewer.
+
+        SHADOW mode:
+          Both run; regex is authoritative; AST telemetry is emitted.
+
+        DISABLED mode:
+          AST skipped entirely; regex only.
+        """
+        mode = self._ast_cfg.mode
+
+        if mode == AstValidatorMode.DISABLED:
+            self._check_cross_join(sql)
+            self._check_from_comma(sql)
+            self._check_join_count(sql)
+            return
+
+        # Run AST validator
+        ast_report: AstValidationReport = validate_sql_ast(sql, self._ast_cfg)
+        chat_logger.info("validator_ast_result", **ast_report.to_telemetry())
+
+        if ast_report.parse_ok and mode == AstValidatorMode.PRIMARY:
+            # ── AST is authoritative ─────────────────────────────────────────
+            # Run regex in shadow mode for comparison telemetry only.
+            regex_deny: set[str] = set()
+            for check_name, check_fn in [
+                ("cross_join",   self._check_cross_join),
+                ("from_comma",   self._check_from_comma),
+                ("join_count",   self._check_join_count),
+            ]:
+                try:
+                    check_fn(sql)
+                except ExecutionGuardError:
+                    regex_deny.add(check_name)
+
+            ast_deny = {
+                f.check for f in ast_report.findings if f.decision == "deny"
+            }
+            # Normalise check names for comparison (regex uses different names)
+            ast_structural = ast_deny & {"cross_join", "cartesian_join", "join_count"}
+            # "cartesian_join" from AST maps to "from_comma" in regex
+            regex_normalised = {
+                "cartesian_join" if n == "from_comma" else n for n in regex_deny
+            }
+
+            if ast_structural != regex_normalised:
+                chat_logger.warning(
+                    "validator_disagreement",
+                    ast_deny    = sorted(ast_structural),
+                    regex_deny  = sorted(regex_deny),
+                    validator_used = "ast",
+                    sql_fingerprint = ast_report.sql_fingerprint,
+                )
+
+            if ast_report.decision == "deny":
+                df = ast_report.deny_finding
+                raise ExecutionGuardError(df.reason)  # type: ignore[union-attr]
+
+        elif ast_report.parse_ok and mode == AstValidatorMode.SHADOW:
+            # ── Shadow mode — regex is authoritative, AST only logs ──────────
+            self._check_cross_join(sql)
+            self._check_from_comma(sql)
+            self._check_join_count(sql)
+
+        else:
+            # ── Regex fallback — AST parse failed or DISABLED ────────────────
+            if ast_report.parse_error and SQLGLOT_AVAILABLE:
+                chat_logger.warning(
+                    "ast_parse_failure_regex_fallback",
+                    sql_fingerprint = ast_report.sql_fingerprint,
+                    parse_error     = ast_report.parse_error,
+                )
+            self._check_cross_join(sql)
+            self._check_from_comma(sql)
+            self._check_join_count(sql)
 
     def _check_sql_length(self, sql: str) -> None:
         if len(sql) > self._cfg.max_sql_length:
@@ -168,24 +301,42 @@ class ExecutionGuard:
 
     def _check_from_comma(self, sql: str) -> None:
         """
-        Detect implicit Cartesian products: FROM a, b with no WHERE join condition.
+        Detect implicit Cartesian products: FROM a, b with no explicit join condition.
 
-        We only reject if the FROM comma pattern is present WITHOUT an ON or WHERE
-        that bridges the tables — a rough heuristic, but safe. False positives
-        (comma in subquery) are unlikely to matter: those queries should use CTEs.
+        Two-stage check:
+          1. _FROM_COMMA_RE must match a top-level comma in the FROM clause.
+             The regex uses a negative lookahead to stop scanning at SQL clause
+             keywords (WHERE, JOIN, GROUP BY, HAVING, ORDER BY, LIMIT), so commas
+             in GROUP BY / HAVING / ORDER BY do NOT trigger this check.
+          2. If a FROM comma is found, the query is allowed through only when an
+             explicit join condition exists — either an ON clause (detected via
+             \bON\b word-boundary regex, not the broken " ON " space-padded check
+             which misses multiline SQL where ON starts on a new line) or a WHERE
+             clause with an equality predicate.
+
+        Known limitation: commas inside CTE definitions (WITH t1 AS (...), t2 AS (...))
+        can still match _FROM_COMMA_RE because the inner FROM is at paren depth > 0 but
+        the regex has no paren tracking. CTEs are handled by the has_join_cond fallback
+        (they virtually always appear alongside JOIN/ON). For a fully correct solution,
+        migrate to sqlglot AST inspection (see module-level migration comment).
         """
-        if _FROM_COMMA_RE.search(sql):
-            sql_upper = sql.upper()
-            # If there's an ON clause or a WHERE with an equality predicate, assume
-            # the comma form is intentional and filtered. Otherwise reject.
-            has_join_cond = " ON " in sql_upper or (" WHERE " in sql_upper and "=" in sql_upper)
-            if not has_join_cond:
-                chat_logger.warning("execution_guard_implicit_cartesian", sql_preview=sql[:200])
-                raise ExecutionGuardError(
-                    "Implicit Cartesian join detected (comma-separated FROM without a "
-                    "WHERE/ON join condition). This will produce a full cross-product. "
-                    "Use explicit JOIN ... ON syntax instead."
-                )
+        if not _FROM_COMMA_RE.search(sql):
+            return
+        # A top-level comma was found before any clause keyword in the FROM section.
+        # Allow if an explicit join condition exists.
+        #
+        # Bug fix: use \bON\b (word-boundary regex) instead of " ON " (space-padded).
+        # LLM-generated multiline SQL writes the ON keyword at the start of a new line
+        # ("\nON t1.id = t2.id"), producing "\nON" in sql_upper — " ON " never matches.
+        has_explicit_on    = bool(_ON_WORD_RE.search(sql))
+        has_filtered_where = " WHERE " in sql.upper() and "=" in sql
+        if not (has_explicit_on or has_filtered_where):
+            chat_logger.warning("execution_guard_implicit_cartesian", sql_preview=sql[:200])
+            raise ExecutionGuardError(
+                "Implicit Cartesian join detected (comma-separated FROM without a "
+                "WHERE/ON join condition). This will produce a full cross-product. "
+                "Use explicit JOIN ... ON syntax instead."
+            )
 
     def _check_join_count(self, sql: str) -> None:
         join_count = len(_JOIN_RE.findall(sql))
