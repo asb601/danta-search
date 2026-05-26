@@ -10,7 +10,7 @@ engine = create_async_engine(
     # pool_size + max_overflow per worker process.
     # At 4 uvicorn workers: 4 × (20 + 30) = 200 max Postgres connections —
     # well within Azure Postgres Flexible Server's default 200-connection limit.
-    # Old value (5 + 10 = 15 per worker) caused pool exhaustion under burst load.
+    # Old value (5 + 10  = 15 per worker) caused pool exhaustion under burst load.
     pool_size=20,
     max_overflow=30,
     connect_args={
