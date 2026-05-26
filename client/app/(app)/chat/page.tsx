@@ -1,6 +1,6 @@
 "use client";
 
-import { Send, RefreshCw, X, PanelLeft } from "lucide-react";
+import { Send, RefreshCw, X, PanelLeft, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useChat } from "./_hooks/useChat";
 import { AssistantMessage } from "./_components/AssistantMessage";
@@ -76,11 +76,11 @@ export default function ChatPage() {
             </div>
           ) : messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full px-4 text-center">
-              <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
-                <Send className="w-5 h-5 text-primary" />
+              <div className="w-11 h-11 rounded-xl bg-foreground/[0.07] flex items-center justify-center mb-5">
+                <MessageSquare className="w-5 h-5 text-foreground/60" />
               </div>
-              <h2 className="text-lg font-semibold text-foreground mb-1">Start a conversation</h2>
-              <p className="text-sm text-muted-foreground max-w-sm">
+              <h2 className="text-base font-semibold tracking-tight text-foreground mb-1.5">Start a conversation</h2>
+              <p className="text-sm text-muted-foreground max-w-sm leading-relaxed">
                 Ask anything about your data. The AI will search, query, and analyse it for you.
               </p>
             </div>
@@ -95,7 +95,7 @@ export default function ChatPage() {
                   )}
                 >
                   {msg.role === "user" ? (
-                    <div className="max-w-[75%] sm:max-w-[65%] rounded-xl px-4 py-3 text-sm leading-relaxed bg-primary text-primary-foreground">
+                    <div className="max-w-[75%] sm:max-w-[65%] rounded-xl px-4 py-3 text-sm leading-relaxed bg-foreground text-background">
                       {msg.content}
                     </div>
                   ) : (

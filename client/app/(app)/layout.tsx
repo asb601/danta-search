@@ -82,7 +82,7 @@ if (hideNav) {
       {!sidebarOpen && (
         <button
           onClick={() => setSidebarOpen(true)}
-          className="hidden md:flex fixed top-4 left-4 z-40 items-center justify-center w-8 h-8 rounded-md bg-surface border border-border text-muted-foreground hover:text-foreground transition-colors"
+          className="hidden md:flex fixed top-4 left-4 z-40 items-center justify-center w-8 h-8 rounded-md bg-card border border-border shadow-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <PanelLeft className="w-4 h-4" />
         </button>
@@ -90,26 +90,26 @@ if (hideNav) {
 
       {/* Desktop sidebar */}
       <aside
-        className={`hidden md:flex flex-col shrink-0 bg-surface border-r border-border h-screen sticky top-0 transition-[width] duration-200 ${sidebarOpen ? "w-[220px]" : "w-0 overflow-hidden border-r-0"}`}
+        className={`hidden md:flex flex-col shrink-0 bg-sidebar border-r border-sidebar-border h-screen sticky top-0 transition-[width] duration-200 ${sidebarOpen ? "w-[220px]" : "w-0 overflow-hidden border-r-0"}`}
       >
         <div className="px-4 py-5 border-b border-border flex items-start justify-between">
           <div className="min-w-0">
-            <p className="font-semibold text-foreground text-base">Gen-Chatbot</p>
+            <p className="text-sm font-semibold tracking-tight text-foreground">Gen-Chatbot</p>
             <p className="text-xs text-muted-foreground mt-0.5 truncate">
               {user.email}
             </p>
             {user.is_admin && (
-              <span className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-primary/15 text-primary">
+              <span className="inline-flex mt-1.5 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full bg-primary/10 text-primary">
                 Admin
               </span>
             )}
             {!user.is_admin && user.role === "developer" && (
-              <span className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-violet-500/15 text-violet-400">
+              <span className="inline-flex mt-1.5 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full bg-violet-500/10 text-violet-500">
                 Developer
               </span>
             )}
             {!user.is_admin && user.role === "manager" && (
-              <span className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/15 text-cyan-400">
+              <span className="inline-flex mt-1.5 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full bg-cyan-500/10 text-cyan-600">
                 Manager
               </span>
             )}
@@ -145,7 +145,7 @@ if (hideNav) {
       </div>
 
       {/* Mobile bottom nav */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface border-t border-border flex items-stretch z-50">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-sidebar border-t border-sidebar-border flex items-stretch z-50">
         {navItems.map((item) => (
           <MobileNavLink key={item.href} {...item} />
         ))}
