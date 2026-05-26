@@ -42,6 +42,7 @@ from app.core.logger import chat_logger
 from app.models.file_metadata import FileMetadata
 from app.models.semantic_layer import SemanticRelationship
 from app.policies.graph_policy import get_graph_policy as _get_graph_policy
+from app.services.file_identity import FileIdentityMap
 
 
 # ── Tuning constants (governed by GraphPolicy) ────────────────────────────────
@@ -85,6 +86,8 @@ def _table_name(blob_path: str) -> str:
 
 @dataclass
 class ApprovedJoin:
+    left_file_id: str
+    right_file_id: str
     left_table: str          # clean display name of the left file
     right_table: str         # clean display name of the right file
     left_col: str            # column on left file (from_column)
@@ -182,6 +185,7 @@ class SQLContext:
 async def build_sql_context(
     catalog: list[dict],
     db: AsyncSession,
+    file_identities: FileIdentityMap | None = None,
 ) -> SQLContext:
     """
     Build validated SQL context from the retrieval shortlist.
@@ -207,14 +211,13 @@ async def build_sql_context(
         return ctx
 
     # Build in-memory lookups (free — catalog is already in memory)
-    id_to_blob: dict[str, str] = {
-        e["file_id"]: e["blob_path"]
-        for e in catalog
-        if e.get("file_id") and e.get("blob_path")
-    }
-    id_to_name: dict[str, str] = {
-        fid: _table_name(blob) for fid, blob in id_to_blob.items()
-    }
+    id_to_name: dict[str, str] = {}
+    for entry in catalog:
+        file_id = entry.get("file_id")
+        if not file_id:
+            continue
+        identity = file_identities.by_id.get(file_id) if file_identities else None
+        id_to_name[file_id] = identity.sql_name if identity else _table_name(entry.get("blob_path", file_id))
     file_id_set = set(file_ids)
 
     # ── Query 1: Approved joins within the shortlist ─────────────────────────
@@ -251,6 +254,8 @@ async def build_sql_context(
                 if conf < _JOIN_SOFT_FLOOR:
                     weak_join_count += 1
                 ctx.approved_joins.append(ApprovedJoin(
+                    left_file_id=row.file_a_id,
+                    right_file_id=row.file_b_id,
                     left_table=id_to_name.get(row.file_a_id, row.file_a_id),
                     right_table=id_to_name.get(row.file_b_id, row.file_b_id),
                     left_col=row.from_column,

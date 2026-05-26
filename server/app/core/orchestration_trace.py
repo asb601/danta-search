@@ -236,6 +236,8 @@ class OrchestrationTrace:
             joins = []
             for j in list(getattr(sql_ctx, "approved_joins", []) or [])[:_MAX_LIST]:
                 joins.append({
+                    "left_file_id":       _safe_str(getattr(j, "left_file_id", ""), 36),
+                    "right_file_id":      _safe_str(getattr(j, "right_file_id", ""), 36),
                     "left":              f"{getattr(j, 'left_table', '')}."
                                          f"{getattr(j, 'left_col', '')}",
                     "right":             f"{getattr(j, 'right_table', '')}."
@@ -260,6 +262,25 @@ class OrchestrationTrace:
                 "null_sem_count":   null_sem_count,
                 **({"join_risk": "unverified_inferred_join"} if has_unverified else {}),
             }
+        except Exception:
+            pass
+
+    def set_file_identity_map(self, file_identities: Any) -> None:
+        """Record the request-local logical table to canonical file mapping."""
+        try:
+            records = []
+            for identity in list(getattr(file_identities, "identities", []) or [])[:_MAX_LIST]:
+                records.append({
+                    "canonical_id": _safe_str(getattr(identity, "canonical_id", ""), 36),
+                    "logical_name": _safe_str(getattr(identity, "logical_name", ""), 80),
+                    "sql_name": _safe_str(getattr(identity, "sql_name", ""), 80),
+                    "display_name": _safe_str(getattr(identity, "display_name", ""), 100),
+                    "has_parquet": bool(getattr(identity, "parquet_blob_path", None)),
+                })
+            self._stages["file_identity_map"] = _safe_val({
+                "file_count": len(getattr(file_identities, "identities", []) or []),
+                "files": records,
+            })
         except Exception:
             pass
 

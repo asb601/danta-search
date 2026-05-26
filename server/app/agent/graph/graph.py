@@ -54,6 +54,7 @@ from app.agent.tools.definition_lookup import build_definition_lookup_tool, load
 from app.agent.tools.sample import build_sample_tool
 from app.agent.tools.relations import build_relations_tool
 from app.agent.tools.sql import build_sql_tools, _execute as _sql_execute
+from app.agent.tools.sql_safety import validate_and_normalise
 from app.agent.tools.stats import build_stats_tool
 from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
@@ -63,6 +64,8 @@ import traceback as _traceback
 from app.retrieval.embeddings import build_search_text
 from app.services.semantic_policy import get_semantic_policy
 from app.services.graph_health import score_graph_health
+from app.services.file_identity import FileIdentityMap, build_file_identity_map
+from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
 from app.services.trust_propagation import avg_ingestion_confidence as _avg_ing_conf
 from app.services.query_confidence import compute_confidence
 
@@ -82,6 +85,66 @@ _request_stores: dict[str, dict] = {}
 _stores_lock = threading.Lock()
 
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
+
+
+def _files_used_from_store(store: dict, file_identities: FileIdentityMap | None) -> list[str]:
+    """Return API-compatible blob paths for canonical file IDs used by SQL."""
+    used: list[str] = []
+    seen: set[str] = set()
+    for file_id in store.get("files_used", []) or []:
+        value = str(file_id)
+        if file_identities and value in file_identities.by_id:
+            value = file_identities.by_id[value].blob_path
+        if value and value not in seen:
+            used.append(value)
+            seen.add(value)
+    return used
+
+
+def _execution_failure_payload(
+    store: dict,
+    *,
+    route: str,
+    tool_calls: int,
+    file_identities: FileIdentityMap | None,
+    retrieved_files: int | None = None,
+    total_files: int | None = None,
+) -> dict | None:
+    """Return a hard-stop payload when SQL failed before data materialized."""
+    attempts = store.get("sql_attempts") or []
+    if not attempts:
+        return None
+    if any(attempt.get("status") == "success" for attempt in attempts):
+        return None
+    if store.get("sql_results"):
+        return None
+
+    failure = store.get("execution_failure") or {}
+    failed = next((attempt for attempt in reversed(attempts) if attempt.get("error")), {})
+    status = failure.get("status") or failed.get("status") or "execution_error"
+    error = failure.get("error") or failed.get("error") or "SQL execution did not complete."
+    answer = (
+        "I could not answer from the data because query execution failed before any result set was materialized. "
+        f"Runtime status: {status}. Error: {error}"
+    )
+    payload = {
+        "answer": answer,
+        "data": [],
+        "chart": None,
+        "route": route,
+        "row_count": 0,
+        "files_used": _files_used_from_store(store, file_identities),
+        "tool_calls": tool_calls,
+        "execution_error": {
+            "status": status,
+            "message": error,
+        },
+    }
+    if retrieved_files is not None:
+        payload["retrieved_files"] = retrieved_files
+    if total_files is not None:
+        payload["total_files"] = total_files
+    return payload
 
 # ── Explicit file-name extractor ─────────────────────────────────────────────
 # When the user writes "on file_a.csv" or "use file_b.csv",
@@ -230,6 +293,10 @@ async def _try_planner(
         catalog = ctx["initial_state"]["catalog"]
         connection_string = ctx["initial_state"]["connection_string"]
         container_name = ctx["initial_state"]["container_name"]
+        file_identities: FileIdentityMap | None = ctx.get("file_identity_map")
+        if file_identities is None:
+            chat_logger.info("planner_fallback_to_agent", reason="missing_file_identity_map")
+            return None
 
         planner = _get_planner()
         ep = await planner(query, catalog, db, timeout_seconds=2.5)
@@ -244,8 +311,29 @@ async def _try_planner(
             )
             return None
 
-        # ── Execute the planner SQL ───────────────────────────────────────────
+        # ── Canonicalize + execute the planner SQL ───────────────────────────
+        # The planner is allowed to produce only logical SQL. Physical storage
+        # identities and authorization remain owned by runtime canonicalization.
         import asyncio as _asyncio
+        try:
+            canonical = canonicalize_logical_sql(
+                ep.sql,
+                file_identities,
+                allowed_file_ids=ctx.get("allowed_file_ids"),
+            )
+            executable_sql = validate_and_normalise(
+                canonical.executable_sql,
+                allowed_blob_paths=ctx.get("allowed_blob_paths"),
+            )
+        except (SQLCanonicalizationError, ValueError) as exc:
+            chat_logger.info(
+                "planner_fallback_to_agent",
+                reason="planner_sql_canonicalization_failed",
+                error=str(exc)[:200],
+                sql_preview=ep.sql[:200],
+            )
+            return None
+
         chat_logger.info(
             "planner_executing",
             sql_preview=ep.sql[:300],
@@ -255,7 +343,7 @@ async def _try_planner(
         )
         loop = _asyncio.get_event_loop()
         rows, total = await loop.run_in_executor(
-            None, lambda: _sql_execute(ep.sql, connection_string, container_name, max_rows=100)
+            None, lambda: _sql_execute(executable_sql, connection_string, container_name, max_rows=100)
         )
 
         if not rows and total == 0:
@@ -307,7 +395,11 @@ async def _try_planner(
             "chart": chart,
             "route": "planner",
             "row_count": total,
-            "files_used": [f.blob_path for f in ep.files if f.blob_path],
+            "files_used": [
+                file_identities.by_id[file_id].blob_path
+                for file_id in canonical.referenced_file_ids
+                if file_id in file_identities.by_id
+            ],
             "tool_calls": 0,
         }
 
@@ -404,6 +496,13 @@ async def _build_agent_context(
     req_id_for_trace = request_trace_id or uuid.uuid4().hex
     trace = OrchestrationTrace(request_id=req_id_for_trace)
     trace.set_planner(intent_plan)
+
+    # Canonical request-local file identity map. The LLM sees logical table
+    # names; runtime owns file IDs, blob paths, parquet paths, and ACL checks.
+    file_identity_map = build_file_identity_map(full_catalog, all_parquet_paths, container_name)
+    allowed_file_ids = file_identity_map.allowed_file_ids()
+    allowed_blob_paths = file_identity_map.allowed_physical_uris()
+    trace.set_file_identity_map(file_identity_map)
 
     # ── STEP 2.45: ENTITY RESOLUTION ─────────────────────────────────────────
     # Deterministic, metadata-driven. Answers WHERE each planner entity lives.
@@ -868,7 +967,7 @@ async def _build_agent_context(
     # read-only constraint block so the LLM uses validated join paths and
     # column bindings instead of free-form semantic guessing.
     # Non-fatal: an empty SQLContext produces no prompt section.
-    sql_ctx = await build_sql_context(catalog, db)
+    sql_ctx = await build_sql_context(catalog, db, file_identities=file_identity_map)
     sql_context_note = sql_ctx.to_prompt_section()
     trace.set_approved_joins(sql_ctx)
 
@@ -878,7 +977,12 @@ async def _build_agent_context(
     #   - orphaned_tables: shortlisted files with no approved edges
     # Injected separately into the system prompt (not merged into sql_context_note)
     # so the planner can reason about multi-hop reachability independently.
-    _wf_topology = await build_workflow_topology(catalog, db, full_catalog=full_catalog)
+    _wf_topology = await build_workflow_topology(
+        catalog,
+        db,
+        full_catalog=full_catalog,
+        file_identities=file_identity_map,
+    )
     if _wf_topology.topology_note:
         pipeline_logger.info(
             "workflow_topology",
@@ -1019,30 +1123,23 @@ async def _build_agent_context(
         "confidence_score": confidence.score,
     }
 
-    # Authorised blob paths for this request — all files visible to this user
-    # in the full catalog (not just the retrieval shortlist).  search_catalog can
-    # surface any of these files, so the ACL must cover the full set or the LLM
-    # will get a false rejection when it tries to query a file it found via search.
-    # Catalog entries only have blob_path (CSV); parquet paths live in all_parquet_paths.
-    allowed_blob_paths: set[str] = set()
-    for e in full_catalog:
-        if e.get("blob_path"):
-            allowed_blob_paths.add(f"az://{container_name}/{e['blob_path']}")
-    for pq_path in all_parquet_paths.values():
-        allowed_blob_paths.add(f"az://{container_name}/{pq_path}")
-
     # Build tools
     all_tools = []
     all_tools.extend(build_sql_tools(
         connection_string, container_name, parquet_blob_path, store,
         allowed_blob_paths=allowed_blob_paths,
+        file_identities=file_identity_map,
+        allowed_file_ids=allowed_file_ids,
         sql_ctx=sql_ctx,  # repair layer uses approved joins/columns as constraints
     ))
     # search_catalog uses the lean full catalog so it can find any file
     # without paying the heavy-field cost.
     # db is passed so get_file_schema can fetch real column types from Postgres
     # when the lean catalog entry lacks them (i.e. file not in hydration shortlist).
-    all_tools.extend(build_catalog_tools(full_catalog, all_parquet_paths, container_name, db))
+    all_tools.extend(build_catalog_tools(
+        full_catalog, all_parquet_paths, container_name, db,
+        file_identities=file_identity_map,
+    ))
     # inspect_column — bound to full catalog with optional schema dict enrichment.
     # For non-hydrated files, falls back to a bounded SQL probe.
     # When field_definitions is non-empty, automatically appends business meaning
@@ -1051,18 +1148,20 @@ async def _build_agent_context(
         build_column_tool(
             full_catalog, all_parquet_paths, container_name, connection_string,
             field_definitions=field_definitions,
+            file_identities=file_identity_map,
         )
     )
     # lookup_field_definition — standalone tool for explicit semantic lookups.
     # Uses the same pre-loaded dict as inspect_column — zero extra SQL calls.
     all_tools.extend(build_definition_lookup_tool(field_definitions))
-    all_tools.extend(build_relations_tool(db, full_catalog))
+    all_tools.extend(build_relations_tool(db, full_catalog, file_identities=file_identity_map))
     all_tools.extend(build_stats_tool(store))
     # inspect_data_format previews rows. Same full-catalog binding as
     # inspect_column; cached sample_rows for shortlist files, SQL probe
     # fallback for the rest.
     all_tools.extend(build_sample_tool(
         full_catalog, all_parquet_paths, container_name, connection_string,
+        file_identities=file_identity_map,
     ))
 
     # Build graph and system prompt concurrently — both are pure CPU computation
@@ -1087,6 +1186,7 @@ async def _build_agent_context(
                     _workflow_continuity_note,
                     _wf_topology.topology_note,
                 ])),
+                file_identities=file_identity_map,
             ),
         ),
     )
@@ -1127,6 +1227,9 @@ async def _build_agent_context(
         "total_files": len(full_catalog),
         "container_name": container_name,
         "parquet_blob_path": parquet_blob_path,
+        "file_identity_map": file_identity_map,
+        "allowed_file_ids": allowed_file_ids,
+        "allowed_blob_paths": allowed_blob_paths,
         "intent_plan": intent_plan,
         "entity_resolution": entity_resolution,
         "graph_health": graph_health,
@@ -1227,6 +1330,32 @@ async def run_agent_query(
                      total_duration_ms=total_ms,
                      answer_preview=answer[:200])
 
+    failure_payload = _execution_failure_payload(
+        store,
+        route="agent",
+        tool_calls=tool_calls_made,
+        file_identities=ctx.get("file_identity_map"),
+    )
+    if failure_payload:
+        err = failure_payload.get("execution_error") or {}
+        trace.set_execution_outcome(
+            rows=0,
+            total=0,
+            duration_ms=total_ms,
+            error=str(err.get("message") or "execution failure")[:200],
+        )
+        trace.emit()
+        pipeline_logger.info(
+            "final_answer",
+            query=query,
+            answer=failure_payload["answer"],
+            row_count=0,
+            tool_calls=tool_calls_made,
+            total_duration_ms=total_ms,
+            execution_error=err,
+        )
+        return failure_payload
+
     # ── FINAL STEP: ANSWER READY ─────────────────────────────────────────────
     pipeline_logger.info(
         "final_answer",
@@ -1267,7 +1396,7 @@ async def run_agent_query(
             for msg in final_msgs
             if isinstance(msg, ToolMessage)
             for blob in extract_blob_paths(msg.content)
-        }),
+        }) or _files_used_from_store(store, ctx.get("file_identity_map")),
         "tool_calls": tool_calls_made,
     }
 
@@ -1409,7 +1538,16 @@ async def run_agent_query_stream(
                 # calls — i.e. it is the final answer the user should see.
                 # Intermediate planning / "now I'll check the schema" narration
                 # is dropped on the floor so the user only sees the result.
-                if pending_chunks and not resp_tool_calls:
+                if (
+                    pending_chunks
+                    and not resp_tool_calls
+                    and not _execution_failure_payload(
+                        store,
+                        route="agent",
+                        tool_calls=tool_calls_made,
+                        file_identities=ctx.get("file_identity_map"),
+                    )
+                ):
                     for piece in pending_chunks:
                         answer_tokens.append(piece)
                         yield {"type": "token", "content": piece}
@@ -1468,6 +1606,36 @@ async def run_agent_query_stream(
                      row_count=len(sql_results),
                      total_duration_ms=total_ms,
                      answer_len=len(final_answer))
+
+    failure_payload = _execution_failure_payload(
+        store,
+        route="agent",
+        tool_calls=tool_calls_made,
+        file_identities=ctx.get("file_identity_map"),
+        retrieved_files=ctx["catalog_len"],
+        total_files=ctx["total_files"],
+    )
+    if failure_payload:
+        err = failure_payload.get("execution_error") or {}
+        trace.set_execution_outcome(
+            rows=0,
+            total=0,
+            duration_ms=total_ms,
+            error=str(err.get("message") or "execution failure")[:200],
+        )
+        trace.emit()
+        pipeline_logger.info(
+            "final_answer",
+            query=query,
+            answer=failure_payload["answer"],
+            row_count=0,
+            tool_calls=tool_calls_made,
+            total_duration_ms=total_ms,
+            execution_error=err,
+        )
+        yield {"type": "token", "content": failure_payload["answer"]}
+        yield {"type": "done", "payload": failure_payload}
+        return
 
     # ── FINAL STEP: ANSWER READY ─────────────────────────────────────────────
     pipeline_logger.info(
@@ -1556,7 +1724,7 @@ async def run_agent_query_stream(
             "chart": chart,
             "route": "agent",
             "row_count": sql_total_rows,
-            "files_used": list(files_used),
+            "files_used": list(files_used) or _files_used_from_store(store, ctx.get("file_identity_map")),
             "tool_calls": tool_calls_made,
             "retrieved_files": ctx["catalog_len"],
             "total_files": ctx["total_files"],

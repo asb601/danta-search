@@ -37,6 +37,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import chat_logger
+from app.services.file_identity import FileIdentityMap
 
 _MAX_REACHABLE_PATHS = 8
 
@@ -96,6 +97,7 @@ async def build_workflow_topology(
     shortlist: list[dict],
     db: AsyncSession,
     full_catalog: list[dict] | None = None,
+    file_identities: FileIdentityMap | None = None,
 ) -> WorkflowTopology:
     """
     Build the workflow topology summary for the current shortlist.
@@ -115,16 +117,13 @@ async def build_workflow_topology(
         seen = {e.get("file_id") for e in catalog_scope if e.get("file_id")}
         catalog_scope.extend(e for e in full_catalog if e.get("file_id") not in seen)
 
-    id_to_name: dict[str, str] = {
-        e["file_id"]: _table_name(e.get("blob_path", e.get("file_id", "")))
-        for e in catalog_scope
-        if e.get("file_id")
-    }
-    id_to_blob: dict[str, str] = {
-        e["file_id"]: e.get("blob_path") or e.get("file_id")
-        for e in catalog_scope
-        if e.get("file_id")
-    }
+    id_to_name: dict[str, str] = {}
+    for e in catalog_scope:
+        file_id = e.get("file_id")
+        if not file_id:
+            continue
+        identity = file_identities.by_id.get(file_id) if file_identities else None
+        id_to_name[file_id] = identity.sql_name if identity else _table_name(e.get("blob_path", file_id))
     id_to_roles: dict[str, list[str]] = {
         e["file_id"]: _role_labels(e)
         for e in catalog_scope
@@ -214,7 +213,7 @@ async def build_workflow_topology(
                     path_confidence=round(min_conf, 2),
                     is_direct=False,
                     missing_table_id=ext_id,
-                    via_blob_path=id_to_blob.get(ext_id),
+                    via_blob_path=None,
                     via_domain_labels=id_to_roles.get(ext_id, [])[:6],
                 ))
 

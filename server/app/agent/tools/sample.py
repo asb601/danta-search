@@ -17,6 +17,7 @@ from app.core.config import get_settings
 from app.core.duckdb_client import execute_query_sync as _duckdb_execute
 from app.core.datafusion_client import execute_query_sync as _datafusion_execute
 from app.core.logger import pipeline_logger
+from app.services.file_identity import FileIdentityMap
 
 
 def _execute(sql: str, connection_string: str, container_name: str | None, max_rows: int) -> tuple:
@@ -40,6 +41,7 @@ def build_sample_tool(
     parquet_paths: dict[str, str] | None = None,
     container_name: str | None = None,
     connection_string: str | None = None,
+    file_identities: FileIdentityMap | None = None,
 ) -> list:
     """Return the inspect_data_format tool bound to the full request catalog.
 
@@ -57,11 +59,15 @@ def build_sample_tool(
     }
     parquet_paths = parquet_paths or {}
 
-    def _resolve_blob_path(blob_path: str) -> str | None:
-        if not blob_path:
+    def _resolve_blob_path(file_ref: str) -> str | None:
+        if not file_ref:
             return None
 
-        query = blob_path.lower().strip()
+        identity = file_identities.resolve_reference(file_ref) if file_identities else None
+        if identity and identity.blob_path in catalog_by_blob:
+            return identity.blob_path
+
+        query = file_ref.lower().strip()
         if query.startswith("az://"):
             query = query.split("/", 3)[-1]
 
@@ -101,27 +107,34 @@ def build_sample_tool(
             return []
 
     @tool
-    def inspect_data_format(blob_path: str, n: int = 5) -> str:
+    def inspect_data_format(file_ref: str, n: int = 5) -> str:
         """Preview a few example rows from a specific file to understand data format,
         column names, value patterns, and date formats before writing SQL.
         Use this when you need to know what the data looks like — e.g. whether a region is
         stored as 'us-east' or 'US East', or what date format is used.
         These rows are from the beginning of the file only — do NOT use them as the answer
-        to the user's question. Always run SQL on the parquet for actual results."""
-        resolved_blob_path = _resolve_blob_path(blob_path)
+        to the user's question. Always run SQL on the logical table for actual results."""
+        resolved_blob_path = _resolve_blob_path(file_ref)
         if not resolved_blob_path:
-            available_files = list(catalog_by_blob.keys())[:15]
+            available_tables = []
+            if file_identities:
+                available_tables = [
+                    identity.sql_name
+                    for identity in file_identities.prompt_identities_for_catalog(catalog[:15])
+                ]
+            else:
+                available_tables = list(catalog_by_blob.keys())[:15]
             pipeline_logger.info(
                 "inspect_data_format",
-                blob_path=blob_path,
+                file_ref=file_ref,
                 resolved_blob_path=None,
                 n=n,
                 available=False,
             )
             return json.dumps({
-                "error": f"File '{blob_path}' not found.",
-                "available_files": available_files,
-                "hint": "Pass a blob_path from search_catalog/get_file_schema before calling inspect_data_format.",
+                "error": f"Logical table '{file_ref}' not found.",
+                "available_logical_tables": available_tables,
+                "hint": "Pass a logical_table from search_catalog/get_file_schema before calling inspect_data_format.",
             })
 
         n = max(1, min(n, 20))
@@ -135,7 +148,7 @@ def build_sample_tool(
         if not sample_rows:
             pipeline_logger.info(
                 "inspect_data_format",
-                blob_path=blob_path,
+                file_ref=file_ref,
                 resolved_blob_path=resolved_blob_path,
                 n=n,
                 available=False,
@@ -148,7 +161,7 @@ def build_sample_tool(
         rows = sample_rows[:n]
         pipeline_logger.info(
             "inspect_data_format",
-            blob_path=blob_path,
+            file_ref=file_ref,
             resolved_blob_path=resolved_blob_path,
             n=n,
             available=True,
@@ -156,10 +169,12 @@ def build_sample_tool(
             columns=list(rows[0].keys()) if rows else [],
             rows=rows,
         )
+        identity = file_identities.identity_for_blob(resolved_blob_path) if file_identities else None
         return json.dumps({
-            "blob_path": resolved_blob_path,
+            "logical_table": identity.sql_name if identity else resolved_blob_path,
+            "canonical_id": identity.canonical_id if identity else entry.get("file_id"),
             "format_preview": rows,
-            "note": "These are example rows for understanding data format only. Use run_sql on the parquet path for real answers.",
+            "note": "These are example rows for understanding data format only. Use run_sql with the logical table for real answers.",
         }, default=str)
 
     return [inspect_data_format]

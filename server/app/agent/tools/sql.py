@@ -20,6 +20,8 @@ from app.core import metrics
 from app.agent.tools.sql_safety import validate_and_normalise
 import app.services.sql_repair as _repair
 from app.services.execution_guards import ExecutionGuard, ExecutionGuardError
+from app.services.file_identity import FileIdentityMap
+from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
 from app.services.sql_plan_signature import compute_plan_signature as _compute_plan_sig
 
 
@@ -36,13 +38,19 @@ def build_sql_tools(
     parquet_blob_path: str | None,
     state_store: dict,
     allowed_blob_paths: set[str] | None = None,
+    file_identities: FileIdentityMap | None = None,
+    allowed_file_ids: set[str] | None = None,
     sql_ctx=None,  # SQLContext | None — passed to repair layer
 ) -> list:
     """Return SQL tools bound to connection context.
 
-    allowed_blob_paths: every az:// path the user is authorised to query for
-    this request.  Derived from the catalog shortlist in graph.py and used
-    by validate_and_normalise to close the prompt-injection gap.
+    file_identities / allowed_file_ids: canonical request-local identity map.
+    The LLM submits logical SQL; this tool resolves logical table names to
+    canonical file IDs and only then emits physical executor SQL.
+
+    allowed_blob_paths is retained as a secondary invariant after canonical
+    resolution so a repaired/internal SQL string still cannot scan outside the
+    current request's authorized physical URIs.
     """
     # Build the execution guard once per tool instantiation (per request), not once
     # per SQL call. ExecutionGuard.__init__ constructs AstValidationConfig and reads
@@ -51,17 +59,55 @@ def build_sql_tools(
 
     @tool
     def run_sql(sql: str) -> str:
-        """Execute a DuckDB SQL query against Azure Blob Storage files.
-        The file paths and column names are in the system prompt — use them directly.
-        Parquet syntax: read_parquet('az://CONTAINER/filename.parquet')
-        CSV syntax:     read_csv_auto('az://CONTAINER/filename.csv')
+        """Execute read-only SQL against logical tables from the current catalog.
+        Use logical table names in FROM/JOIN clauses, for example:
+        SELECT * FROM ORDERS
+        Do not use physical storage functions, storage URIs, blob paths, or parquet filenames.
+        Runtime resolves logical tables to canonical file IDs and physical storage internally.
         Use TRY_CAST for date columns. Results are capped at 20 rows server-side.
         Returns row_count, total_rows, column names, and all result rows (up to 20).
         If total_rows > 20 the query returned more data — refine with WHERE/LIMIT/GROUP BY."""
+        _attempt: dict = {
+            "logical_sql": sql,
+            "status": "started",
+            "referenced_file_ids": [],
+        }
+        state_store.setdefault("sql_attempts", []).append(_attempt)
+
+        if file_identities is not None:
+            try:
+                canonical = canonicalize_logical_sql(
+                    sql,
+                    file_identities,
+                    allowed_file_ids=allowed_file_ids,
+                )
+                sql = canonical.executable_sql
+                _attempt.update({
+                    "status": "canonicalized",
+                    "referenced_file_ids": canonical.referenced_file_ids,
+                    "referenced_tables": canonical.referenced_tables,
+                    "physical_uris": canonical.physical_uris,
+                })
+            except SQLCanonicalizationError as ve:
+                error_msg = str(ve)
+                _attempt.update({"status": "authorization_error", "error": error_msg})
+                state_store["execution_failure"] = {
+                    "status": "authorization_error",
+                    "error": error_msg,
+                }
+                metrics.inc("sql_blob_acl_denied")
+                return json.dumps({"error": error_msg, "fatal_execution_error": True})
+
         try:
             sql = validate_and_normalise(sql, allowed_blob_paths=allowed_blob_paths)
         except ValueError as ve:
-            return json.dumps({"error": str(ve)})
+            error_msg = str(ve)
+            _attempt.update({"status": "validation_error", "error": error_msg})
+            state_store["execution_failure"] = {
+                "status": "validation_error",
+                "error": error_msg,
+            }
+            return json.dumps({"error": error_msg, "fatal_execution_error": True})
 
         # ── Execution safety guards (pre-execution, deterministic) ─────────────
         # Checks: SQL length, JOIN count, Cartesian joins, file scan count.
@@ -71,7 +117,13 @@ def build_sql_tools(
             _guard.check_pre_execution(sql)
         except ExecutionGuardError as ge:
             pipeline_logger.error("execution_guard_rejected", reason=str(ge)[:200], sql_preview=sql[:200])
-            return json.dumps({"error": str(ge)})
+            error_msg = str(ge)
+            _attempt.update({"status": "guard_error", "error": error_msg})
+            state_store["execution_failure"] = {
+                "status": "guard_error",
+                "error": error_msg,
+            }
+            return json.dumps({"error": error_msg, "fatal_execution_error": True})
 
         # ── Retry governance: structural plan-signature deduplication ──────────
         # Compute a logical-plan fingerprint from the normalized SQL.  If this
@@ -110,6 +162,7 @@ def build_sql_tools(
 
         # ── Log the complete SQL before execution ──────────────────────────────
         pipeline_logger.info("sql_execute_start", sql=sql)
+        _attempt["executable_sql"] = sql
 
         # ── Bounded repair loop (max 2 repair attempts after the first failure) ──
         # Tier 1: deterministic pattern rewrites (zero cost).
@@ -168,9 +221,15 @@ def build_sql_tools(
 
         if last_exc is not None:
             error_msg = str(last_exc)[:500]
+            _attempt.update({"status": "engine_error", "error": error_msg})
+            state_store["execution_failure"] = {
+                "status": "engine_error",
+                "error": error_msg,
+            }
             if any(tok in error_msg for tok in ("dtype", "Int64", "Invalid value ''")):
                 return json.dumps({
                     "error": error_msg,
+                    "fatal_execution_error": True,
                     "hint": (
                         "This file has a Parquet data type issue: some nullable integer "
                         "columns (typed Int64 in the schema) contain empty strings that "
@@ -181,7 +240,7 @@ def build_sql_tools(
                         "columns will work fine."
                     ),
                 })
-            return json.dumps({"error": error_msg})
+            return json.dumps({"error": error_msg, "fatal_execution_error": True})
 
         rows, total = final_rows, final_total  # type: ignore[assignment]
         duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
@@ -220,6 +279,17 @@ def build_sql_tools(
 
         state_store["sql_results"] = rows
         state_store["sql_total_rows"] = total
+        state_store.pop("execution_failure", None)
+        _attempt.update({
+            "status": "success",
+            "rows": len(rows),
+            "total_rows": total,
+        })
+        if _attempt.get("referenced_file_ids"):
+            used = state_store.setdefault("files_used", [])
+            for file_id in _attempt["referenced_file_ids"]:
+                if file_id not in used:
+                    used.append(file_id)
         resp: dict = {
             "row_count": len(rows),
             "total_rows": total,

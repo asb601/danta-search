@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import json
 from langchain_core.tools import tool
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
+from app.core.logger import pipeline_logger
+from app.services.file_identity import FileIdentityMap, logical_name_from_path
 from app.agent.search_normalization import (
     is_lookup_file,
     tokenize_search_query,
 )
-from app.core.config import get_settings
-from app.core.logger import pipeline_logger
 from app.retrieval.embeddings import build_search_text
 
 # Hard cap on how many files search_catalog returns to the LLM.
@@ -54,22 +55,29 @@ def build_catalog_tools(
     parquet_paths: dict[str, str] | None = None,
     container_name: str = "",
     db: AsyncSession | None = None,
+    file_identities: FileIdentityMap | None = None,
 ) -> list:
     """Return search_catalog and get_file_schema tools bound to the catalog."""
 
-    def _sql_path(blob_path: str) -> str:
-        """Return the SQL-ready expression for a blob_path."""
-        if parquet_paths and blob_path in parquet_paths:
-            return f"read_parquet('az://{container_name}/{parquet_paths[blob_path]}')"
-        if container_name and blob_path:
-            sample_rows = max(1, int(get_settings().INGEST_DUCKDB_SAMPLE_ROWS))
-            return f"read_csv_auto('az://{container_name}/{blob_path}', sample_size={sample_rows}, null_padding=true, ignore_errors=true)"
-        return blob_path
+    def _identity_for(f: dict):
+        if file_identities and f.get("file_id"):
+            return file_identities.by_id.get(f["file_id"])
+        return None
+
+    def _logical_table(f: dict) -> str:
+        identity = _identity_for(f)
+        return identity.sql_name if identity else logical_name_from_path(f.get("blob_path") or "")
+
+    def _resolve_file_ref(file_ref: str) -> dict | None:
+        identity = file_identities.resolve_reference(file_ref) if file_identities else None
+        if identity:
+            return next((f for f in catalog if f.get("file_id") == identity.canonical_id), None)
+        return None
 
     @tool
     def search_catalog(query: str) -> str:
         """Search the ingested file catalog to find files relevant to the user's question.
-        Returns file paths, descriptions, columns, and what they are good for.
+        Returns logical table names, descriptions, columns, and what they are good for.
         Use when you need to discover which file to query or what columns are available.
         This searches file metadata only; it does not search actual row values inside the data."""
         if not catalog:
@@ -84,11 +92,13 @@ def build_catalog_tools(
             ]
             if not cols:
                 cols = [c for c in (f.get("column_names") or []) if isinstance(c, str)]
+            identity = _identity_for(f)
             return {
                 "match_score": score,
                 "matched_terms": matched_terms,
-                "blob_path": f["blob_path"],
-                "sql_path": _sql_path(f["blob_path"]),
+                "logical_table": _logical_table(f),
+                "canonical_id": identity.canonical_id if identity else f.get("file_id"),
+                "display_name": identity.display_name if identity else f.get("blob_path"),
                 "description": (f.get("ai_description") or "")[:300],  # cap at 300 chars
                 "columns": cols,
                 # Only include non-empty metadata to keep the payload small
@@ -115,7 +125,7 @@ def build_catalog_tools(
         )
 
         matched = [_entry(f, s, mt) for (s, _is_lk, f, mt) in scored if s > 0]
-        matched_blobs = {r["blob_path"] for r in matched}
+        matched_ids = {r["canonical_id"] for r in matched if r.get("canonical_id")}
 
         # Always surface up to _LOOKUP_PAD_SLOTS lookup-style files that the
         # token-match step missed.  Generic, query-agnostic — handles ERP
@@ -124,7 +134,7 @@ def build_catalog_tools(
         for s, is_lk, f, mt in scored:
             if not is_lk:
                 continue
-            if f["blob_path"] in matched_blobs:
+            if f.get("file_id") in matched_ids:
                 continue
             lookup_pad.append(_entry(f, s, mt))
             if len(lookup_pad) >= _LOOKUP_PAD_SLOTS:
@@ -144,19 +154,23 @@ def build_catalog_tools(
             "search_catalog",
             query=query,
             files_found=len(results),
-            matched_files=[r["blob_path"] for r in results],
-            lookup_padded=[r["blob_path"] for r in lookup_pad],
+            matched_tables=[r["logical_table"] for r in results],
+            lookup_padded=[r["logical_table"] for r in lookup_pad],
             result_descriptions=[r.get("description", "")[:120] for r in results],
         )
 
         return json.dumps({"files": results, "total": len(results)}, default=str)
 
     @tool
-    async def get_file_schema(blob_path: str) -> str:
-        """Get the full column schema, sample values, and data types for a specific file.
+    async def get_file_schema(file_ref: str) -> str:
+        """Get the full column schema, sample values, and data types for a logical table.
         Use this to understand exact column names and types before writing SQL."""
+        blob_path = file_ref
+        match = _resolve_file_ref(file_ref)
+
         # Exact match first
-        match = next((f for f in catalog if f["blob_path"] == blob_path), None)
+        if not match:
+            match = next((f for f in catalog if f["blob_path"] == blob_path), None)
 
         # Fuzzy fallback: strip az://container/ prefix and extension, then match on stem
         if not match:
@@ -187,16 +201,17 @@ def build_catalog_tools(
 
         if not match:
             available = [f["blob_path"] for f in catalog[:15]]
+            available_logical = [_logical_table(f) for f in catalog[:15]]
             pipeline_logger.info(
                 "get_file_schema",
-                blob_path=blob_path,
+                file_ref=file_ref,
                 found=False,
-                available_files=available,
+                available_tables=available_logical,
             )
             return json.dumps({
-                "error": f"File '{blob_path}' not found.",
-                "available_files": available,
-                "hint": "Use one of the blob_path values above, or call search_catalog to find the right file.",
+                "error": f"Logical table '{file_ref}' not found.",
+                "available_logical_tables": available_logical,
+                "hint": "Use one of the logical_table values above, or call search_catalog to find the right table.",
             })
 
         sample_preview_count = max(0, int(get_settings().INGEST_LOG_SAMPLE_ITEMS))
@@ -305,13 +320,15 @@ def build_catalog_tools(
                     "type": "unknown",
                     "sample_values": [],
                     "unique_count": 0,
-                    "hint": "Call inspect_column(blob_path, name) for type and sample values.",
+                    "hint": "Call inspect_column(logical_table, name) for type and sample values.",
                 })
 
+        identity = _identity_for(match)
         pipeline_logger.info(
             "get_file_schema",
-            blob_path=blob_path,
+            file_ref=file_ref,
             resolved_blob_path=match["blob_path"],
+            logical_table=_logical_table(match),
             found=True,
             column_count=len(cols),
             columns=[c["name"] for c in cols],
@@ -320,9 +337,10 @@ def build_catalog_tools(
         )
 
         return json.dumps({
-            "blob_path": match["blob_path"],
-            "sql_path": _sql_path(match["blob_path"]),
-            "sql_hint": "Use the sql_path value directly in your SQL FROM clause.",
+            "logical_table": _logical_table(match),
+            "canonical_id": identity.canonical_id if identity else match.get("file_id"),
+            "display_name": identity.display_name if identity else match.get("blob_path"),
+            "sql_hint": "Use logical_table directly in SQL FROM/JOIN clauses. Do not use physical storage paths or scan functions.",
             "columns": cols,
             "key_metrics": match.get("key_metrics") or [],
             "key_dimensions": match.get("key_dimensions") or [],

@@ -10,11 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.file_relationship import FileRelationship
 from app.models.semantic_layer import SemanticRelationship
+from app.services.file_identity import FileIdentityMap
 from app.services.relationship_index import is_dictionary_like_path
 from app.services.semantic_policy import get_semantic_policy
 
 
-def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
+def build_relations_tool(
+    db: AsyncSession,
+    catalog: list[dict],
+    file_identities: FileIdentityMap | None = None,
+) -> list:
     """Return extract_relations tool bound to the current visible catalog."""
     by_file_id = {f.get("file_id"): f for f in catalog if f.get("file_id")}
     by_blob = {f.get("blob_path"): f for f in catalog if f.get("blob_path")}
@@ -27,8 +32,10 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
 
     def _context(file_id: str | None) -> dict:
         entry = by_file_id.get(file_id or "") or {}
+        identity = file_identities.by_id.get(file_id or "") if file_identities else None
         return {
-            "blob_path": entry.get("blob_path"),
+            "logical_table": identity.sql_name if identity else entry.get("blob_path"),
+            "display_name": identity.display_name if identity else entry.get("blob_path"),
             "description": (entry.get("ai_description") or "")[:240],
             "good_for": (entry.get("good_for") or [])[:3],
             "key_metrics": (entry.get("key_metrics") or [])[:6],
@@ -39,13 +46,19 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
         entry = by_file_id.get(file_id or "") or {}
         return entry.get("blob_path") or file_id
 
+    def _logical(file_id: str | None) -> str | None:
+        if file_identities and file_id in file_identities.by_id:
+            return file_identities.by_id[file_id].sql_name
+        return _blob(file_id)
+
     def _selected_ids(file_paths_csv: str) -> set[str]:
         selected: set[str] = set()
         for raw in (file_paths_csv or "").split(","):
             key = raw.strip()
             if not key:
                 continue
-            entry = by_blob.get(key)
+            identity = file_identities.resolve_reference(key) if file_identities else None
+            entry = by_file_id.get(identity.canonical_id) if identity else by_blob.get(key)
             if entry and entry.get("file_id") in allowed_file_ids:
                 selected.add(entry["file_id"])
         return selected
@@ -65,8 +78,8 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
         return {
             "file_a_id": rel.file_a_id,
             "file_b_id": rel.file_b_id,
-            "file_a": _blob(rel.file_a_id),
-            "file_b": _blob(rel.file_b_id),
+            "file_a": _logical(rel.file_a_id),
+            "file_b": _logical(rel.file_b_id),
             "join_on": {
                 "file_a_col": rel.from_column,
                 "file_b_col": rel.to_column,
@@ -85,8 +98,8 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
         return {
             "file_a_id": rel.file_a_id,
             "file_b_id": rel.file_b_id,
-            "file_a": _blob(rel.file_a_id) or rel.file_a_path,
-            "file_b": _blob(rel.file_b_id) or rel.file_b_path,
+            "file_a": _logical(rel.file_a_id) or rel.file_a_path,
+            "file_b": _logical(rel.file_b_id) or rel.file_b_path,
             "join_on": {
                 "file_a_col": rel.shared_column,
                 "file_b_col": rel.related_column or rel.shared_column,
@@ -120,9 +133,9 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
             if key not in {"file_a_id", "file_b_id", "_path_from_id", "_path_to_id"}
         }
         if edge.get("_path_from_id"):
-            public["path_from"] = _blob(edge.get("_path_from_id"))
+            public["path_from"] = _logical(edge.get("_path_from_id"))
         if edge.get("_path_to_id"):
-            public["path_to"] = _blob(edge.get("_path_to_id"))
+            public["path_to"] = _logical(edge.get("_path_to_id"))
         return public
 
     async def _direct_relations(selected_ids: set[str]) -> str:
@@ -182,7 +195,7 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
                 related_ids.update({rel.file_a_id, rel.file_b_id})
 
         context = {
-            (_blob(file_id) or file_id): _context(file_id)
+            (_logical(file_id) or file_id): _context(file_id)
             for file_id in sorted(related_ids | selected_ids)
             if file_id in by_file_id
         }
@@ -284,8 +297,8 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
                                 for path_edge in candidate_path:
                                     flattened.setdefault(_edge_key(path_edge), path_edge)
                                 paths.append({
-                                    "from": _blob(start_id),
-                                    "to": _blob(next_id),
+                                    "from": _logical(start_id),
+                                    "to": _logical(next_id),
                                     "hops": len(candidate_path),
                                     "confidence": round(
                                         min(path_edge.get("confidence") or 0.0 for path_edge in candidate_path),
@@ -303,7 +316,7 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
                 frontier = next_frontier
 
         context = {
-            (_blob(file_id) or file_id): _context(file_id)
+            (_logical(file_id) or file_id): _context(file_id)
             for file_id in sorted(related_ids)
             if file_id in by_file_id
         }
@@ -315,10 +328,10 @@ def build_relations_tool(db: AsyncSession, catalog: list[dict]) -> list:
 
     @tool
     async def extract_relations(file_paths_csv: str = "", max_hops: int = 1) -> str:
-        """Return scoped join relationships for visible files.
+        """Return scoped join relationships for visible logical tables.
 
-        Call only when a SQL answer needs more than one file. Pass only the
-        blob paths already selected as necessary for the query. max_hops=1
+        Call only when a SQL answer needs more than one logical table. Pass only the
+        logical_table names already selected as necessary for the query. max_hops=1
         returns direct joins; set max_hops above 1 only when a selected file set
         needs visible intermediate files to connect. The tool never returns
         relationships outside the current catalog access scope.

@@ -147,20 +147,20 @@ def score_graph_health(
         # "orphan masters" — the planner can't use them in JOINs.
         files_in_joins: set[str] = set()
         for j in approved_joins:
-            files_in_joins.add(j.left_table)
-            files_in_joins.add(j.right_table)
+            left_file_id = getattr(j, "left_file_id", "")
+            right_file_id = getattr(j, "right_file_id", "")
+            if left_file_id and right_file_id:
+                files_in_joins.add(left_file_id)
+                files_in_joins.add(right_file_id)
+            else:
+                files_in_joins.add(j.left_table)
+                files_in_joins.add(j.right_table)
 
         files_with_roles: set[str] = set()
         for entry in catalog:
             roles = entry.get("column_semantic_roles") or {}
             if roles:
-                # Use table name (same derivation as sql_context_builder._table_name)
-                blob = entry.get("blob_path", "")
-                name = blob.rsplit("/", 1)[-1]
-                name = re.sub(r"^[0-9a-f]{8}_", "", name, flags=re.IGNORECASE)
-                if "." in name:
-                    name = name.rsplit(".", 1)[0]
-                files_with_roles.add(name)
+                files_with_roles.add(entry.get("file_id") or _display_table_name(entry))
 
         orphan_names = files_with_roles - files_in_joins
         score.orphan_file_count = len(orphan_names)
@@ -170,14 +170,10 @@ def score_graph_health(
 
         # ── Entity conflict detection ──────────────────────────────────────────
         # Count entity_key labels claimed by more than one file in the shortlist.
-        entity_key_labels: dict[str, set[str]] = {}  # label → {table_name}
+        entity_key_labels: dict[str, set[str]] = {}  # label → {file_id/table_name}
         for entry in catalog:
             roles = entry.get("column_semantic_roles") or {}
-            blob = entry.get("blob_path", "")
-            name = blob.rsplit("/", 1)[-1]
-            name = re.sub(r"^[0-9a-f]{8}_", "", name, flags=re.IGNORECASE)
-            if "." in name:
-                name = name.rsplit(".", 1)[0]
+            name = entry.get("file_id") or _display_table_name(entry)
             for _col, role_str in roles.items():
                 m = _ROLE_RE.match(str(role_str or ""))
                 if m and m.group(1) == "entity_key":
@@ -237,3 +233,12 @@ def _percentile(sorted_vals: list[float], p: int) -> float:
     hi = min(lo + 1, len(sorted_vals) - 1)
     frac = idx - lo
     return sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac
+
+
+def _display_table_name(entry: dict) -> str:
+    blob = entry.get("blob_path", "")
+    name = blob.rsplit("/", 1)[-1]
+    name = re.sub(r"^[0-9a-f]{8}_", "", name, flags=re.IGNORECASE)
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    return name

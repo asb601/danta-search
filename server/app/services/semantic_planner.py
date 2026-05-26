@@ -67,6 +67,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logger import chat_logger
 from app.models.file_metadata import FileMetadata
 from app.models.semantic_layer import SemanticRelationship
+from app.services.file_identity import logical_name_from_path
 from app.services.relationship_index import is_dictionary_like_path
 from app.services.semantic_policy import get_semantic_policy
 from app.services.semantic_roles import (
@@ -689,26 +690,11 @@ def _compute_confidence(result: ExecutionPlan, intent: QueryIntent) -> float:
     return min(max(score, 0.0), 1.0)
 
 
-# ── SQL generation ─────────────────────────────────────────────────────────────
-
-def _parquet_uri(pf: PlannedFile, container_name: str = "") -> str:
-    """Return the az:// URI for a file, preferring parquet."""
-    path = pf.parquet_path or pf.blob_path
-    if not path:
-        return ""
-    if path.startswith("az://"):
-        return path
-    # Prepend az://container/ if needed
-    if container_name:
-        return f"az://{container_name}/{path}"
-    return path
-
-
 def _generate_sql(result: ExecutionPlan, intent: QueryIntent) -> str | None:
-    """Generate DataFusion-compatible SQL from the execution plan.
+    """Generate logical SQL from the execution plan.
 
-    Uses read_parquet('az://...') syntax — DataFusion resolves these via
-    the registered object store in datafusion_client.py.
+    The caller canonicalizes logical table names to physical storage through
+    FileIdentityMap before execution. The planner must not emit blob paths.
 
     Returns None if a required piece (e.g. metric column) is missing.
     """
@@ -720,14 +706,11 @@ def _generate_sql(result: ExecutionPlan, intent: QueryIntent) -> str | None:
     is_raw = agg == "RAW"
 
     # ── FROM clause ──────────────────────────────────────────────────────────
-    # Use parquet_path when available (10-50× faster than CSV).
-    # DataFusion table aliases t0, t1, ... are registered in datafusion_client.py
-    # via _rewrite_sql; here we emit read_parquet(...) which that function rewrites.
-    primary_uri = primary.parquet_path or primary.blob_path
-    if not primary_uri:
+    primary_table = logical_name_from_path(primary.blob_path)
+    if not primary_table:
         return None
 
-    primary_src = f"read_parquet('{primary_uri}')" if primary_uri.endswith(".parquet") else f"read_csv_auto('{primary_uri}')"
+    primary_src = primary_table
 
     # ── SELECT clause ─────────────────────────────────────────────────────────
     select_parts: list[str] = []
@@ -845,10 +828,9 @@ def _generate_sql(result: ExecutionPlan, intent: QueryIntent) -> str | None:
         other = _find_file_by_alias(result.files, other_alias)
         if not other:
             continue
-        other_uri = other.parquet_path or other.blob_path
-        if not other_uri:
+        other_src = logical_name_from_path(other.blob_path)
+        if not other_src:
             continue
-        other_src = f"read_parquet('{other_uri}')" if other_uri.endswith(".parquet") else f"read_csv_auto('{other_uri}')"
         join_clauses.append(
             f"{j.join_type} {other_src} AS {other.alias}\n"
             f"  ON t0.{_q(primary_col)} = {other.alias}.{_q(other_col)}"

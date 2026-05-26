@@ -189,10 +189,17 @@ def plan_execution_strategy(
     for fid in id_to_name:
         uf.add(fid)
 
-    # Apply approved join edges
+    # Apply approved join edges. Prefer canonical file IDs carried by SQLContext;
+    # fall back to display-name resolution only for older contexts/tests.
     for join in sql_ctx.approved_joins:
-        left_ids = name_to_ids.get(join.left_table, [])
-        right_ids = name_to_ids.get(join.right_table, [])
+        left_file_id = getattr(join, "left_file_id", "")
+        right_file_id = getattr(join, "right_file_id", "")
+        if left_file_id in id_to_name and right_file_id in id_to_name:
+            left_ids = [left_file_id]
+            right_ids = [right_file_id]
+        else:
+            left_ids = name_to_ids.get(join.left_table, [])
+            right_ids = name_to_ids.get(join.right_table, [])
         for lid in left_ids:
             for rid in right_ids:
                 uf.union(lid, rid)

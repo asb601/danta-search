@@ -24,6 +24,7 @@ from app.core.duckdb_client import execute_query_sync as _duckdb_execute
 from app.core.datafusion_client import execute_query_sync as _datafusion_execute
 from app.core.config import get_settings
 from app.core.logger import pipeline_logger
+from app.services.file_identity import FileIdentityMap
 from app.services.ingestion_config import configured_tokens
 
 
@@ -122,6 +123,7 @@ def build_column_tool(
     container_name: str,
     connection_string: str,
     field_definitions: dict[str, dict] | None = None,
+    file_identities: FileIdentityMap | None = None,
 ) -> list:
     """Return the inspect_column tool bound to the request's catalog + DuckDB.
 
@@ -133,8 +135,14 @@ def build_column_tool(
     _defs = field_definitions or {}
     catalog_by_blob = {e["blob_path"]: e for e in catalog if e.get("blob_path")}
 
+    def _resolve_entry(file_ref: str) -> tuple[dict | None, str]:
+        identity = file_identities.resolve_reference(file_ref) if file_identities else None
+        if identity:
+            return catalog_by_blob.get(identity.blob_path), identity.blob_path
+        return None, file_ref
+
     @tool
-    def inspect_column(blob_path: str, column_name: str) -> str:
+    def inspect_column(file_ref: str, column_name: str) -> str:
         """Return facts about a single column: dtype, sample values, an
         optional distinct count, and a one-line suggested WHERE predicate.
 
@@ -146,7 +154,9 @@ def build_column_tool(
         The suggested_predicate is a hint; you may adapt it. Always paste
         the dtype + sample_values into your reasoning before writing SQL.
         """
-        entry = catalog_by_blob.get(blob_path)
+        entry, blob_path = _resolve_entry(file_ref)
+        if not entry:
+            entry = catalog_by_blob.get(blob_path)
         if not entry:
             # Allow stem match (same forgiving behaviour as get_file_schema).
             stem = blob_path.lower()
@@ -164,8 +174,8 @@ def build_column_tool(
 
         if not entry:
             return json.dumps({
-                "error": f"File '{blob_path}' not found in catalog.",
-                "hint": "Call search_catalog first to find the correct blob_path.",
+                "error": f"Logical table '{file_ref}' not found in catalog.",
+                "hint": "Call search_catalog first to find the correct logical_table.",
             })
 
         # Try the heavy columns_info first (present when the file is in the
@@ -195,7 +205,7 @@ def build_column_tool(
             )
             if not match_name:
                 return json.dumps({
-                    "error": f"Column '{column_name}' not found in {blob_path}.",
+                    "error": f"Column '{column_name}' not found in {file_ref}.",
                     "available_columns": lean_names[:30],
                 })
             column_name = match_name
@@ -264,8 +274,10 @@ def build_column_tool(
 
         suggested = _suggest_predicate(column_name, dtype, samples)
 
+        identity = file_identities.identity_for_blob(blob_path) if file_identities else None
         result = {
-            "blob_path": blob_path,
+            "logical_table": identity.sql_name if identity else blob_path,
+            "canonical_id": identity.canonical_id if identity else entry.get("file_id"),
             "column": column_name,
             "dtype": dtype,
             "sample_values": samples,

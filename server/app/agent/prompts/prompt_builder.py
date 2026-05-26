@@ -8,8 +8,8 @@ import re
 from datetime import date, timedelta
 
 from app.agent.state import MAX_TOOL_CALLS
-from app.core.config import get_settings
 from app.core.logger import chat_logger
+from app.services.file_identity import FileIdentityMap, logical_name_from_path
 
 
 # Auto-generated descriptions often start with absolutist phrases like
@@ -39,7 +39,11 @@ def _neutralize_description(desc: str) -> str:
     return out
 
 
-SYSTEM_PROMPT_TEMPLATE = """{file_override_note}You are a data analyst with DuckDB SQL access to files in Azure Blob Storage.
+SYSTEM_PROMPT_TEMPLATE = """{file_override_note}You are a data analyst with read-only SQL access to logical tables.
+
+Runtime owns storage: never write blob paths, parquet filenames, physical storage
+URIs, or storage scan functions. Use only the logical table names
+shown below in FROM/JOIN clauses; the runtime resolves them to authorized files.
 
 Today's date: {today_iso} ({today_human}).
 Resolve every relative time expression in the user's question against THIS date,
@@ -51,14 +55,14 @@ not against your training cutoff. Examples (assuming today is {today_iso}):
   - "last 30 days"   → {last_30_start} to {today_iso}
 Never invent a date range from a year you remember from training data.
 
-Container: {container_name}
+Dataset scope: current authorized catalog.
 {shortlist_header}
 {parquet_note}
 {sample_note}
 
 --- TOOLS ---
-1. run_sql             \u2014 Execute DuckDB SQL.
-2. get_file_schema     \u2014 Returns column names, types, and sample values for a file.
+1. run_sql             \u2014 Execute SQL against logical tables.
+2. get_file_schema     \u2014 Returns column names, types, and sample values for a logical table.
 3. inspect_column      \u2014 Returns dtype, sample values, and a one-line suggested WHERE predicate
                         for a single column. Use this BEFORE writing any filter when you are
                         unsure how the column is stored (year as int vs float, dates as ISO vs
@@ -66,20 +70,20 @@ Container: {container_name}
                         over guessing or running probe SELECTs.
 4. search_catalog      \u2014 Searches the FULL catalog ({total_file_count} files). Use whenever the
                         shortlist above doesn't obviously contain the file you need.
-5. inspect_data_format \u2014 Preview raw rows from a specific file.
+5. inspect_data_format \u2014 Preview raw rows from a specific logical table.
 6. summarise_dataframe \u2014 Compute stats on the last SQL result.
 7. extract_relations   — Returns scoped join relationships and, when requested,
                         minimal visible multi-hop paths between selected files.
                         Call only after you have identified the smallest set of
-                        files needed for a multi-file SQL answer. Pass only those
-                        blob paths. Start with direct joins; request multi-hop
+                        tables needed for a multi-file SQL answer. Pass only those
+                        logical table names. Start with direct joins; request multi-hop
                         paths only when selected files are not directly connected.
 
 --- HOW TO WORK ---
 Five principles. Apply them to every situation.
 
 1. VERIFY BEFORE YOU ACT
-   Before writing any SQL, call get_file_schema on the target file (and
+    Before writing any SQL, call get_file_schema on the target logical table (and
    inspect_column for any column whose storage format is unclear — dates,
    codes, years, identifiers). Use only column names and values you actually
    see in those outputs. Never assume, guess, or carry over schema knowledge
@@ -99,15 +103,15 @@ Five principles. Apply them to every situation.
 3. EVIDENCE OVER ASSUMPTION
    If a query returns 0 rows, a JOIN fails, or a column is missing: investigate
    the data first (inspect_column, MIN/MAX probe, search_catalog for another
-   file). "No data found" is the answer of last resort, not the first guess.
+    logical table). "No data found" is the answer of last resort, not the first guess.
 
 4. CHANGE STRATEGY ON FAILURE
    If an approach fails, try something fundamentally different — different file,
    different column, different filter logic. Never retry the same thing with
    only superficial changes (whitespace, quoting, capitalisation).
 
-5. search_catalog searches metadata (filenames, descriptions, column names).
-   It does NOT search row values. To find a row value, filter inside a file.
+5. search_catalog searches metadata (logical table names, descriptions, column names).
+    It does NOT search row values. To find a row value, filter inside a logical table.
 
 --- QUESTION TYPE ---
 Conceptual ("how does X work", "explain Y"): answer from knowledge + file
@@ -127,14 +131,14 @@ When you finish, write a complete analyst response:
    outliers, comparisons, anything actionable). Write as a business analyst.
 3. **Table note** — if SQL returned rows, end with the line:
    "↓ See the results table below for the full data."
-4. **Source** — one short line stating which file(s) the data came from
+4. **Source** — one short line stating which logical table(s) the data came from
    and the filter applied.
 
 Do NOT include tabular data in the text — no markdown pipe tables, no CSV rows.
 The UI renders the SQL results as an interactive table directly below this
 response. Only state numeric totals that are explicitly in the result rows.
 
-If you cannot answer, say so in one sentence and state which files you checked.
+If you cannot answer, say so in one sentence and state which logical tables you checked.
 Do not ask the user \"would you like me to search\u2026\" \u2014 just go search.
 
 Max {max_calls} tool calls total.
@@ -152,6 +156,7 @@ def build_parquet_note(
     container_name: str,
     *,
     top_blob_paths: set[str] | None = None,
+    file_identities: FileIdentityMap | None = None,
 ) -> str:
     """Build the file-listing section of the system prompt.
 
@@ -168,8 +173,12 @@ def build_parquet_note(
     if parquet_paths_all:
         lines = []
         for blob, pq in parquet_paths_all.items():
-            line = f"  read_parquet('az://{container_name}/{pq}')"
             entry = catalog_by_blob.get(blob)
+            identity = file_identities.identity_for_blob(blob) if file_identities else None
+            logical_table = identity.sql_name if identity else logical_name_from_path(blob)
+            line = f"  {logical_table}"
+            if identity and identity.sql_name != identity.logical_name:
+                line += f"  (display: {identity.logical_name})"
 
             desc = _neutralize_description(entry.get("ai_description") if entry else "")
             if desc:
@@ -210,19 +219,20 @@ def build_parquet_note(
             lines.append(line)
 
         note = (
-            "Initial shortlist of likely parquet files:\n"
+            "Initial shortlist of likely logical tables:\n"
             + "\n".join(lines)
-            + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
+            + "\nUse these names directly in SQL FROM/JOIN clauses. Parquet/CSV storage is resolved internally."
         )
 
         # Also list CSV-only files (no parquet conversion)
         csv_only = [e for e in catalog if e.get("blob_path") and e["blob_path"] not in parquet_paths_all]
         if csv_only:
-            sample_rows = max(1, int(get_settings().INGEST_DUCKDB_SAMPLE_ROWS))
             csv_lines = []
             for entry in csv_only:
                 bp = entry["blob_path"]
-                csv_line = f"  read_csv_auto('az://{container_name}/{bp}', sample_size={sample_rows}, null_padding=true, ignore_errors=true)"
+                identity = file_identities.identity_for_blob(bp) if file_identities else None
+                logical_table = identity.sql_name if identity else logical_name_from_path(bp)
+                csv_line = f"  {logical_table}"
                 desc = _neutralize_description(entry.get("ai_description") or "")
                 if desc:
                     csv_line += f"\n    Description: {desc}"
@@ -235,16 +245,15 @@ def build_parquet_note(
                     csv_line += f"\n    Key metrics: {', '.join(key_metrics[:6])}"
                 csv_lines.append(csv_line)
             note += (
-                "\n\nCSV-only files (no parquet — may be slower for large files):\n"
+                "\n\nCSV-only logical tables (runtime may execute them more slowly):\n"
                 + "\n".join(csv_lines)
             )
         return note
 
     if parquet_blob_path:
         return (
-            f"Parquet path (use directly in run_sql — no search_catalog needed):\n"
-            f"  read_parquet('az://{container_name}/{parquet_blob_path}')"
-            "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
+            "Logical table access is available for the selected data. "
+            "Use table names from search_catalog or get_file_schema; runtime resolves storage internally."
         )
 
     return ""
@@ -266,18 +275,20 @@ def build_system_prompt(
     *,
     top_blob_paths: set[str] | None = None,
     workflow_topology_note: str = "",
+    file_identities: FileIdentityMap | None = None,
 ) -> str:
     """Assemble the full system prompt for the agent."""
     parquet_note = build_parquet_note(
         catalog, parquet_paths_all, parquet_blob_path, container_name,
         top_blob_paths=top_blob_paths,
+        file_identities=file_identities,
     )
 
     sample_note = ""
     if sample_rows_by_blob:
         sample_note = (
             f"\nData format preview: ingest-time example rows are available for {len(sample_rows_by_blob)} files via"
-            " inspect_data_format(blob_path, n=5) — use this only after you know which file you want to inspect."
+            " inspect_data_format(logical_table, n=5) — use this only after you know which table you want to inspect."
         )
 
     shortlist_count = len(catalog)
@@ -308,7 +319,7 @@ def build_system_prompt(
         file_override_note = (
             f"USER SPECIFIED FILE: {names}\n"
             f"Query ONLY this file. Do not redirect to a different file based on "
-            f"semantic matching. Call get_file_schema on {names} first, then run SQL on it.\n\n"
+            f"semantic matching. Call get_file_schema on {names} first, then run logical SQL on it.\n\n"
         )
     else:
         file_override_note = ""
