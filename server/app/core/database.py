@@ -1,55 +1,81 @@
 import ssl
 import urllib.parse
+from collections.abc import Mapping
+from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 from app.core.config import get_settings
 
-# asyncpg only accepts these sslmode values; anything else causes a
-# ClientConfigurationError at startup before the app can serve requests.
 _ASYNCPG_VALID_SSLMODE = frozenset(
     {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 )
+_LOCAL_DB_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+_SSL_QUERY_KEYS = frozenset({"sslmode", "ssl"})
+_LIBPQ_ONLY_QUERY_KEYS = frozenset({"channel_binding"})
 
 
-def _sanitize_db_url(raw_url: str) -> tuple[str, dict]:
-    """Strip or normalise a non-asyncpg sslmode so the engine never crashes.
+def _unverified_ssl_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
-    Returns (clean_url, extra_connect_args).  When the sslmode is invalid
-    we remove it from the URL and pass an ssl context via connect_args so
-    the connection is still encrypted (matching the intent of any non-empty
-    sslmode value).
-    """
+
+def _is_local_database(parsed_url: urllib.parse.ParseResult) -> bool:
+    return (parsed_url.hostname or "").lower() in _LOCAL_DB_HOSTS
+
+
+def _normalise_sslmode(raw_value: str | None) -> str | None:
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip().lower()
+    if value in {"true", "1", "yes", "on"}:
+        return "require"
+    if value in {"false", "0", "no", "off"}:
+        return "disable"
+    return value
+
+
+def _asyncpg_ssl_arg(
+    parsed_url: urllib.parse.ParseResult,
+    sslmode: str | None,
+) -> Any:
+    normalised_sslmode = _normalise_sslmode(sslmode)
+
+    if normalised_sslmode:
+        if normalised_sslmode == "disable":
+            return False
+        if normalised_sslmode in _ASYNCPG_VALID_SSLMODE:
+            return normalised_sslmode
+        return _unverified_ssl_context()
+
+    if _is_local_database(parsed_url):
+        return False
+
+    return "require"
+
+
+def _sanitize_db_url(raw_url: str) -> tuple[str, Mapping[str, Any]]:
+    """Remove sslmode from the DSN and pass SSL config via asyncpg args."""
     parsed = urllib.parse.urlparse(raw_url)
-    params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    sslmode_values = [
+        value
+        for key, value in query_pairs
+        if key.strip().lower() in _SSL_QUERY_KEYS
+    ]
+    remaining_pairs = [
+        (key, value)
+        for key, value in query_pairs
+        if key.strip().lower() not in _SSL_QUERY_KEYS | _LIBPQ_ONLY_QUERY_KEYS
+    ]
 
-    sslmode_values = params.pop("sslmode", None)
-    sslmode = sslmode_values[0] if sslmode_values else None
-
-    extra: dict = {}
-
-    if sslmode is None:
-        # No sslmode at all — leave URL unchanged.
-        return raw_url, extra
-
-    if sslmode in _ASYNCPG_VALID_SSLMODE:
-        # Valid — put it back unchanged.
-        params["sslmode"] = [sslmode]
-    else:
-        # Non-standard value (e.g. "no-verify", "noverify", "true", …).
-        # Build an SSL context that requires encryption but skips cert
-        # verification, which matches the intent of such values.
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        extra["ssl"] = ctx
-
-    new_query = urllib.parse.urlencode(
-        {k: v[0] for k, v in params.items()},
-        quote_via=urllib.parse.quote,
-    )
+    new_query = urllib.parse.urlencode(remaining_pairs, doseq=True)
     clean_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-    return clean_url, extra
+    sslmode = sslmode_values[-1] if sslmode_values else None
+    return clean_url, {"ssl": _asyncpg_ssl_arg(parsed, sslmode)}
 
 
 _db_url, _ssl_extra = _sanitize_db_url(get_settings().DATABASE_URL)
