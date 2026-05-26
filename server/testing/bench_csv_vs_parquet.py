@@ -90,7 +90,7 @@ def run_benchmark(
     runs: int = 3,
 ) -> None:
     print("\n" + "=" * 70)
-    print("  G-CHAT  |  CSV vs Parquet (vs Excel) extraction benchmark")
+    print("  danta-search  |  CSV vs Parquet (vs Excel) extraction benchmark")
     print("=" * 70)
     print(f"  CSV     : az://{container}/{csv_blob}")
     print(f"  Parquet : az://{container}/{parquet_blob}")

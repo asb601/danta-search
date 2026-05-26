@@ -133,9 +133,12 @@ class ExecutionStrategy:
         elif self.mode == "independent_analyses":
             lines += [
                 "Mode: INDEPENDENT ANALYSES",
-                "No approved join paths exist between any shortlisted files.",
-                "Analyze each file independently.",
-                "Combine insights narratively — do NOT attempt to join unrelated data.",
+                "No pre-validated join paths exist between shortlisted files.",
+                "BEFORE concluding these files cannot be joined:",
+                "  1. Call extract_relations on any pair you want to join — candidate paths may exist.",
+                "  2. If technical_candidate relationships are found, validate with inspect_column.",
+                "  3. Only analyze independently if no column-level evidence for a join exists.",
+                "If joining is not possible after checking, combine insights narratively.",
                 "",
             ]
             for i, c in enumerate(self.clusters, 1):

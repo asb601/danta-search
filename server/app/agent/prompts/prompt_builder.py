@@ -265,6 +265,7 @@ def build_system_prompt(
     sql_context_note: str = "",
     *,
     top_blob_paths: set[str] | None = None,
+    workflow_topology_note: str = "",
 ) -> str:
     """Assemble the full system prompt for the agent."""
     parquet_note = build_parquet_note(
@@ -334,14 +335,21 @@ def build_system_prompt(
 
     # Inject validated SQL context right before the HOW TO WORK behavioural rules
     # so the LLM reads its constraints alongside its work instructions.
+    # Workflow topology note (reachable joins + orphaned files) is injected
+    # immediately after the SQL context block so the planner sees both together.
+    _context_block = ""
     if sql_context_note:
+        _context_block = sql_context_note
+    if workflow_topology_note:
+        _context_block = "\n\n".join(filter(None, [_context_block, workflow_topology_note]))
+    if _context_block:
         _marker = "--- HOW TO WORK ---"
         if _marker in system_prompt:
             system_prompt = system_prompt.replace(
-                _marker, sql_context_note + "\n\n" + _marker, 1
+                _marker, _context_block + "\n\n" + _marker, 1
             )
         else:
-            system_prompt += "\n\n" + sql_context_note
+            system_prompt += "\n\n" + _context_block
 
     if conversation_context:
         # Truncate conversation history to bound per-request token cost.

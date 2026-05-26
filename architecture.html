@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>G-CHAT System Architecture</title>
+<title>danta-search System Architecture</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', Arial, sans-serif; background: #0f1117; color: #e2e8f0; line-height: 1.6; }
@@ -138,7 +138,7 @@
 </head>
 <body>
 
-<h1>G-CHAT System Architecture</h1>
+<h1>danta-search System Architecture</h1>
 <p class="subtitle">Enterprise Data Intelligence Platform &nbsp;|&nbsp; Updated 22 April 2026</p>
 
 <div class="toc">
@@ -379,16 +379,16 @@
 <section id="whypostgres">
 <h2>3. Why PostgreSQL — and Why It Does Not Touch the Client's Database</h2>
 
-<h3>First: How Does the Client's Data Actually Get Into G-CHAT?</h3>
-<p>This is an important point to understand clearly. <strong>G-CHAT never connects to the client's production database.</strong> The client does not give us a MongoDB connection string, a SQL Server password, or any direct access to their live systems.</p>
+<h3>First: How Does the Client's Data Actually Get Into danta-search?</h3>
+<p>This is an important point to understand clearly. <strong>danta-search never connects to the client's production database.</strong> The client does not give us a MongoDB connection string, a SQL Server password, or any direct access to their live systems.</p>
 
 <div class="note" style="font-size:0.9rem;line-height:1.9">
   <strong>What the client provides:</strong><br>
   One thing only — an <strong>Azure Blob Storage container connection string</strong> (or an Azure Storage Account name + SAS token).<br><br>
-  Their files live in Azure Blob Storage. G-CHAT connects to that container, reads the files from the blob, and processes them. The client's MongoDB, their internal SQL Server, their application database — <strong>none of that is ever touched</strong>.
+  Their files live in Azure Blob Storage. danta-search connects to that container, reads the files from the blob, and processes them. The client's MongoDB, their internal SQL Server, their application database — <strong>none of that is ever touched</strong>.
 </div>
 
-<h3>The Data Flow — Client Side vs G-CHAT Side</h3>
+<h3>The Data Flow — Client Side vs danta-search Side</h3>
 <div class="grant-flow" style="flex-wrap:wrap;gap:8px">
   <div class="gf-box" style="border-color:#7c3aed;color:#c4b5fd">Client's MongoDB<br><span style="font-size:0.75rem;color:#64748b">(their production DB, we never touch this)</span></div>
   <div class="gf-arrow">→</div>
@@ -396,9 +396,9 @@
   <div class="gf-arrow">→</div>
   <div class="gf-box" style="border-color:#7c3aed;color:#c4b5fd">Files uploaded to<br>Azure Blob Storage</div>
   <div class="gf-arrow" style="color:#22c55e">→</div>
-  <div class="gf-box" style="border-color:#22c55e;color:#86efac">Admin gives G-CHAT<br>the container ID</div>
+  <div class="gf-box" style="border-color:#22c55e;color:#86efac">Admin gives danta-search<br>the container ID</div>
   <div class="gf-arrow" style="color:#22c55e">→</div>
-  <div class="gf-box" style="border-color:#22c55e;color:#86efac">G-CHAT reads files<br>from Azure Blob</div>
+  <div class="gf-box" style="border-color:#22c55e;color:#86efac">danta-search reads files<br>from Azure Blob</div>
   <div class="gf-arrow" style="color:#22c55e">→</div>
   <div class="gf-box" style="border-color:#22c55e;color:#86efac">Ingestion pipeline<br>runs (stages 0–8)</div>
   <div class="gf-arrow" style="color:#22c55e">→</div>
@@ -406,11 +406,11 @@
 </div>
 
 <div class="warning" style="margin-top:16px">
-  <strong>The client's existing database has zero risk.</strong> We are read-only on the blob storage. We do not write anything back to the client's systems. Their production MongoDB continues to run exactly as it does today. G-CHAT is an independent intelligence layer on top of exported data.
+  <strong>The client's existing database has zero risk.</strong> We are read-only on the blob storage. We do not write anything back to the client's systems. Their production MongoDB continues to run exactly as it does today. danta-search is an independent intelligence layer on top of exported data.
 </div>
 
-<h3>Why G-CHAT Uses PostgreSQL for Its Own Storage</h3>
-<p>G-CHAT uses Postgres to store its own internal data — file metadata, user accounts, permissions, conversation history, relationships, and embeddings. This is completely separate from the client's data. Here is why Postgres is the right choice for this internal store:</p>
+<h3>Why danta-search Uses PostgreSQL for Its Own Storage</h3>
+<p>danta-search uses Postgres to store its own internal data — file metadata, user accounts, permissions, conversation history, relationships, and embeddings. This is completely separate from the client's data. Here is why Postgres is the right choice for this internal store:</p>
 
 <div class="role-grid" style="grid-template-columns:1fr 1fr">
   <div class="role-card" style="background:#0f2a0f;border:2px solid #22c55e">
@@ -439,7 +439,7 @@
 </div>
 
 <div class="success">
-  <strong>Summary:</strong> The client's MongoDB is their business — it stores their application data and we never touch it. G-CHAT uses Postgres purely as its own internal brain — storing metadata, embeddings, permissions, and relationships. Postgres gives us vector search, fuzzy search, graph traversal, and strong transactions all in one database. MongoDB would require four separate tools to replicate the same capabilities.
+  <strong>Summary:</strong> The client's MongoDB is their business — it stores their application data and we never touch it. danta-search uses Postgres purely as its own internal brain — storing metadata, embeddings, permissions, and relationships. Postgres gives us vector search, fuzzy search, graph traversal, and strong transactions all in one database. MongoDB would require four separate tools to replicate the same capabilities.
 </div>
 </section>
 
@@ -448,7 +448,7 @@
 <!-- ====================================================== -->
 <section id="retrieval">
 <h2>4. Multi-Strategy Retrieval Engine</h2>
-<p>The retrieval engine is what makes G-CHAT viable at 1M+ files. Nine sequential stages reduce the candidate pool from 1 million to a fixed budget of 20 files — using every available signal. The LLM never sees more than 20 file summaries.</p>
+<p>The retrieval engine is what makes danta-search viable at 1M+ files. Nine sequential stages reduce the candidate pool from 1 million to a fixed budget of 20 files — using every available signal. The LLM never sees more than 20 file summaries.</p>
 
 <div class="pipeline">
 

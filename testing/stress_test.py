@@ -1,5 +1,5 @@
 """
-G-CHAT Concurrent Stress Test — 30-40 virtual users.
+danta-search Concurrent Stress Test — 30-40 virtual users.
 
 Each virtual user:
   1. Fires a stream request for each question in the question bank.
@@ -318,7 +318,7 @@ def _print_summary(all_results: list[dict], wall_time: float) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main() -> None:
-    ap = argparse.ArgumentParser(description="G-CHAT concurrent stress test")
+    ap = argparse.ArgumentParser(description="danta-search concurrent stress test")
     ap.add_argument(
         "--tokens-file",
         required=True,
@@ -368,7 +368,7 @@ async def main() -> None:
     total_requests = n_users * args.rounds * len(questions)
 
     print(f"\n{'='*65}")
-    print(f"G-CHAT STRESS TEST")
+    print(f"danta-search STRESS TEST")
     print(f"{'='*65}")
     print(f"  Target       : {args.base_url}")
     print(f"  Virtual users: {n_users}")

@@ -179,7 +179,7 @@ async def lifespan(app: FastAPI):
 
 settings = get_settings()
 
-app = FastAPI(title="Gen-Chatbot API", lifespan=lifespan)
+app = FastAPI(title="danta-search API", lifespan=lifespan)
 
 # Session middleware required by authlib OAuth
 app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)

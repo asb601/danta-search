@@ -137,7 +137,8 @@ async def _query_filtered_catalog(
         FileMetadata.good_for,
         FileMetadata.key_metrics,
         FileMetadata.key_dimensions,
-        FileMetadata.columns_info,   # needed only to extract column names; not hydrated
+        FileMetadata.columns_info,          # needed only to extract column names; not hydrated
+        FileMetadata.column_semantic_roles,  # semantic role map — used by workflow_capability_resolver
         FileMetadata.date_range_start,
         FileMetadata.date_range_end,
         FileMetadata.ingestion_confidence_score,  # Phase 6: trust propagation weight
@@ -208,6 +209,7 @@ async def _query_filtered_catalog(
             "key_metrics": _cap_list(r.key_metrics, _MAX_LIST_ITEMS),
             "key_dimensions": _cap_list(r.key_dimensions, _MAX_LIST_ITEMS),
             "column_names": _extract_column_names(r.columns_info),
+            "column_semantic_roles": r.column_semantic_roles or {},
             "date_range_start": str(r.date_range_start) if r.date_range_start else None,
             "date_range_end": str(r.date_range_end) if r.date_range_end else None,
             "ingestion_confidence_score": r.ingestion_confidence_score,  # Phase 6

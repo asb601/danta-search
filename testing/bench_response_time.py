@@ -1,5 +1,5 @@
 """
-Response-time benchmark for G-CHAT API.
+Response-time benchmark for danta-search API.
 
 Measures:
   • time-to-first-token (TTFT)

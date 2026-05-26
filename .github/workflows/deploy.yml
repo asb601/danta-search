@@ -103,12 +103,12 @@ jobs:
               fi
             fi
 
-            # ── 5. Create/update gchat FastAPI service ───────────────────────
+            # ── 5. Create/update danta-search FastAPI service ────────────────
             # Always rewrite the unit so an existing VM cannot keep stale service
             # definitions after deploy script changes.
             sudo tee /etc/systemd/system/gchat.service > /dev/null << SVCEOF
             [Unit]
-            Description=G-CHAT FastAPI Backend
+            Description=danta-search FastAPI Backend
             After=network.target
 
             [Service]
@@ -129,10 +129,10 @@ jobs:
             sudo systemctl enable gchat
             echo "gchat.service installed/updated"
 
-            # ── 6. Create/update gchat-celery worker service ─────────────────
+            # ── 6. Create/update danta-search Celery worker service ──────────
             sudo tee /etc/systemd/system/gchat-celery.service > /dev/null << CELEOF
             [Unit]
-            Description=G-CHAT Celery Ingest Worker
+            Description=danta-search Celery Ingest Worker
             After=network.target redis-server.service redis.service gchat.service
 
             [Service]

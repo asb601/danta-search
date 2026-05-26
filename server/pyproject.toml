@@ -1,8 +1,8 @@
 [project]
 name = "server"
 version = "0.1.0"
-description = "Gen-Chatbot FastAPI backend"
-readme = "README.md"
+description = "danta-search FastAPI backend"
+readme = "../README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.115.0",

@@ -94,7 +94,7 @@ if (hideNav) {
       >
         <div className="px-4 py-5 border-b border-border flex items-start justify-between">
           <div className="min-w-0">
-            <p className="text-sm font-semibold tracking-tight text-foreground">Gen-Chatbot</p>
+            <p className="text-sm font-semibold tracking-tight text-foreground">danta-search</p>
             <p className="text-xs text-muted-foreground mt-0.5 truncate">
               {user.email}
             </p>

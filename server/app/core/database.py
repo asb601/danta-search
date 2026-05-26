@@ -14,7 +14,7 @@ engine = create_async_engine(
     pool_size=20,
     max_overflow=30,
     connect_args={
-        "server_settings": {"application_name": "gen-chatbot"},
+        "server_settings": {"application_name": "danta-search"},
         "command_timeout": 30,
     },
 )

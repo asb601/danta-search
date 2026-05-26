@@ -1,5 +1,5 @@
 """
-data_preprocessor.py — G-CHAT Stage-1 ingestion pipeline.
+data_preprocessor.py — danta-search Stage-1 ingestion pipeline.
 
 Single-module, clean-slate replacement of the per-cell loop preprocessor.
 Streams a raw user file (CSV / TSV / Excel) from Azure Blob (or local
@@ -26,7 +26,7 @@ Design notes (the *why*):
   localize Excel inputs before calling.
 
 Public API: ``preprocess_file(...)`` and the dataclasses ``ColumnProfile``
-and ``PreprocessResult``. No module reaches into G-CHAT internals.
+and ``PreprocessResult``. No module reaches into danta-search internals.
 """
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ except ImportError:  # pragma: no cover - import guard
     _CalamineWorkbook = None
 
 
-logger = logging.getLogger("gchat.preprocess")
+logger = logging.getLogger("danta_search.preprocess")
 
 # ─────────────────────────────────────────────────────────────────────
 # Module-level constants — exposed for downstream services to reference.
@@ -641,7 +641,7 @@ class _ColumnAccumulator:
 
     TODO: swap top_counter for ``datasketches.HllSketch`` for accurate
     cardinality on very wide columns; the current extrapolation is fine
-    for most G-CHAT files (≤ 50 M rows).
+    for most danta-search files (≤ 50 M rows).
     """
 
     __slots__ = (
@@ -1307,7 +1307,7 @@ def _run_acceptance_tests() -> int:
     """Print PASS/FAIL per test; exit 0 if all pass, 1 otherwise."""
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
     failures = 0
-    tmpdir = tempfile.mkdtemp(prefix="gchat_pp_test_")
+    tmpdir = tempfile.mkdtemp(prefix="danta_search_pp_test_")
     src_csv = os.path.join(tmpdir, "dirty.csv")
     out_pq = os.path.join(tmpdir, "out.parquet")
     sample_pq = os.path.join(tmpdir, "sample.parquet")

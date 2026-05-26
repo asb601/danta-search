@@ -31,6 +31,10 @@ from app.services.sql_context_builder import build_sql_context
 from app.services.execution_strategy import plan_execution_strategy
 from app.agent.prompts.prompt_builder import build_system_prompt
 from app.agent.search_normalization import tokenize_search_query
+from app.services.workflow_capability_resolver import resolve_workflow_requirements
+from app.services.semantic_expansion import decide_expansion, render_workflow_continuity_note
+from app.retrieval.semantic_recovery import semantic_recovery_retrieve
+from app.services.workflow_topology import build_workflow_topology
 from app.retrieval.orchestrator import (
     retrieve_with_scores,
     retrieval_channel_map as _retrieval_channel_map,
@@ -158,6 +162,45 @@ async def _get_approved_neighbor_ids(
         } - seed_set
     except Exception:
         return set()
+
+
+async def _get_workflow_closure_edges(
+    seed_file_ids: list[str],
+    db: AsyncSession,
+    container_id: str | None = None,
+    cap: int = 80,
+) -> list:
+    """Return approved graph edges adjacent to workflow assembly seeds."""
+    seed_ids = [fid for fid in dict.fromkeys(seed_file_ids) if fid][:cap]
+    if not seed_ids:
+        return []
+    try:
+        from sqlalchemy import or_, select as _select  # noqa: PLC0415
+        from app.models.semantic_layer import SemanticRelationship  # noqa: PLC0415
+
+        q = (
+            _select(
+                SemanticRelationship.file_a_id,
+                SemanticRelationship.file_b_id,
+                SemanticRelationship.confidence_score,
+            )
+            .where(
+                or_(
+                    SemanticRelationship.file_a_id.in_(seed_ids),
+                    SemanticRelationship.file_b_id.in_(seed_ids),
+                ),
+                SemanticRelationship.status == "active",
+                SemanticRelationship.approval_status == "approved",
+            )
+            .order_by(SemanticRelationship.confidence_score.desc())
+            .limit(cap)
+        )
+        if container_id:
+            q = q.where(SemanticRelationship.container_id == container_id)
+        return list((await db.execute(q)).all())
+    except Exception as exc:
+        pipeline_logger.warning("workflow_closure_edges_error", error=str(exc)[:200])
+        return []
 
 
 async def _polish_answer(raw: str) -> str:
@@ -400,6 +443,8 @@ async def _build_agent_context(
     # can still scan all files if needed.
     retrieved_with_scores = []
     retrieval_error: str | None = None
+    _workflow_retrieval_channels: dict[str, list[str]] = {}
+    _workflow_retrieval_candidate_ids: set[str] = set()
     if user_id:
         try:
             retrieved_with_scores = await retrieve_with_scores(
@@ -569,6 +614,8 @@ async def _build_agent_context(
         # These are Task-local and safe under concurrent async workloads.
         _ch_map     = _retrieval_channel_map.get()
         _cand_fids  = _retrieval_all_candidate_fids.get()
+        _workflow_retrieval_channels = dict(_ch_map)
+        _workflow_retrieval_candidate_ids = set(_cand_fids)
         _short_fids = {meta.file_id for meta, _ in retrieved_with_scores}
         _inj_fids   = {e.get("file_id") for e in injected_lookups if e.get("file_id")}
         _prior_blobs = set(prior_files) if prior_files else set()
@@ -612,37 +659,21 @@ async def _build_agent_context(
         # relationship-scoped candidate pool.
         # Only if no structural anchors exist does the pool degrade to the
         # full catalog (logged explicitly as full_catalog_degraded).
-        _fb_anchor_ids: list[str] = resolver_pinned_file_ids or []
-        _fb_neighbor_ids: set[str] = set()
-        if _fb_anchor_ids:
-            try:
-                _fb_neighbor_ids = await _get_approved_neighbor_ids(
-                    _fb_anchor_ids, db, container_id=container_id
-                )
-            except Exception:
-                _fb_neighbor_ids = set()
-        _fb_bounded_ids = set(_fb_anchor_ids) | _fb_neighbor_ids
-        _fb_candidates = (
-            [e for e in full_catalog if e.get("file_id") in _fb_bounded_ids]
-            if _fb_bounded_ids
-            else []
+        # Staged semantic recovery — replaces keyword-only fallback.
+        # Attempts: role-cluster matching → 2-hop graph expansion →
+        # semantic bridging → keyword scoring (last resort only).
+        _recovered_candidates, _grounding_quality = await semantic_recovery_retrieve(
+            query, full_catalog, entity_resolution,
+            resolver_pinned_file_ids or [], db,
+            _SHORTLIST_TOP_K * 3,  # large pool so lookup-slot injection works
+            container_id,
+            retrieval_channels=_workflow_retrieval_channels,
         )
-        if _fb_candidates:
-            _grounding_quality = "graph_bounded"
-        else:
-            # No structural anchors — degrade to full catalog with explicit signal.
-            _fb_candidates = full_catalog
-            _grounding_quality = "full_catalog_degraded"
-
-        scored = sorted(_fb_candidates, key=_kw_score, reverse=True)
-        # Take the top metric/transactional matches by keyword, then enrich
-        # with lookup files from the same bounded candidate set.
-        primary = scored[: _SHORTLIST_TOP_K - _LOOKUP_RESERVED_SLOTS]
+        # Apply the same lookup-injection logic as the retrieval path.
+        primary = _recovered_candidates[: _SHORTLIST_TOP_K - _LOOKUP_RESERVED_SLOTS]
         primary_blobs = {e.get("blob_path") for e in primary}
-        # Lookup injection stays within the bounded candidate pool — never
-        # expanded back to full_catalog regardless of grounding_quality.
         lookup_pool = [
-            e for e in scored
+            e for e in _recovered_candidates
             if _is_lookup_file(e) and e.get("blob_path") not in primary_blobs
         ]
         catalog = primary + lookup_pool[:_LOOKUP_RESERVED_SLOTS]
@@ -688,9 +719,7 @@ async def _build_agent_context(
             query=query,
             reason=reason,
             grounding_quality=_grounding_quality,
-            anchor_count=len(_fb_anchor_ids),
-            neighbor_count=len(_fb_neighbor_ids),
-            candidate_pool=len(_fb_candidates),
+            recovery_pool=len(_recovered_candidates),
             total_files=len(full_catalog),
             fallback_files=[e.get("blob_path") for e in catalog],
         )
@@ -734,6 +763,78 @@ async def _build_agent_context(
     else:
         top_blob_paths = {e.get("blob_path") for e in catalog[:3] if e.get("blob_path")}
 
+    # ── STEP 2.56: WORKFLOW CAPABILITY RESOLUTION ────────────────────────────
+    # Derives which semantic capability domains are required for this query and
+    # which are already covered by the current shortlist. Pure in-memory —
+    # zero LLM calls, zero DB queries. Uses column_semantic_roles loaded as
+    # part of the lean catalog (catalog_cache.load_catalog).
+    _workflow_seed_ids = [e.get("file_id") for e in catalog if e.get("file_id")]
+    _workflow_edge_rows = await _get_workflow_closure_edges(
+        _workflow_seed_ids + list(_workflow_retrieval_candidate_ids)[:20],
+        db,
+        container_id=container_id,
+    )
+    _workflow_reqs = resolve_workflow_requirements(
+        entity_resolution,
+        full_catalog,
+        catalog,
+        query_text=query,
+        retrieval_channels=_workflow_retrieval_channels,
+        retrieval_candidate_ids=_workflow_retrieval_candidate_ids,
+        approved_edges=_workflow_edge_rows,
+        closure_seed_ids=_workflow_seed_ids,
+    )
+    pipeline_logger.info("workflow_requirements", **_workflow_reqs.to_dict())
+
+    # ── STEP 2.57: ADAPTIVE SEMANTIC EXPANSION ───────────────────────────────
+    # Targeted domain-filling: if required semantic domains are missing from
+    # the shortlist, add the smallest set of files that covers them.
+    # Bounded to _MAX_EXPANSION_SLOTS additional files. Runs BEFORE hydration
+    # so expanded files are included in the same hydration batch.
+    _expansion = decide_expansion(
+        workflow_reqs=_workflow_reqs,
+        exec_strategy=None,       # not yet computed at this stage
+        intent_plan=intent_plan,
+        confidence=None,          # not yet computed at this stage
+        current_shortlist=catalog,
+        full_catalog=full_catalog,
+        query_words=q_words,
+        retrieval_channels=_workflow_retrieval_channels,
+    )
+    if _expansion.should_expand:
+        _full_by_id = {e.get("file_id"): e for e in full_catalog if e.get("file_id")}
+        _current_ids = {e.get("file_id") for e in catalog}
+        _new_entries = [
+            _full_by_id[c.file_id]
+            for c in _expansion.expansion_candidates
+            if c.file_id not in _current_ids and c.file_id in _full_by_id
+        ]
+        if _new_entries:
+            catalog = catalog + _new_entries
+            # Rebuild parquet paths for the expanded shortlist
+            parquet_paths_all = {
+                k: v for k, v in all_parquet_paths.items()
+                if k in {e.get("blob_path") for e in catalog}
+            }
+            pipeline_logger.info("shortlist_expanded", **_expansion.to_dict())
+            _workflow_reqs = resolve_workflow_requirements(
+                entity_resolution,
+                full_catalog,
+                catalog,
+                query_text=query,
+                retrieval_channels=_workflow_retrieval_channels,
+                retrieval_candidate_ids=_workflow_retrieval_candidate_ids,
+                approved_edges=_workflow_edge_rows,
+                closure_seed_ids=_workflow_seed_ids,
+            )
+            pipeline_logger.info("workflow_requirements_after_expansion", **_workflow_reqs.to_dict())
+
+    _workflow_continuity_note = render_workflow_continuity_note(
+        _workflow_reqs,
+        _expansion,
+        full_catalog,
+    )
+
     # ── STEP 2.6: HYDRATE HEAVY FIELDS for the shortlist only ───────────────
     # The cached catalog is intentionally lean (no columns_info samples,
     # sample_rows, or column_stats). We now load those heavy fields ONLY for
@@ -770,6 +871,21 @@ async def _build_agent_context(
     sql_ctx = await build_sql_context(catalog, db)
     sql_context_note = sql_ctx.to_prompt_section()
     trace.set_approved_joins(sql_ctx)
+
+    # ── STEP 2.75: WORKFLOW TOPOLOGY ─────────────────────────────────────────
+    # One additional DB query scoped to the shortlist file_ids. Returns:
+    #   - reachable_paths: joins available via non-shortlisted intermediate tables
+    #   - orphaned_tables: shortlisted files with no approved edges
+    # Injected separately into the system prompt (not merged into sql_context_note)
+    # so the planner can reason about multi-hop reachability independently.
+    _wf_topology = await build_workflow_topology(catalog, db, full_catalog=full_catalog)
+    if _wf_topology.topology_note:
+        pipeline_logger.info(
+            "workflow_topology",
+            direct_paths=len(_wf_topology.direct_paths),
+            reachable_paths=len(_wf_topology.reachable_paths),
+            orphaned_tables=len(_wf_topology.orphaned_tables),
+        )
 
     # ── STEP 2.8: EXECUTION STRATEGY ─────────────────────────────────────────
     # Pure graph-connectivity analysis — no LLM calls, no DB queries.
@@ -967,6 +1083,10 @@ async def _build_agent_context(
                 mentioned_files=mentioned_file_names or None,
                 sql_context_note=sql_context_note,
                 top_blob_paths=top_blob_paths,
+                workflow_topology_note="\n\n".join(filter(None, [
+                    _workflow_continuity_note,
+                    _wf_topology.topology_note,
+                ])),
             ),
         ),
     )

@@ -8,7 +8,7 @@ export default function HomePage() {
       <header className="sticky top-0 z-50 bg-surface/80 backdrop-blur-sm border-b border-border">
         <div className="mx-auto max-w-5xl px-4 h-14 flex items-center justify-between">
           <span className="font-semibold text-foreground text-base">
-            Gen-Chatbot
+            danta-search
           </span>
           <Link
             href="/login"
@@ -32,7 +32,7 @@ export default function HomePage() {
             <span className="text-primary">intelligent</span>
           </h1>
           <p className="mt-5 text-base md:text-lg text-muted-foreground max-w-md">
-            Upload files once. Ask anything. Gen-Chatbot builds a knowledge graph
+            Upload files once. Ask anything. danta-search builds a knowledge graph
             and answers with context.
           </p>
 
@@ -74,7 +74,7 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="text-center text-xs text-subtle-foreground mt-16 pb-8">
-        Gen-Chatbot &copy; 2025
+        danta-search &copy; 2025
       </footer>
     </div>
   );

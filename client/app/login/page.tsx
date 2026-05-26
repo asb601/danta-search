@@ -43,7 +43,7 @@ export default function LoginPage() {
       <div className="bg-surface border border-border rounded-lg p-8 w-full max-w-sm">
         <div className="mb-6">
           <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider mb-1">
-            Gen-Chatbot
+            danta-search
           </p>
           <h1 className="text-xl font-semibold text-foreground">
             Welcome back

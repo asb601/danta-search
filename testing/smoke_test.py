@@ -186,7 +186,7 @@ def check_logs_api(client: httpx.Client, base: str) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="G-CHAT basic smoke test")
+    parser = argparse.ArgumentParser(description="danta-search basic smoke test")
     parser.add_argument("--base-url", required=True, help="Server base URL, e.g. https://your-vm")
     parser.add_argument("--token", default="", help="JWT bearer token (from browser devtools)")
     parser.add_argument(

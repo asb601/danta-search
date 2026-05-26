@@ -1,7 +1,7 @@
 """
 chat_api_example.py
 ────────────────────────────────────────────────────────────────────
-How to call the G-CHAT streaming API from Python.
+How to call the danta-search streaming API from Python.
 
 SETUP
 -----
