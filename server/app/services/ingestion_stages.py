@@ -733,6 +733,44 @@ async def semantic_layer_stage(payload: Payload) -> Payload:
     return _next(payload, stage=stage, semantic_layer=result)
 
 
+async def semantic_enrichment_stage(payload: Payload) -> Payload:
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+    stage = StageName.SEMANTIC_ENRICHMENT.value
+
+    async with _async_session() as db:
+        from app.services.semantic_enrichment import run_semantic_enrichment_for_file  # noqa: PLC0415
+
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
+        result = await run_semantic_enrichment_for_file(file_id, db)
+
+    dur = _ms(start)
+    ingest_logger.info(
+        "ingest_stage",
+        stage=stage,
+        status="done",
+        file_id=file_id,
+        additions=result.get("additions", 0),
+        skipped=result.get("skipped", False),
+        duration_ms=dur,
+    )
+    await _db_log(
+        event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+        duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+        actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+        details={
+            "stage": stage,
+            "status": "done",
+            **{
+                k: result.get(k)
+                for k in ("additions", "skipped", "reason", "neighbors_used", "role_groups_used")
+                if k in result
+            },
+        },
+    )
+    return _next(payload, stage=stage, semantic_enrichment=result)
+
+
 async def complete_ingestion_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     stage = StageName.COMPLETE.value

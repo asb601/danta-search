@@ -91,6 +91,12 @@ class ApprovedJoin:
     right_col: str           # column on right file (to_column)
     relationship_type: str   # e.g. "vendor_master_join"
     confidence: float
+    # Telemetry fields — always True/False in the current implementation
+    # because all joins come from SemanticRelationship with approval_status=approved.
+    # Explicit fields make the telemetry schema forward-compatible when inference
+    # paths are added in the future.
+    graph_verified: bool = True    # sourced from an approved SemanticRelationship edge
+    fallback_inferred: bool = False  # True if derived without an approved graph edge
 
 
 @dataclass

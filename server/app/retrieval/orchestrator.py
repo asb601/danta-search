@@ -41,6 +41,7 @@ Public API
 """
 from __future__ import annotations
 
+import contextvars
 from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,6 +57,18 @@ from app.retrieval.rrf import rrf_fuse
 from app.retrieval.temporal import parse_temporal
 from app.policies.retrieval_policy import get_retrieval_policy as _get_retrieval_policy
 from app.services.trust_propagation import retrieval_trust_weight as _rtw
+
+# ── Retrieval telemetry context vars ────────────────────────────────────────────
+# Populated as a side-effect of retrieve_with_scores() for the current async Task.
+# Consumers (e.g., graph.py orchestration trace) read these after the await to get
+# per-channel membership data without any signature change to the public API.
+# Values are Task-local: safe under concurrent async workloads.
+retrieval_channel_map: contextvars.ContextVar[dict[str, list[str]]] = (
+    contextvars.ContextVar("retrieval_channel_map", default={})
+)
+retrieval_all_candidate_fids: contextvars.ContextVar[set[str]] = (
+    contextvars.ContextVar("retrieval_all_candidate_fids", default=set())
+)
 
 # ── Retrieval stage bounds ─────────────────────────────────────────────────────
 # All retrieval caps and score floors are governed by RetrievalPolicy.
@@ -199,7 +212,16 @@ async def retrieve_with_scores(
             except Exception as exc:
                 chat_logger.warning("retrieval_graph_expand_error", error=str(exc)[:200])
                 graph_results = []
-            return _trust_attenuate(rrf_fuse([os_results, graph_results], top_k=top_k))
+            _os_fused = _trust_attenuate(rrf_fuse([os_results, graph_results], top_k=top_k))
+            # ── Telemetry side-effects (OpenSearch path) ─────────────────────
+            _os_cm: dict[str, list[str]] = {}
+            for _m, _ in os_results:
+                _os_cm.setdefault(_m.file_id, []).append("opensearch")
+            for _m, _ in graph_results:
+                _os_cm.setdefault(_m.file_id, []).append("graph")
+            retrieval_channel_map.set(_os_cm)
+            retrieval_all_candidate_fids.set(set(_os_cm))
+            return _os_fused
 
     # SQLAlchemy async sessions share one connection and do not support
     # concurrent operations. Run BM25, fuzzy, vector sequentially.
@@ -288,6 +310,21 @@ async def retrieve_with_scores(
             _trim = min(_excess, len(_all_candidates[_trim_idx]))
             _all_candidates[_trim_idx] = _all_candidates[_trim_idx][:-_trim]
     fused = _trust_attenuate(rrf_fuse(_all_candidates, top_k=top_k))
+
+    # ── Telemetry side-effects (Postgres path) ───────────────────────────────
+    # Build channel membership map BEFORE _all_candidates is trimmed above;
+    # the original channel list variables still hold pre-trim values here.
+    _pg_cm: dict[str, list[str]] = {}
+    for _m, _ in bm25_results:
+        _pg_cm.setdefault(_m.file_id, []).append("bm25")
+    for _m, _ in fuzzy_results:
+        _pg_cm.setdefault(_m.file_id, []).append("fuzzy")
+    for _m, _ in vector_results:
+        _pg_cm.setdefault(_m.file_id, []).append("vector")
+    for _m, _ in graph_results:
+        _pg_cm.setdefault(_m.file_id, []).append("graph")
+    retrieval_channel_map.set(_pg_cm)
+    retrieval_all_candidate_fids.set(set(_pg_cm))
 
     chat_logger.info(
         "retrieval_complete",

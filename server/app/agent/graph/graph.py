@@ -31,7 +31,11 @@ from app.services.sql_context_builder import build_sql_context
 from app.services.execution_strategy import plan_execution_strategy
 from app.agent.prompts.prompt_builder import build_system_prompt
 from app.agent.search_normalization import tokenize_search_query
-from app.retrieval.orchestrator import retrieve_with_scores
+from app.retrieval.orchestrator import (
+    retrieve_with_scores,
+    retrieval_channel_map as _retrieval_channel_map,
+    retrieval_all_candidate_fids as _retrieval_all_candidate_fids,
+)
 from app.agent.response_helpers import (
     extract_answer,
     extract_blob_paths,
@@ -106,6 +110,55 @@ def _extract_mentioned_files(query: str, full_catalog: list[dict]) -> list[dict]
             mentioned.append(entry)
             seen.add(fid)
     return mentioned
+
+
+async def _get_approved_neighbor_ids(
+    seed_file_ids: list[str],
+    db: AsyncSession,
+    container_id: str | None = None,
+    cap: int = 50,
+) -> set[str]:
+    """Return file_ids of approved graph neighbors of the given seed files.
+
+    Used to build domain-bounded candidate sets for:
+      1. Lookup-slot injection (retrieval success path)
+      2. Fallback candidate pool (when retrieve_with_scores returns 0)
+
+    One DB query bounded by cap. Never raises — returns empty set on any error.
+    """
+    if not seed_file_ids:
+        return set()
+    try:
+        from sqlalchemy import or_, select as _select  # noqa: PLC0415
+        from app.models.semantic_layer import SemanticRelationship  # noqa: PLC0415
+
+        seed_ids = seed_file_ids[:cap]
+        q = (
+            _select(
+                SemanticRelationship.file_a_id,
+                SemanticRelationship.file_b_id,
+            )
+            .where(
+                or_(
+                    SemanticRelationship.file_a_id.in_(seed_ids),
+                    SemanticRelationship.file_b_id.in_(seed_ids),
+                ),
+                SemanticRelationship.status == "approved",
+                SemanticRelationship.approval_status == "approved",
+            )
+            .limit(cap)
+        )
+        if container_id:
+            q = q.where(SemanticRelationship.container_id == container_id)
+        rows = (await db.execute(q)).all()
+        seed_set = set(seed_ids)
+        return {
+            (fb if fa in seed_set else fa)
+            for fa, fb in rows
+        } - seed_set
+    except Exception:
+        return set()
+
 
 async def _polish_answer(raw: str) -> str:
     """Polish pass DISABLED — it added a full LLM round-trip (~1500 tokens)
@@ -467,13 +520,24 @@ async def _build_agent_context(
             pipeline_logger.info("prior_files_pinned", pinned=prior_files)
 
         # ── Reserve slots for master / lookup files ───────────────────────────
-        # Retrieval ranks by token relevance, which under-weights name-lookup
-        # tables for queries about metrics ("show X for entity Y"). Make sure
-        # at least a few generic master/lookup tables make it into the prompt.
+        # Lookup injection is scoped to the approved semantic neighborhood of
+        # the retrieved files only. Prevents globally-visible lookup tables
+        # (e.g. unrelated domain tables) from being injected into queries that
+        # retrieved a domain-bounded result set via BM25/vector/graph.
         already_in = {e.get("blob_path") for e in catalog}
+        _retrieved_fids = {meta.file_id for meta, _ in retrieved_with_scores}
+        try:
+            _lookup_neighbor_ids = await _get_approved_neighbor_ids(
+                list(_retrieved_fids), db, container_id=container_id
+            )
+        except Exception:
+            _lookup_neighbor_ids = set()
+        _lookup_eligible_ids = _retrieved_fids | _lookup_neighbor_ids
         lookup_pool = [
             e for e in full_catalog
-            if _is_lookup_file(e) and e.get("blob_path") not in already_in
+            if _is_lookup_file(e)
+            and e.get("blob_path") not in already_in
+            and e.get("file_id") in _lookup_eligible_ids
         ]
         # Rank lookup pool by keyword score (still query-aware: a "supplier
         # master" outranks "calendar lookup" when the query is about suppliers).
@@ -491,6 +555,7 @@ async def _build_agent_context(
             total_files=len(full_catalog),
             retrieved_files=len(catalog),
             top_scores=[(meta.file_id, round(s, 4)) for meta, s in retrieved_with_scores[:5]],
+            lookup_eligible_neighbor_count=len(_lookup_neighbor_ids),
             lookup_slots_added=[e.get("blob_path") for e in injected_lookups],
         )
         trace.set_retrieval_fusion(
@@ -499,15 +564,83 @@ async def _build_agent_context(
             resolver_pins=list(resolver_pinned_blobs),
             fallback=False,
         )
+        # ── Per-file retrieval decision telemetry ───────────────────────────────────
+        # Read per-channel membership from the context vars set by retrieve_with_scores().
+        # These are Task-local and safe under concurrent async workloads.
+        _ch_map     = _retrieval_channel_map.get()
+        _cand_fids  = _retrieval_all_candidate_fids.get()
+        _short_fids = {meta.file_id for meta, _ in retrieved_with_scores}
+        _inj_fids   = {e.get("file_id") for e in injected_lookups if e.get("file_id")}
+        _prior_blobs = set(prior_files) if prior_files else set()
+        _td_shortlisted = [
+            {
+                "file":            (getattr(meta, "blob_path", "") or meta.file_id)[:80],
+                "channels":        _ch_map.get(meta.file_id, []),
+                "rrf_score":       round(float(score), 5),
+                "resolver_pin":    getattr(meta, "blob_path", "") in resolver_pinned_blobs,
+                "lookup_injected": meta.file_id in _inj_fids,
+                "prior_pin":       getattr(meta, "blob_path", "") in _prior_blobs,
+            }
+            for meta, score in retrieved_with_scores[:20]
+        ]
+        _low_rrf_rejected = [
+            {
+                "file_id":         fid[:8],
+                "rejected_reason": "low_rrf_rank",
+                "channels":        _ch_map.get(fid, []),
+            }
+            for fid in list(_cand_fids - _short_fids)[:10]
+        ]
+        _outside_boundary_rejected = [
+            {
+                "file":            (e.get("blob_path", "") or (e.get("file_id") or ""))[:80],
+                "rejected_reason": "outside_graph_boundary",
+            }
+            for e in full_catalog
+            if _is_lookup_file(e) and e.get("file_id") not in _lookup_eligible_ids
+        ][:10]
+        trace.set_retrieval_decision(
+            shortlisted=_td_shortlisted,
+            rejected=(_low_rrf_rejected + _outside_boundary_rejected)[:20],
+        )
+        _grounding_quality = "retrieved"  # RRF-based retrieval succeeded normally
     else:
-        # Fallback: retrieval returned 0 (or errored) — do in-memory keyword
-        # match on the catalog so we still show a reasonable shortlist.
-        scored = sorted(full_catalog, key=_kw_score, reverse=True)
+        # ── Domain-bounded fallback ───────────────────────────────────────────
+        # Retrieval returned 0 (or errored). Instead of starting from
+        # full_catalog, use resolver-pinned file_ids as structural domain
+        # anchors and expand to their approved graph neighbors to produce a
+        # relationship-scoped candidate pool.
+        # Only if no structural anchors exist does the pool degrade to the
+        # full catalog (logged explicitly as full_catalog_degraded).
+        _fb_anchor_ids: list[str] = resolver_pinned_file_ids or []
+        _fb_neighbor_ids: set[str] = set()
+        if _fb_anchor_ids:
+            try:
+                _fb_neighbor_ids = await _get_approved_neighbor_ids(
+                    _fb_anchor_ids, db, container_id=container_id
+                )
+            except Exception:
+                _fb_neighbor_ids = set()
+        _fb_bounded_ids = set(_fb_anchor_ids) | _fb_neighbor_ids
+        _fb_candidates = (
+            [e for e in full_catalog if e.get("file_id") in _fb_bounded_ids]
+            if _fb_bounded_ids
+            else []
+        )
+        if _fb_candidates:
+            _grounding_quality = "graph_bounded"
+        else:
+            # No structural anchors — degrade to full catalog with explicit signal.
+            _fb_candidates = full_catalog
+            _grounding_quality = "full_catalog_degraded"
+
+        scored = sorted(_fb_candidates, key=_kw_score, reverse=True)
         # Take the top metric/transactional matches by keyword, then enrich
-        # with the highest-scoring lookup files so name-resolution queries
-        # always have a master table to consult.
+        # with lookup files from the same bounded candidate set.
         primary = scored[: _SHORTLIST_TOP_K - _LOOKUP_RESERVED_SLOTS]
         primary_blobs = {e.get("blob_path") for e in primary}
+        # Lookup injection stays within the bounded candidate pool — never
+        # expanded back to full_catalog regardless of grounding_quality.
         lookup_pool = [
             e for e in scored
             if _is_lookup_file(e) and e.get("blob_path") not in primary_blobs
@@ -554,6 +687,10 @@ async def _build_agent_context(
             "retrieval_fallback",
             query=query,
             reason=reason,
+            grounding_quality=_grounding_quality,
+            anchor_count=len(_fb_anchor_ids),
+            neighbor_count=len(_fb_neighbor_ids),
+            candidate_pool=len(_fb_candidates),
             total_files=len(full_catalog),
             fallback_files=[e.get("blob_path") for e in catalog],
         )
@@ -697,6 +834,21 @@ async def _build_agent_context(
     # ── Policy snapshot: capture active thresholds for offline debugging ──────
     trace.set_policy_snapshot()
 
+    # ── Grounding quality telemetry ───────────────────────────────────────────
+    # Summarises how completely this request's shortlist was hydrated,
+    # how many approved relationships back the joins, and whether the
+    # retrieval path was normal (RRF) or degraded (fallback).
+    trace.set_grounding_quality(
+        hydrated_files=len(heavy_by_file),
+        shortlist_size=len(catalog),
+        sample_rows_available=len(sample_rows_by_blob),
+        approved_relationships=len(getattr(sql_ctx, "approved_joins", []) or []),
+        graph_health_level=graph_health.health_level,
+        graph_edge_coverage=getattr(graph_health, "edge_coverage", None),
+        retrieval_degraded=len(retrieved_with_scores) == 0,
+        grounding_quality=_grounding_quality,
+    )
+
     # ── Phase 6: Trust propagation trace ──────────────────────────────────
     # Summarise ingestion trust across the shortlisted files and emit the
     # degradation chain so operators can trace WHY confidence degraded.
@@ -724,6 +876,11 @@ async def _build_agent_context(
     # the orchestration trace.  Enables offline score reproduction and modifier
     # attribution without re-running the pipeline.
     trace.set_calibration_diagnostics(confidence)
+
+    # ── Confidence attribution telemetry ──────────────────────────────────────
+    # Human-readable per-component breakdown: answers "why did confidence drop?"
+    # without requiring inspection of raw modifier_breakdown or replay_inputs.
+    trace.set_confidence_attribution(confidence)
 
     # Per-request state store
     req_id = req_id_for_trace   # reuse the trace correlation ID as the request ID

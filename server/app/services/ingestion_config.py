@@ -36,6 +36,7 @@ class StageName(StrEnum):
     ANALYTICS = "analytics"
     RELATIONSHIPS = "relationships"
     SEMANTIC_LAYER = "semantic_layer"
+    SEMANTIC_ENRICHMENT = "semantic_enrichment"
     COMPLETE = "complete"
 
 
@@ -59,6 +60,7 @@ INGEST_STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(StageName.ANALYTICS, "gchat.ingest.analytics"),
     StageSpec(StageName.RELATIONSHIPS, "gchat.ingest.relationships"),
     StageSpec(StageName.SEMANTIC_LAYER, "gchat.ingest.semantic_layer"),
+    StageSpec(StageName.SEMANTIC_ENRICHMENT, "gchat.ingest.semantic_enrichment"),
     StageSpec(StageName.COMPLETE, "gchat.ingest.complete"),
 )
 

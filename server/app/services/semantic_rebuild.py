@@ -151,6 +151,14 @@ async def _build_semantic_layer_for_file(file_id: str) -> int:
     return int(result.get("relationships") or 0)
 
 
+async def _run_semantic_enrichment_for_file(file_id: str) -> int:
+    from app.services.semantic_enrichment import run_semantic_enrichment_for_file
+
+    async with async_session() as db:
+        result = await run_semantic_enrichment_for_file(file_id, db)
+    return int(result.get("additions") or 0)
+
+
 async def rebuild_container_semantics(
     container_id: str,
     *,
@@ -179,6 +187,7 @@ async def rebuild_container_semantics(
         "key_registry_rows": 0,
         "relationship_rows_created": 0,
         "semantic_relationships_upserted": 0,
+        "semantic_enrichment_additions": 0,
         "file_failures": [],
     }
 
@@ -242,6 +251,20 @@ async def rebuild_container_semantics(
                 if len(counters["file_failures"]) < failure_sample_limit:
                     counters["file_failures"].append({"file_id": file_id, "stage": "semantic_layer", "error": str(exc)[:300]})
                 ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="semantic_layer", error=str(exc)[:300])
+
+    after_id = None
+    while True:
+        file_ids = await _file_id_batch(container_id, after_id=after_id, batch_size=batch_size)
+        if not file_ids:
+            break
+        after_id = file_ids[-1]
+        for file_id in file_ids:
+            try:
+                counters["semantic_enrichment_additions"] += await _run_semantic_enrichment_for_file(file_id)
+            except Exception as exc:
+                if len(counters["file_failures"]) < failure_sample_limit:
+                    counters["file_failures"].append({"file_id": file_id, "stage": "semantic_enrichment", "error": str(exc)[:300]})
+                ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="semantic_enrichment", error=str(exc)[:300])
 
     async with async_session() as db:
         counters["evaluation"] = await evaluate_container_semantics(container_id, db, batch_size=batch_size)

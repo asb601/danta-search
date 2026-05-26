@@ -17,14 +17,18 @@ PROPERTIES:
   - Lightweight: all methods are synchronous, zero I/O, zero LLM calls.
 
 TRACE STAGES (all optional — absent if pipeline short-circuited):
-  planner          — BusinessIntentPlanner decisions
-  entity_resolver  — entity → file mappings with confidence + signals
-  graph_expansion  — anchor files + expansion result
-  retrieval_fusion — retrieved files + RRF scores
-  approved_joins   — validated join pairs surfaced from sql_context
-  execution_strategy — cluster mode + cluster breakdown
-  sql_repair       — per-repair attempt outcome
-  execution_outcome — success/failure, row_count, duration_ms
+  planner              — BusinessIntentPlanner decisions
+  entity_resolver      — entity → file mappings with confidence + signals
+  graph_expansion      — anchor files + expansion result
+  retrieval_fusion     — retrieved files + RRF scores (summary)
+  retrieval_decision   — per-file survival/rejection telemetry with channels + reasons
+  approved_joins       — validated join pairs + graph_verified / fallback_inferred flags
+  grounding_quality    — hydration coverage, graph health, retrieval degradation level
+  execution_strategy   — cluster mode + cluster breakdown
+  sql_repair           — per-repair attempt outcome
+  execution_outcome    — success/failure, row_count, duration_ms
+  confidence_attribution — per-component scores + modifier signals (human-readable)
+  calibration_diagnostics — modifier_breakdown + replay_inputs (offline replay)
 
 USAGE (in graph.py):
   trace = OrchestrationTrace(request_id=req_id)
@@ -191,24 +195,60 @@ class OrchestrationTrace:
         except Exception:
             pass
 
+    def set_retrieval_decision(
+        self,
+        shortlisted: list[dict],
+        rejected: list[dict],
+    ) -> None:
+        """
+        Per-file retrieval decision telemetry: why files survived or were dropped.
+
+        shortlisted items schema:
+          {"file": blob_path, "channels": ["bm25","vector","graph"],
+           "rrf_score": 0.048, "resolver_pin": false, "lookup_injected": false,
+           "prior_pin": false}
+
+        rejected items schema:
+          {"file": blob_path, "rejected_reason": "low_rrf_rank"|"outside_graph_boundary",
+           "channels": [...]}   # channels present only for low_rrf_rank
+
+        Lists are capped at _MAX_LIST entries each. Does NOT store query text.
+        Never raises.
+        """
+        try:
+            self._stages["retrieval_decision"] = _safe_val({
+                "shortlisted":       list(shortlisted)[:_MAX_LIST],
+                "rejected":          list(rejected)[:_MAX_LIST],
+                "shortlisted_count": len(shortlisted),
+                "rejected_count":    len(rejected),
+            })
+        except Exception:
+            pass
+
     def set_approved_joins(self, sql_ctx: Any) -> None:
         """
         Record validated join pairs from SQLContext.
 
         Captures each approved join's table pair, column pair, relationship
-        type, and confidence.
+        type, confidence, and trust flags (graph_verified, fallback_inferred).
         """
         try:
             joins = []
             for j in list(getattr(sql_ctx, "approved_joins", []) or [])[:_MAX_LIST]:
                 joins.append({
-                    "left":  f"{getattr(j, 'left_table', '')}."
-                             f"{getattr(j, 'left_col', '')}",
-                    "right": f"{getattr(j, 'right_table', '')}."
-                             f"{getattr(j, 'right_col', '')}",
-                    "type":  _safe_str(getattr(j, "relationship_type", ""), 60),
-                    "conf":  round(float(getattr(j, "confidence", 0)), 2),
+                    "left":              f"{getattr(j, 'left_table', '')}."
+                                         f"{getattr(j, 'left_col', '')}",
+                    "right":             f"{getattr(j, 'right_table', '')}."
+                                         f"{getattr(j, 'right_col', '')}",
+                    "type":              _safe_str(getattr(j, "relationship_type", ""), 60),
+                    "conf":              round(float(getattr(j, "confidence", 0)), 2),
+                    "graph_verified":    getattr(j, "graph_verified", True),
+                    "fallback_inferred": getattr(j, "fallback_inferred", False),
                 })
+            # Surface a join_risk signal when any inferred (non-graph-verified) join
+            # is present in the approved set.
+            has_unverified = any(not jd["graph_verified"] or jd["fallback_inferred"]
+                                 for jd in joins)
             null_sem_count = len(getattr(sql_ctx, "null_semantics", {}) or {})
             binding_count  = len(getattr(sql_ctx, "column_bindings", {}) or {})
             date_col_count = len(getattr(sql_ctx, "date_columns", {}) or {})
@@ -218,7 +258,55 @@ class OrchestrationTrace:
                 "binding_count":    binding_count,
                 "date_col_count":   date_col_count,
                 "null_sem_count":   null_sem_count,
+                **({"join_risk": "unverified_inferred_join"} if has_unverified else {}),
             }
+        except Exception:
+            pass
+
+    def set_grounding_quality(
+        self,
+        *,
+        hydrated_files: int,
+        shortlist_size: int,
+        sample_rows_available: int,
+        approved_relationships: int,
+        graph_health_level: str,
+        graph_edge_coverage: float | None,
+        retrieval_degraded: bool,
+        grounding_quality: str,
+    ) -> None:
+        """
+        Record grounding completeness for this pipeline invocation.
+
+        grounding_quality values:
+          "retrieved"              — RRF-based retrieval succeeded normally
+          "graph_bounded"          — fallback used resolver pins + graph neighbors
+          "full_catalog_degraded"  — no structural anchors; fallback used full catalog
+
+        graph_edge_coverage is the fraction of shortlisted file pairs that have
+        at least one approved join (from GraphHealthScore).
+
+        Never raises.
+        """
+        try:
+            _coverage_pct = (
+                round(hydrated_files / shortlist_size, 3)
+                if shortlist_size > 0 else 0.0
+            )
+            self._stages["grounding_quality"] = _safe_val({
+                "hydrated_files":        hydrated_files,
+                "shortlist_size":        shortlist_size,
+                "hydration_coverage":    _coverage_pct,
+                "sample_rows_available": sample_rows_available,
+                "approved_relationships": approved_relationships,
+                "graph_health_level":    graph_health_level,
+                "graph_edge_coverage":   (
+                    round(float(graph_edge_coverage), 3)
+                    if graph_edge_coverage is not None else None
+                ),
+                "retrieval_degraded":    retrieval_degraded,
+                "grounding_quality":     grounding_quality,
+            })
         except Exception:
             pass
 
@@ -368,6 +456,46 @@ class OrchestrationTrace:
             self._stages["calibration_diagnostics"] = _safe_val({
                 "modifier_breakdown": getattr(confidence, "modifier_breakdown", {}),
                 "replay_inputs":      getattr(confidence, "replay_inputs", {}),
+            })
+        except Exception:
+            pass  # telemetry — never block the pipeline
+
+    def set_confidence_attribution(self, confidence: Any) -> None:
+        """
+        Record human-readable per-component confidence attribution.
+
+        Emits each scoring component's value (0-1) alongside the composite
+        score and which modifiers fired.  Designed for operator dashboards
+        that need to answer "why did confidence drop?" without parsing the
+        raw modifier_breakdown or replay_inputs calibration fields.
+
+        Complements set_calibration_diagnostics() (which covers replay
+        reproducibility); this method covers human-readable attribution.
+        Never raises.
+        """
+        try:
+            _mb = getattr(confidence, "modifier_breakdown", {}) or {}
+            _components: dict[str, float] = {}
+            for _attr in (
+                "retrieval_component", "graph_component", "resolver_component",
+                "complexity_component", "repair_component",
+                "health_component", "ingestion_component",
+            ):
+                _v = getattr(confidence, _attr, None)
+                if _v is not None:
+                    _components[_attr.replace("_component", "")] = round(float(_v), 3)
+            self._stages["confidence_attribution"] = _safe_val({
+                "components":    _components,
+                "score":         round(float(getattr(confidence, "score", 0)), 3),
+                "level":         getattr(confidence, "level", ""),
+                "signals":       list(getattr(confidence, "signals", []) or []),
+                "modifiers": {
+                    "trust_normalization":    bool(_mb.get("trust_normalization_applied")),
+                    "trust_ceiling":          bool(_mb.get("trust_ceiling_applied")),
+                    "floor_applied":          bool(_mb.get("minimum_viable_floor_applied")),
+                    "ceiling_credit_pts":     _mb.get("degradation_ceiling_credit_score_pts", 0),
+                    "normalization_forgiven_pts": _mb.get("normalization_forgiveness_score_pts", 0),
+                },
             })
         except Exception:
             pass  # telemetry — never block the pipeline

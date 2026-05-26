@@ -43,6 +43,7 @@ _NON_FATAL_STAGES = {
     StageName.ANALYTICS.value,
     StageName.RELATIONSHIPS.value,
     StageName.SEMANTIC_LAYER.value,
+    StageName.SEMANTIC_ENRICHMENT.value,
 }
 _WORKER_LOOP: asyncio.AbstractEventLoop | None = None
 
@@ -342,6 +343,17 @@ def semantic_layer_task(self, payload: Payload) -> Payload:
 
 @celery_app.task(
     bind=True,
+    name=stage_task_name(StageName.SEMANTIC_ENRICHMENT),
+    **_INGEST_TASK_OPTIONS,
+)
+def semantic_enrichment_task(self, payload: Payload) -> Payload:
+    from app.services.ingestion_stages import semantic_enrichment_stage
+
+    return _run_stage(self, StageName.SEMANTIC_ENRICHMENT, payload, semantic_enrichment_stage)
+
+
+@celery_app.task(
+    bind=True,
     name=stage_task_name(StageName.COMPLETE),
     **_INGEST_TASK_OPTIONS,
 )
@@ -362,6 +374,7 @@ _TASK_BY_STAGE = {
     StageName.ANALYTICS: analytics_task,
     StageName.RELATIONSHIPS: relationship_task,
     StageName.SEMANTIC_LAYER: semantic_layer_task,
+    StageName.SEMANTIC_ENRICHMENT: semantic_enrichment_task,
     StageName.COMPLETE: complete_ingestion_task,
 }
 

@@ -209,3 +209,172 @@ async def extract_entities_for_query(query: str) -> list[str]:
     except Exception as exc:
         chat_logger.warning("entity_extraction_error", error=str(exc)[:200])
         return []
+
+
+async def enrich_semantic_description(
+    filename: str,
+    current_description: str,
+    current_good_for: list,
+    role_groups: list,
+    neighbors: list,
+    grain: str | None = None,
+) -> dict:
+    """Generate additional good_for phrases using workflow signals.
+
+    Uses same-role-kind column groups and approved relationship neighbors to
+    produce workflow-aware question phrases that the schema-only Stage 4 prompt
+    cannot generate. Bounded by INGEST_SEMANTIC_ENRICHMENT_MAX_ADDITIONS.
+
+    Returns dict with key ``additional_good_for`` (list[str]).
+    Never raises; returns empty list on LLM/parse failure.
+    """
+    def _run() -> dict:
+        settings = get_settings()
+        max_completion_tokens = max(
+            1, int(getattr(settings, "INGEST_SEMANTIC_ENRICHMENT_MAX_COMPLETION_TOKENS", 400))
+        )
+        max_additions = max(
+            1, int(getattr(settings, "INGEST_SEMANTIC_ENRICHMENT_MAX_ADDITIONS", 5))
+        )
+        client, deployment = get_client()
+
+        groups_section = ""
+        if role_groups:
+            lines = [
+                f"  - [{g['kind']}:{g['label']}] {', '.join(g['columns'])}"
+                for g in role_groups
+            ]
+            groups_section = (
+                "\nSame-role column groups (candidates for ratio, completion,"
+                " reconciliation questions):\n" + "\n".join(lines)
+            )
+
+        neighbors_section = ""
+        if neighbors:
+            lines = []
+            for n in neighbors:
+                lines.append(
+                    f"  - {n['name']} ({n['relationship_type']} via"
+                    f" {n['join_column_this']} \u2192 {n['join_column_neighbor']})"
+                    f"\n    Description: {n['neighbor_description']}"
+                    f"\n    Used for: {'; '.join(n['neighbor_good_for'][:3])}"
+                )
+            neighbors_section = (
+                "\nApproved join partners (data-verified):\n" + "\n".join(lines)
+            )
+
+        grain_line = f"\nTable grain: {grain}" if grain else ""
+
+        prompt = (
+            f'You are enriching the semantic catalog entry for a table named "{filename}".\n\n'
+            f"Current description: {current_description}\n\n"
+            f"Current questions this table supports:\n"
+            + "\n".join(f"  - {q}" for q in current_good_for)
+            + grain_line
+            + groups_section
+            + neighbors_section
+            + f"\n\nTask: Generate up to {max_additions} ADDITIONAL natural language question"
+            " phrases this table can support.\nFocus on:\n"
+            "1. Questions comparing columns from same-role groups (ratio, completion, backlog,"
+            " reconciliation).\n"
+            "2. Questions requiring joining to the listed approved neighbors.\n"
+            "3. Operational lifecycle questions derivable from the column structure and"
+            " relationships above.\n\n"
+            "Rules:\n"
+            "- Do NOT repeat any existing question.\n"
+            "- Do NOT use ERP-specific vocabulary (Oracle, SAP, AR, AP) unless those terms"
+            " appear in the table or neighbor names above.\n"
+            "- Do NOT invent relationships or columns not listed above.\n"
+            "- Each phrase should be specific and answerable by a data analyst.\n"
+            "- Generate ONLY questions structurally inferable from the data above.\n\n"
+            'Return ONLY this JSON:\n{"additional_good_for": ["phrase 1", "phrase 2", ...]}'
+        )
+
+        raw_retry_delays = settings.INGEST_LLM_RETRY_DELAYS_SECONDS
+        retry_delay_items = (
+            raw_retry_delays.split(",")
+            if isinstance(raw_retry_delays, str)
+            else raw_retry_delays
+        )
+        retry_delays = [
+            max(0, int(str(raw).strip()))
+            for raw in retry_delay_items
+            if str(raw).strip()
+        ]
+
+        t = time.perf_counter()
+        import openai as _openai  # noqa: PLC0415 — local import to avoid circular
+        response = None
+        for _attempt in range(len(retry_delays) + 1):
+            try:
+                response = client.chat.completions.create(
+                    model=deployment,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_completion_tokens=max_completion_tokens,
+                    temperature=0,
+                )
+                break
+            except _openai.RateLimitError:
+                if _attempt >= len(retry_delays):
+                    raise
+                _delay = retry_delays[_attempt]
+                ingest_logger.warning(
+                    "llm_rate_limited",
+                    function="enrich_semantic_description",
+                    attempt=_attempt + 1,
+                    retry_in_s=_delay,
+                )
+                time.sleep(_delay)
+
+        duration = elapsed_ms(t)
+        raw = response.choices[0].message.content
+        api = response.usage
+        p_tok = api.prompt_tokens if api else 0
+        c_tok = api.completion_tokens if api else 0
+
+        parsed = safe_parse_json(raw)
+        additions = parsed.get("additional_good_for", [])
+        if not isinstance(additions, list):
+            additions = []
+        parsed["additional_good_for"] = additions
+        parsed["_p_tok"] = p_tok
+        parsed["_c_tok"] = c_tok
+        parsed["_duration"] = duration
+        parsed["_deployment"] = deployment
+        return parsed
+
+    ingest_logger.info(
+        "llm_call",
+        function="enrich_semantic_description",
+        status="started",
+        filename=filename,
+        role_groups=len(role_groups),
+        neighbors=len(neighbors),
+    )
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        ingest_logger.warning(
+            "llm_call",
+            function="enrich_semantic_description",
+            status="error",
+            filename=filename,
+            error=str(exc)[:200],
+        )
+        return {"additional_good_for": []}
+    track_and_log(
+        function="enrich_semantic_description",
+        model=result.pop("_deployment"),
+        prompt_tokens=result.pop("_p_tok"),
+        completion_tokens=result.pop("_c_tok"),
+        duration_ms=result.pop("_duration"),
+        extra={"filename": filename},
+    )
+    ingest_logger.info(
+        "llm_call",
+        function="enrich_semantic_description",
+        status="done",
+        filename=filename,
+        additions=len(result.get("additional_good_for", [])),
+    )
+    return result

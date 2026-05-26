@@ -111,6 +111,10 @@
     "component_limit": 10,
     "failure_sample_limit": 20
   },
+  "semantic_enrichment": {
+    "max_completion_tokens": 400,
+    "max_additions": 5
+  },
   "cleaning": {
     "null_tokens": ["<empty>", "null", "none", "na", "n/a", "nan", "nil", "tbd", "-", "--", "---", ".", "..", "?", "#", "#n/a", "#na", "#null!", "not available", "not applicable", "not provided", "not assigned", "missing", "unknown", "no data", "no value", "void", "blank", "empty", "#value!", "#ref!", "#div/0!", "#name?", "#num!", "#error!", "tba", "wip", "pending", "not entered", "not recorded"]
   },

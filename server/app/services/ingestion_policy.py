@@ -101,6 +101,8 @@ LEGACY_POLICY_PATHS: dict[str, tuple[str, ...]] = {
     "INGEST_SCHEMA_FIELD_NAME_TOKENS": ("dictionary_detection", "field_name_tokens"),
     "INGEST_SCHEMA_DESCRIPTION_TOKENS": ("dictionary_detection", "description_tokens"),
     "INGEST_SCHEMA_NOTES_TOKENS": ("dictionary_detection", "notes_tokens"),
+    "INGEST_SEMANTIC_ENRICHMENT_MAX_COMPLETION_TOKENS": ("semantic_enrichment", "max_completion_tokens"),
+    "INGEST_SEMANTIC_ENRICHMENT_MAX_ADDITIONS": ("semantic_enrichment", "max_additions"),
 }
 
 _DYNAMIC_DEFAULTS = {
