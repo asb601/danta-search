@@ -415,7 +415,7 @@ async def reingest_all(
     }
 
 
-# ── Domain access control ────────────────────────────────────────────────────
+# ──  Domain access control ────────────────────────────────────────────────────
 
 class _UserDomainsBody(BaseModel):
     allowed_domains: list[str] | None  # None = unrestricted
