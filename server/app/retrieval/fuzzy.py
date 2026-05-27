@@ -113,6 +113,9 @@ async def fuzzy_search(
         .limit(limit)
     )
 
-    rows = (await db.execute(q)).all()
+    # pg_trgm may be unavailable or mismatched in production databases. Keep
+    # that failure inside this optional stage so later retrieval reads survive.
+    async with db.begin_nested():
+        rows = (await db.execute(q)).all()
 
     return [(row[0], float(row[1])) for row in rows]

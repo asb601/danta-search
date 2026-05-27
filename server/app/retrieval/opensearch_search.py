@@ -181,9 +181,14 @@ async def opensearch_retrieve_with_scores(
     if not ordered_ids:
         return []
 
-    rows = (await db.execute(
-        select(FileMetadata).where(FileMetadata.file_id.in_(ordered_ids))
-    )).scalars().all()
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(
+                select(FileMetadata).where(FileMetadata.file_id.in_(ordered_ids))
+            )).scalars().all()
+    except Exception as exc:
+        chat_logger.warning("opensearch_metadata_hydration_error", error=str(exc)[:300])
+        return []
     by_id = {row.file_id: row for row in rows}
 
     results = [(by_id[file_id], score_by_id[file_id]) for file_id in ordered_ids if file_id in by_id]

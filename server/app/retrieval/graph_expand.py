@@ -88,7 +88,10 @@ async def graph_expand(
     if container_id:
         edge_q = edge_q.where(SemanticRelationship.container_id == container_id)
 
-    edge_rows = (await db.execute(edge_q)).all()
+    # Graph expansion is optional. A relationship-index query failure should
+    # remove this channel, not poison vector/hydration/planner reads afterward.
+    async with db.begin_nested():
+        edge_rows = (await db.execute(edge_q)).all()
     if not edge_rows:
         return []
 
@@ -120,10 +123,11 @@ async def graph_expand(
             select(FileMetadata.file_id, FileMetadata.ingestion_confidence_score)
             .where(FileMetadata.file_id.in_(bounded_seed_ids))
         )
-        seed_ing_scores: dict[str, float | None] = {
-            r.file_id: r.ingestion_confidence_score
-            for r in (await db.execute(_ing_stmt)).all()
-        }
+        async with db.begin_nested():
+            seed_ing_scores: dict[str, float | None] = {
+                r.file_id: r.ingestion_confidence_score
+                for r in (await db.execute(_ing_stmt)).all()
+            }
     except Exception:
         seed_ing_scores = {}  # neutral fallback — never block expansion
 

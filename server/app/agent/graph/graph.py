@@ -40,6 +40,7 @@ from app.retrieval.orchestrator import (
     retrieve_with_scores,
     retrieval_channel_map as _retrieval_channel_map,
     retrieval_all_candidate_fids as _retrieval_all_candidate_fids,
+    retrieval_stage_errors as _retrieval_stage_errors,
 )
 from app.agent.response_helpers import (
     extract_answer,
@@ -218,13 +219,15 @@ async def _get_approved_neighbor_ids(
         )
         if container_id:
             q = q.where(SemanticRelationship.container_id == container_id)
-        rows = (await db.execute(q)).all()
+        async with db.begin_nested():
+            rows = (await db.execute(q)).all()
         seed_set = set(seed_ids)
         return {
             (fb if fa in seed_set else fa)
             for fa, fb in rows
         } - seed_set
-    except Exception:
+    except Exception as exc:
+        pipeline_logger.warning("approved_neighbor_ids_error", error=str(exc)[:200])
         return set()
 
 
@@ -261,7 +264,8 @@ async def _get_workflow_closure_edges(
         )
         if container_id:
             q = q.where(SemanticRelationship.container_id == container_id)
-        return list((await db.execute(q)).all())
+        async with db.begin_nested():
+            return list((await db.execute(q)).all())
     except Exception as exc:
         pipeline_logger.warning("workflow_closure_edges_error", error=str(exc)[:200])
         return []
@@ -545,6 +549,7 @@ async def _build_agent_context(
     retrieval_error: str | None = None
     _workflow_retrieval_channels: dict[str, list[str]] = {}
     _workflow_retrieval_candidate_ids: set[str] = set()
+    _retrieval_stage_failures: list[dict] = []
     if user_id:
         try:
             retrieved_with_scores = await retrieve_with_scores(
@@ -555,6 +560,7 @@ async def _build_agent_context(
         except Exception as exc:
             retrieval_error = str(exc)[:200]
             chat_logger.warning("retrieval_error_fallback", error=retrieval_error)
+        _retrieval_stage_failures = list(_retrieval_stage_errors.get() or [])
 
     # ── In-memory keyword scorer (used for fallback AND for lookup-slot fill) ─
     q_words = tokenize_search_query(query)
@@ -708,6 +714,7 @@ async def _build_agent_context(
             shortlist=catalog,
             resolver_pins=list(resolver_pinned_blobs),
             fallback=False,
+            stage_errors=_retrieval_stage_failures,
         )
         # ── Per-file retrieval decision telemetry ───────────────────────────────────
         # Read per-channel membership from the context vars set by retrieve_with_scores().
@@ -828,6 +835,7 @@ async def _build_agent_context(
             shortlist=catalog,
             resolver_pins=list(resolver_pinned_blobs),
             fallback=True,
+            stage_errors=_retrieval_stage_failures,
         )
         metrics.inc("catalog_fallback_count")
 
@@ -935,31 +943,40 @@ async def _build_agent_context(
     # shortlist by workflow fit, temporal eligibility, process continuity, and
     # transactional authority. This is deliberately query-time assembly: no ERP
     # ontology generation and no ingestion-time workflow intelligence.
-    _workflow_assembly = assemble_workflow_cognition(
-        query=query,
-        intent_plan=intent_plan,
-        current_shortlist=catalog,
-        full_catalog=full_catalog,
-        grounding_quality=_grounding_quality,
-    )
-    if _workflow_assembly.workflow_query:
-        catalog = _workflow_assembly.ranked_shortlist
-        parquet_paths_all = {
-            k: v for k, v in all_parquet_paths.items()
-            if k in {e.get("blob_path") for e in catalog}
-        }
-        if not retrieved_with_scores:
-            top_blob_paths = {e.get("blob_path") for e in catalog[:3] if e.get("blob_path")}
-        pipeline_logger.info(
-            "workflow_cognition_assembled",
-            **_workflow_assembly.summary,
-            tasks=[task.task_id for task in _workflow_assembly.tasks],
-            warnings=_workflow_assembly.warnings,
-            selected=[d.blob_path for d in _workflow_assembly.decisions if d.selected][:8],
-            rejected=[d.blob_path for d in _workflow_assembly.decisions if not d.selected][:8],
+    _workflow_assembly_note = ""
+    try:
+        _workflow_assembly = assemble_workflow_cognition(
+            query=query,
+            intent_plan=intent_plan,
+            current_shortlist=catalog,
+            full_catalog=full_catalog,
+            grounding_quality=_grounding_quality,
         )
-    trace.set_workflow_assembly(_workflow_assembly)
-    _workflow_assembly_note = render_workflow_assembly_note(_workflow_assembly)
+        if _workflow_assembly.workflow_query:
+            catalog = _workflow_assembly.ranked_shortlist
+            parquet_paths_all = {
+                k: v for k, v in all_parquet_paths.items()
+                if k in {e.get("blob_path") for e in catalog}
+            }
+            if not retrieved_with_scores:
+                top_blob_paths = {e.get("blob_path") for e in catalog[:3] if e.get("blob_path")}
+            pipeline_logger.info(
+                "workflow_cognition_assembled",
+                **_workflow_assembly.summary,
+                tasks=[task.task_id for task in _workflow_assembly.tasks],
+                warnings=_workflow_assembly.warnings,
+                selected=[d.blob_path for d in _workflow_assembly.decisions if d.selected][:8],
+                rejected=[d.blob_path for d in _workflow_assembly.decisions if not d.selected][:8],
+            )
+        trace.set_workflow_assembly(_workflow_assembly)
+        _workflow_assembly_note = render_workflow_assembly_note(_workflow_assembly)
+    except Exception as exc:
+        pipeline_logger.warning("workflow_cognition_error", error=str(exc)[:200])
+        trace.set_workflow_assembly({
+            "workflow_query": False,
+            "error": "workflow_cognition_failed_open",
+            "error_preview": str(exc)[:200],
+        })
 
     _workflow_continuity_note = render_workflow_continuity_note(
         _workflow_reqs,

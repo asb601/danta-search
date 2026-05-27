@@ -228,7 +228,8 @@ async def _two_hop_expansion(
             SemanticRelationship.approval_status == "approved",
         )
     )
-    rows1 = (await db.execute(stmt1)).all()
+    async with db.begin_nested():
+        rows1 = (await db.execute(stmt1)).all()
 
     hop1_ids: set[str] = set(anchor_ids)
     for row in rows1:
@@ -251,7 +252,8 @@ async def _two_hop_expansion(
             SemanticRelationship.approval_status == "approved",
         )
     )
-    rows2 = (await db.execute(stmt2)).all()
+    async with db.begin_nested():
+        rows2 = (await db.execute(stmt2)).all()
 
     hop2_ids: set[str] = set(hop1_ids)
     for row in rows2:

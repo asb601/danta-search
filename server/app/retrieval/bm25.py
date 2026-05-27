@@ -127,7 +127,10 @@ async def bm25_search(
         .limit(limit)
     )
 
-    rows = (await db.execute(q)).all()
+    # Isolate optional retrieval SQL so a stage-level Postgres error does not
+    # poison the shared request transaction used by later retrieval/hydration.
+    async with db.begin_nested():
+        rows = (await db.execute(q)).all()
 
     # Each row is (FileMetadata, bm25_score)
     return [(row[0], float(row[1])) for row in rows]

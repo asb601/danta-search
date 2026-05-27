@@ -79,7 +79,7 @@ def check_metrics(client: httpx.Client, base: str) -> None:
 def check_unauth_returns_401(client: httpx.Client, base: str) -> None:
     """Protected endpoints must return 401, not 500."""
     print("\n── Auth guard (no token) ───────────────────────────────────────────")
-    for path in ["/api/auth/me", "/api/folders", "/api/users"]:
+    for path in ["/api/auth/me", "/api/folders/root/contents", "/api/users"]:
         try:
             r = httpx.get(f"{base}{path}", timeout=10)
             _check(
@@ -112,14 +112,19 @@ def check_auth_me(client: httpx.Client, base: str) -> dict | None:
 def check_folders(client: httpx.Client, base: str) -> None:
     print("\n── Folders ─────────────────────────────────────────────────────────")
     try:
-        r = client.get(f"{base}/api/folders", timeout=10)
-        ok = _check("GET /api/folders → 200", r.status_code == 200, f"got {r.status_code}")
+        r = client.get(f"{base}/api/folders/root/contents", timeout=10)
+        ok = _check(
+            "GET /api/folders/root/contents → 200",
+            r.status_code == 200,
+            f"got {r.status_code}",
+        )
         if ok:
             data = r.json()
-            _check("response is a list", isinstance(data, list), type(data).__name__)
-            print(f"         Folder count: {len(data)}")
+            _check("response has folders list", isinstance(data.get("folders"), list), type(data).__name__)
+            _check("response has files list", isinstance(data.get("files"), list), type(data).__name__)
+            print(f"         Folder count: {len(data.get('folders', []))}  File count: {len(data.get('files', []))}")
     except Exception as e:
-        _fail("GET /api/folders", str(e))
+        _fail("GET /api/folders/root/contents", str(e))
 
 
 def check_chat(client: httpx.Client, base: str, question: str) -> None:

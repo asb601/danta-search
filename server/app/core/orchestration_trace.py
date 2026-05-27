@@ -21,7 +21,7 @@ TRACE STAGES (all optional — absent if pipeline short-circuited):
   entity_resolver      — entity → file mappings with confidence + signals
   graph_expansion      — anchor files + expansion result
   retrieval_fusion     — retrieved files + RRF scores (summary)
-  retrieval_decision   — per-file survival/rejection telemetry with channels + reasons
+    retrieval_decision   — per-file survival/rejection telemetry with channels + reasons
     workflow_assembly    — query-time workflow tasks, candidate scores, temporal/authority decisions
   approved_joins       — validated join pairs + graph_verified / fallback_inferred flags
   grounding_quality    — hydration coverage, graph health, retrieval degradation level
@@ -167,15 +167,18 @@ class OrchestrationTrace:
         shortlist: list[dict],
         resolver_pins: list[str],
         fallback: bool = False,
+        stage_errors: list[dict] | None = None,
     ) -> None:
         """
         Record retrieval fusion output.
 
         Captures the top-scored files with their RRF scores, the final
-        shortlist blobs, and which files were injected by the resolver.
+        shortlist blobs, which files were injected by the resolver, and any
+        optional retrieval stages that degraded locally.
         Does NOT capture query text.
         """
         try:
+            stage_errors = stage_errors or []
             top_scores = [
                 {
                     "file_id": _safe_str(getattr(meta, "file_id", ""), 36),
@@ -188,6 +191,8 @@ class OrchestrationTrace:
                 "top_scores":        top_scores,
                 "resolver_pins":     resolver_pins,
                 "fallback":          fallback,
+                "stage_errors":      stage_errors,
+                "stage_error_count": len(stage_errors),
                 "shortlist_blobs":   [
                     _safe_str(e.get("blob_path", ""), 80)
                     for e in list(shortlist)[:_MAX_LIST]

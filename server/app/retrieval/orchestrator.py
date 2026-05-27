@@ -69,6 +69,9 @@ retrieval_channel_map: contextvars.ContextVar[dict[str, list[str]]] = (
 retrieval_all_candidate_fids: contextvars.ContextVar[set[str]] = (
     contextvars.ContextVar("retrieval_all_candidate_fids", default=set())
 )
+retrieval_stage_errors: contextvars.ContextVar[list[dict[str, str]]] = (
+    contextvars.ContextVar("retrieval_stage_errors", default=[])
+)
 
 # ── Retrieval stage bounds ─────────────────────────────────────────────────────
 # All retrieval caps and score floors are governed by RetrievalPolicy.
@@ -133,6 +136,13 @@ def _prune_and_dedup(
     return pruned
 
 
+def _record_stage_error(stage: str, exc: Exception) -> None:
+    """Attach optional retrieval-stage failures to request-local telemetry."""
+    entry = {"stage": stage, "error": str(exc)[:200]}
+    current = list(retrieval_stage_errors.get() or [])
+    retrieval_stage_errors.set((current + [entry])[:12])
+
+
 async def retrieve_with_scores(
     query: str,
     user_id: str,
@@ -157,6 +167,10 @@ async def retrieve_with_scores(
     candidates. This makes relationship neighbors of high-confidence
     entity tables rank-eligible via RRF without bypassing retrieval.
     """
+    retrieval_channel_map.set({})
+    retrieval_all_candidate_fids.set(set())
+    retrieval_stage_errors.set([])
+
     if not query or not query.strip():
         return []
 
@@ -182,17 +196,22 @@ async def retrieve_with_scores(
     # falls back to PostgreSQL because that logic joins files/folders in SQL.
     can_use_opensearch = bool(container_id) and (is_admin or bool(allowed_domains))
     if can_use_opensearch:
-        os_results = await opensearch_retrieve_with_scores(
-            query=query,
-            user_id=user_id,
-            is_admin=is_admin,
-            db=db,
-            top_k=top_k,
-            container_id=container_id,
-            allowed_domains=allowed_domains,
-            date_from=date_from,
-            date_to=date_to,
-        )
+        try:
+            os_results = await opensearch_retrieve_with_scores(
+                query=query,
+                user_id=user_id,
+                is_admin=is_admin,
+                db=db,
+                top_k=top_k,
+                container_id=container_id,
+                allowed_domains=allowed_domains,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        except Exception as exc:
+            _record_stage_error("opensearch", exc)
+            chat_logger.warning("retrieval_opensearch_error", error=str(exc)[:200])
+            os_results = []
         if os_results:
             try:
                 _os_seed_ids = [meta.file_id for meta, _ in os_results]
@@ -210,6 +229,7 @@ async def retrieve_with_scores(
                     container_id=container_id,
                 )
             except Exception as exc:
+                _record_stage_error("opensearch_graph_expand", exc)
                 chat_logger.warning("retrieval_graph_expand_error", error=str(exc)[:200])
                 graph_results = []
             _os_fused = _trust_attenuate(rrf_fuse([os_results, graph_results], top_k=top_k))
@@ -236,6 +256,7 @@ async def retrieve_with_scores(
             container_id=container_id,
         )
     except Exception as exc:
+        _record_stage_error("bm25", exc)
         chat_logger.warning("retrieval_bm25_error", error=str(exc)[:200])
         bm25_results = []
 
@@ -248,6 +269,7 @@ async def retrieve_with_scores(
             container_id=container_id,
         )
     except Exception as exc:
+        _record_stage_error("fuzzy", exc)
         chat_logger.warning("retrieval_fuzzy_error", error=str(exc)[:200])
         fuzzy_results = []
 
@@ -260,6 +282,7 @@ async def retrieve_with_scores(
             container_id=container_id,
         )
     except Exception as exc:
+        _record_stage_error("vector", exc)
         chat_logger.warning("retrieval_vector_error", error=str(exc)[:200])
         vector_results = []
 
@@ -292,6 +315,7 @@ async def retrieve_with_scores(
             container_id=container_id,
         )
     except Exception as exc:
+        _record_stage_error("graph_expand", exc)
         chat_logger.warning("retrieval_graph_expand_error", error=str(exc)[:200])
         graph_results = []
 

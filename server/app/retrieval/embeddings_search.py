@@ -117,6 +117,9 @@ async def vector_search(
         .limit(limit)
     )
 
-    rows = (await db.execute(q)).all()
+    # Only wrap the SQL read, not the embedding call above, so we avoid holding
+    # a DB transaction open while waiting on the embedding provider.
+    async with db.begin_nested():
+        rows = (await db.execute(q)).all()
 
     return [(row[0], float(row[1])) for row in rows]
