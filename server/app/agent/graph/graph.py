@@ -11,6 +11,7 @@ This module orchestrates the pipeline:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import threading
@@ -61,6 +62,7 @@ from app.agent.tools.stats import build_stats_tool
 from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
 from app.core.orchestration_trace import OrchestrationTrace
+from app.core.token_counter import count_tokens
 import structlog as _structlog
 import traceback as _traceback
 from app.retrieval.embeddings import build_search_text
@@ -87,6 +89,19 @@ _request_stores: dict[str, dict] = {}
 _stores_lock = threading.Lock()
 
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
+
+
+def _payload_preview(value, *, max_chars: int = 2000) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, default=str)
+        except Exception:
+            text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"... [truncated {len(text) - max_chars} chars]"
 
 
 def _files_used_from_store(store: dict, file_identities: FileIdentityMap | None) -> list[str]:
@@ -1025,8 +1040,9 @@ async def _build_agent_context(
     # One additional DB query scoped to the shortlist file_ids. Returns:
     #   - reachable_paths: joins available via non-shortlisted intermediate tables
     #   - orphaned_tables: shortlisted files with no approved edges
-    # Injected separately into the system prompt (not merged into sql_context_note)
-    # so the planner can reason about multi-hop reachability independently.
+    # Observability only: full topology/bridge diagnostics are not injected into
+    # the LLM prompt. The agent can still call extract_relations when it needs a
+    # scoped join path.
     _wf_topology = await build_workflow_topology(
         catalog,
         db,
@@ -1235,14 +1251,16 @@ async def _build_agent_context(
                 workflow_topology_note="\n\n".join(filter(None, [
                     _workflow_assembly_note,
                     _workflow_continuity_note,
-                    _wf_topology.topology_note,
                 ])),
                 file_identities=file_identity_map,
             ),
         ),
     )
 
-    # ── Log the complete system prompt so we can audit exactly what the LLM sees ──
+    # ── Log prompt metrics and a preview only. Full prompt text is intentionally
+    # not re-serialized into pipeline logs; detailed orchestration diagnostics
+    # remain in the structured trace instead of the LLM/debug payload.
+    _system_prompt_preview = system_prompt[:1600]
     pipeline_logger.info(
         "system_prompt_built",
         query=query,
@@ -1250,7 +1268,16 @@ async def _build_agent_context(
         catalog_file_count=len(catalog),
         parquet_file_count=len(parquet_paths_all),
         has_conversation_context=bool(conversation_context),
-        system_prompt=system_prompt,  # full prompt, no truncation
+        system_prompt_chars=len(system_prompt),
+        system_prompt_tokens=count_tokens(system_prompt, "gpt-4o-mini"),
+        system_prompt_preview=_system_prompt_preview,
+        system_prompt_preview_truncated=len(system_prompt) > len(_system_prompt_preview),
+        prompt_sections={
+            "sql_context_chars": len(sql_context_note or ""),
+            "workflow_constraints_chars": len(_workflow_assembly_note or ""),
+            "workflow_coverage_chars": len(_workflow_continuity_note or ""),
+            "topology_prompt_injected": False,
+        },
     )
 
     initial_state: AgentState = {
@@ -1612,7 +1639,7 @@ async def run_agent_query_stream(
                     "tool_call_start",
                     tool=tool_name,
                     iteration=tool_calls_made,
-                    input=tool_input,  # full args, no truncation
+                    input=_payload_preview(tool_input, max_chars=1600),
                 )
                 yield {"type": "thinking", "tool": tool_name}
 
@@ -1623,7 +1650,8 @@ async def run_agent_query_stream(
                     "tool_call_end",
                     tool=tool_name,
                     iteration=tool_calls_made,
-                    output=str(tool_output),  # full output, no truncation
+                    output=_payload_preview(tool_output, max_chars=3000),
+                    output_chars=len(str(tool_output)),
                 )
                 tool_output_str = tool_output if isinstance(tool_output, str) else str(tool_output)
                 if isinstance(tool_output, str):

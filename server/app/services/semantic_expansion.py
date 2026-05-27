@@ -379,42 +379,34 @@ def render_workflow_continuity_note(
     max_domains: int = 8,
     max_candidates: int = 8,
 ) -> str:
-    """Render compact planner-visible workflow continuity state."""
+    """Render only prompt-critical workflow coverage state.
+
+    Expansion candidates and domain-filling diagnostics are observability data;
+    callers keep the full ExpansionDecision for trace/logs instead of injecting
+    the candidate list into the LLM context.
+    """
     state = getattr(workflow_reqs, "coverage_state", "unknown")
     if state == "complete" and not getattr(workflow_reqs, "missing_domains", None):
         return ""
 
-    by_id = {e.get("file_id"): e for e in full_catalog if e.get("file_id")}
-    lines = ["--- WORKFLOW CONTINUITY ---"]
+    lines = ["--- WORKFLOW COVERAGE ---"]
     lines.append(
-        "coverage_state: "
-        f"{state}; workflow_completeness: {getattr(workflow_reqs, 'workflow_completeness', 0.0):.2f}"
+        f"coverage_state={state}; workflow_completeness={getattr(workflow_reqs, 'workflow_completeness', 0.0):.2f}"
     )
 
     missing = list(getattr(workflow_reqs, "missing_domains", None) or [])[:max_domains]
     if missing:
-        lines.append("MISSING SEMANTIC DOMAINS:")
+        lines.append("missing_domains:")
         for domain in missing:
-            candidate_names = []
-            for fid in domain.best_candidates[:2]:
-                entry = by_id.get(fid, {})
-                candidate_names.append(entry.get("blob_path") or fid)
-            suffix = f"; candidates: {', '.join(candidate_names)}" if candidate_names else ""
             lines.append(
-                f"  - {domain.role_type}:{domain.domain_label} "
-                f"activated_by={domain.activated_by}{suffix}"
+                f"  - {domain.role_type}:{domain.domain_label}; activated_by={domain.activated_by}"
             )
     elif state in {"activation_failed", "unknown"}:
         evidence = ", ".join(getattr(workflow_reqs, "expansion_evidence", [])[:3])
-        lines.append(f"ACTIVATION STATE: {evidence or state}")
+        lines.append(f"activation_state={evidence or state}")
 
     if expansion and expansion.expansion_candidates:
-        lines.append("WORKFLOW EXPANSION CANDIDATES:")
-        for cand in expansion.expansion_candidates[:max_candidates]:
-            lines.append(
-                f"  - {cand.blob_path} covers {cand.role_type}:{cand.domain_label} "
-                f"[confidence: {cand.confidence:.2f}; evidence: {cand.evidence}]"
-            )
+        lines.append(f"expansion_applied={len(expansion.expansion_candidates)} file(s); candidate details kept in trace.")
 
     lines.append("---")
     return "\n".join(lines)

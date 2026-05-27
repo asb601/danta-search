@@ -16,6 +16,15 @@ from app.agent.llm import get_llm, get_llm_mini
 from app.agent.state import AgentState, MAX_TOOL_CALLS
 from app.core.logger import llm_logger, pipeline_logger
 
+_MESSAGE_LOG_PREVIEW_CHARS = 2500
+
+
+def _message_preview(content) -> str:
+    text = str(content)
+    if len(text) <= _MESSAGE_LOG_PREVIEW_CHARS:
+        return text
+    return text[:_MESSAGE_LOG_PREVIEW_CHARS] + f"... [truncated {len(text) - _MESSAGE_LOG_PREVIEW_CHARS} chars]"
+
 
 def _fmt_message(m) -> dict:
     """Serialize a LangChain message for pipeline logging."""
@@ -28,7 +37,9 @@ def _fmt_message(m) -> dict:
     tool_call_id = getattr(m, "tool_call_id", None)
     base = {
         "type": type(m).__name__,
-        "content": str(content),  # no truncation — full content to pipeline.log
+        "content": _message_preview(content),
+        "content_chars": len(str(content)),
+        "content_truncated": len(str(content)) > _MESSAGE_LOG_PREVIEW_CHARS,
     }
     if tool_calls:
         base["tool_calls"] = tool_calls

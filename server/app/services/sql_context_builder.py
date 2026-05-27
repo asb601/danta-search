@@ -64,6 +64,10 @@ _MAX_JOINS    = _gp.max_joins_in_prompt
 _MAX_BINDINGS = _gp.max_bindings
 _MAX_DATE_COLS = _gp.max_date_cols
 _MAX_NULL_SEM  = _gp.max_null_semantics
+_PROMPT_JOIN_CAP = min(_MAX_JOINS, 8)
+_PROMPT_BINDING_CAP = min(_MAX_BINDINGS, 10)
+_PROMPT_DATE_CAP = min(_MAX_DATE_COLS, 5)
+_PROMPT_NULL_CAP = min(_MAX_NULL_SEM, 4)
 
 
 # ── Role parsing ───────────────────────────────────────────────────────────────
@@ -137,44 +141,48 @@ class SQLContext:
             return ""
 
         lines: list[str] = [
-            "--- VALIDATED SQL CONTEXT ---",
-            "Pre-validated joins and column bindings for this query's files.",
-            "Use ONLY these joins/columns. Do NOT invent alternatives.",
-            "",
+            "--- EXECUTION SQL CONSTRAINTS ---",
+            "Use only listed joins; inspect schema/columns before filters.",
         ]
 
         # ── Approved joins ─────────────────────────────────────────────────
         if self.approved_joins:
-            lines.append("APPROVED JOINS (exact column pairs; never substitute):")
-            for j in self.approved_joins[:_MAX_JOINS]:
+            lines.append("joins:")
+            for j in self.approved_joins[:_PROMPT_JOIN_CAP]:
                 lines.append(
-                    f"  {j.left_table}.{j.left_col} = {j.right_table}.{j.right_col}"
-                    f"  [{j.relationship_type}, conf:{j.confidence:.2f}]"
+                    f"  - {j.left_table}.{j.left_col} = {j.right_table}.{j.right_col}"
+                    f" ({j.relationship_type}; {j.confidence:.2f})"
                 )
-            lines.append("")
+            omitted = len(self.approved_joins) - _PROMPT_JOIN_CAP
+            if omitted > 0:
+                lines.append(f"  - ... {omitted} additional approved join(s) omitted from prompt.")
 
         # ── Semantic column roles ──────────────────────────────────────────
         if self.column_bindings:
-            lines.append("SEMANTIC COLUMN ROLES:")
-            for label, bindings in sorted(self.column_bindings.items())[:_MAX_BINDINGS]:
-                lines.append(f"  {label:<30}→ {', '.join(bindings)}")
-            lines.append("")
+            lines.append("semantic columns:")
+            for label, bindings in sorted(self.column_bindings.items())[:_PROMPT_BINDING_CAP]:
+                lines.append(f"  - {label}: {', '.join(bindings[:3])}")
+            omitted = len(self.column_bindings) - _PROMPT_BINDING_CAP
+            if omitted > 0:
+                lines.append(f"  - ... {omitted} semantic role group(s) omitted; call get_file_schema/inspect_column.")
 
         # ── Date columns ───────────────────────────────────────────────────
         if self.date_columns:
-            lines.append(
-                "DATE COLUMNS (use for time filters; do NOT substitute other columns):"
-            )
-            for label, cols in sorted(self.date_columns.items())[:_MAX_DATE_COLS]:
-                lines.append(f"  {label:<30}→ {', '.join(cols)}")
-            lines.append("")
+            lines.append("time columns:")
+            for label, cols in sorted(self.date_columns.items())[:_PROMPT_DATE_CAP]:
+                lines.append(f"  - {label}: {', '.join(cols[:3])}")
+            omitted = len(self.date_columns) - _PROMPT_DATE_CAP
+            if omitted > 0:
+                lines.append(f"  - ... {omitted} date role group(s) omitted; use inspect_column if needed.")
 
         # ── Null semantics ─────────────────────────────────────────────────
         if self.null_semantics:
-            lines.append("NULL SEMANTICS:")
-            for expr, meaning in list(self.null_semantics.items())[:_MAX_NULL_SEM]:
-                lines.append(f"  {expr:<45}→ {meaning}")
-            lines.append("")
+            lines.append("null meanings:")
+            for expr, meaning in list(self.null_semantics.items())[:_PROMPT_NULL_CAP]:
+                lines.append(f"  - {expr}: {meaning}")
+            omitted = len(self.null_semantics) - _PROMPT_NULL_CAP
+            if omitted > 0:
+                lines.append(f"  - ... {omitted} null semantic(s) omitted.")
 
         lines.append("---")
         return "\n".join(lines)

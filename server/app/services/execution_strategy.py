@@ -106,43 +106,35 @@ class ExecutionStrategy:
         if not self.clusters or self.is_trivial():
             return ""
 
-        lines: list[str] = ["--- EXECUTION STRATEGY ---"]
+        lines: list[str] = ["--- EXECUTION MODE ---"]
 
         if self.mode == "single_joined":
             lines += [
-                "Mode: SINGLE JOINED SQL",
-                "All shortlisted files are connected via approved joins.",
-                "Execute as ONE SQL query using the approved join paths above.",
-                "Do NOT split into separate queries.",
+                "mode=single_joined",
+                "Use one SQL query with the approved joins above.",
             ]
 
         elif self.mode == "multi_cluster":
             n = len(self.clusters)
             lines += [
-                f"Mode: MULTI-CLUSTER EXECUTION ({n} independent clusters)",
-                "Files form separate clusters — no approved cross-cluster join path exists.",
-                "Execute ONE SQL per cluster. Merge results narratively in your response.",
-                "CRITICAL: Do NOT join files across different clusters.",
-                "",
+                f"mode=multi_cluster; clusters={n}",
+                "Do not join across clusters. Query clusters separately and merge narratively.",
             ]
             for i, c in enumerate(self.clusters, 1):
                 tag = "joined_sql" if c.strategy == "joined_sql" else "standalone"
                 files_str = ", ".join(c.files)
-                lines.append(f"  Cluster {i} [{tag}]: {files_str}")
+                lines.append(f"  - c{i}:{tag}:{files_str}")
 
         elif self.mode == "independent_analyses":
             lines += [
-                "Mode: INDEPENDENT ANALYSES",
-                "No pre-validated join paths exist between shortlisted files.",
-                "BEFORE concluding these files cannot be joined:",
-                "  1. Call extract_relations on any pair you want to join — candidate paths may exist.",
-                "  2. If technical_candidate relationships are found, validate with inspect_column.",
-                "  3. Only analyze independently if no column-level evidence for a join exists.",
-                "If joining is not possible after checking, combine insights narratively.",
-                "",
+                "mode=independent_analyses",
+                "No approved joins are currently in prompt. Use extract_relations before any join; otherwise analyze separately.",
             ]
-            for i, c in enumerate(self.clusters, 1):
-                lines.append(f"  File {i}: {', '.join(c.files)}")
+            for i, c in enumerate(self.clusters[:8], 1):
+                lines.append(f"  - file{i}:{', '.join(c.files)}")
+            omitted = len(self.clusters) - 8
+            if omitted > 0:
+                lines.append(f"  - ... {omitted} additional standalone file(s) omitted.")
 
         lines.append("---")
         return "\n".join(lines)

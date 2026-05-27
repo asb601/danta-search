@@ -4,11 +4,13 @@ parquet paths, and conversation context.
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, timedelta
 
 from app.agent.state import MAX_TOOL_CALLS
 from app.core.logger import chat_logger
+from app.core.token_counter import count_tokens, get_encoding
 from app.services.file_identity import FileIdentityMap, logical_name_from_path
 
 
@@ -24,6 +26,184 @@ _ANCHOR_PATTERNS = [
     re.compile(r"\bUnlike (?:other|similar) files,?\s*", re.IGNORECASE),
     re.compile(r"\bnot (?:typically )?found in other (?:similar )?files\b", re.IGNORECASE),
 ]
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+_PROMPT_MODEL = os.getenv("AGENT_PROMPT_TOKEN_MODEL", "gpt-4o-mini")
+_SYSTEM_PROMPT_TOKEN_BUDGET = _env_int("AGENT_SYSTEM_PROMPT_TOKEN_BUDGET", 9000)
+_CATALOG_TOKEN_BUDGET = _env_int("AGENT_CATALOG_PROMPT_TOKEN_BUDGET", 2200)
+_EXECUTION_CONTEXT_TOKEN_BUDGET = _env_int("AGENT_EXECUTION_CONTEXT_TOKEN_BUDGET", 1800)
+
+# Catalog prompt caps. Full schemas remain available through get_file_schema and
+# inspect_column; this initial context only needs enough grounding to pick the
+# right logical tables without carrying ingestion/debug metadata.
+_MAX_PROMPT_TABLES = _env_int("AGENT_PROMPT_CATALOG_TABLE_LIMIT", 10)
+_MAX_CSV_ONLY_TABLES = _env_int("AGENT_PROMPT_CSV_TABLE_LIMIT", 4)
+_CATALOG_COLUMN_LIMIT = _env_int("AGENT_PROMPT_TABLE_COLUMN_LIMIT", 8)
+_PRIORITY_CATALOG_COLUMN_LIMIT = _env_int("AGENT_PROMPT_PRIORITY_COLUMN_LIMIT", 12)
+
+_OBSERVABILITY_ONLY_HEADERS = (
+    "CANDIDATE WORKFLOW DECISIONS",
+    "WORKFLOW EXPANSION CANDIDATES",
+    "REACHABLE JOIN PATHS",
+    "ISOLATED FILES",
+)
+
+
+def _token_count(text: str) -> int:
+    if not text:
+        return 0
+    return count_tokens(text, _PROMPT_MODEL)
+
+
+def _cap_text_tokens(text: str, max_tokens: int) -> str:
+    """Hard-cap text by model tokens while preserving the beginning and end."""
+    if not text or _token_count(text) <= max_tokens:
+        return text
+    marker = "\n\n[Runtime prompt budget omitted lower-priority context.]\n\n"
+    try:
+        enc = get_encoding(_PROMPT_MODEL)
+        token_ids = enc.encode(text)
+        marker_tokens = enc.encode(marker)
+        keep = max(1, max_tokens - len(marker_tokens))
+        head = max(1, int(keep * 0.72))
+        tail = max(1, keep - head)
+        return enc.decode(token_ids[:head]) + marker + enc.decode(token_ids[-tail:])
+    except Exception:
+        char_budget = max(100, max_tokens * 4)
+        head = int(char_budget * 0.72)
+        tail = max(1, char_budget - head - len(marker))
+        return text[:head] + marker + text[-tail:]
+
+
+def _one_line(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def _clip(value: str, max_chars: int) -> str:
+    value = _one_line(value)
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars].rsplit(" ", 1)[0] + "..."
+
+
+def _column_names(entry: dict, max_cols: int) -> list[str]:
+    cols = [
+        str(c.get("name"))
+        for c in (entry.get("columns_info") or [])
+        if isinstance(c, dict) and c.get("name")
+    ]
+    if not cols:
+        cols = [str(c) for c in (entry.get("column_names") or []) if isinstance(c, str)]
+    return cols[:max_cols]
+
+
+def _range_hints(entry: dict, limit: int = 2) -> list[str]:
+    hints = ("year", "date", "period", "month", "fiscal", "quarter", "fy")
+    parts: list[str] = []
+    for col_name, stats in (entry.get("column_stats") or {}).items():
+        if not isinstance(stats, dict):
+            continue
+        if stats.get("dtype") != "numeric" or not any(h in col_name.lower() for h in hints):
+            continue
+        mn, mx = stats.get("min"), stats.get("max")
+        if mn is not None and mx is not None:
+            parts.append(f"{col_name}:{mn}-{mx}")
+        if len(parts) >= limit:
+            break
+    return parts
+
+
+def _table_line(
+    entry: dict,
+    logical_table: str,
+    *,
+    display_name: str | None = None,
+    priority: bool = False,
+) -> str:
+    details: list[str] = []
+    if display_name and display_name != logical_table:
+        details.append(f"display={display_name}")
+    desc = _clip(_neutralize_description(entry.get("ai_description") or ""), _DESC_MAX_CHARS)
+    if desc:
+        details.append(f"desc={desc}")
+    key_dimensions = (entry.get("key_dimensions") or [])[:_DIM_METRIC_LIMIT]
+    if key_dimensions:
+        details.append(f"dims={', '.join(map(str, key_dimensions))}")
+    key_metrics = (entry.get("key_metrics") or [])[:_DIM_METRIC_LIMIT]
+    if key_metrics:
+        details.append(f"metrics={', '.join(map(str, key_metrics))}")
+    dr_start = entry.get("date_range_start")
+    dr_end = entry.get("date_range_end")
+    if dr_start or dr_end:
+        details.append(f"date={dr_start or '?'}..{dr_end or '?'}")
+    col_limit = _PRIORITY_CATALOG_COLUMN_LIMIT if priority else _CATALOG_COLUMN_LIMIT
+    cols = _column_names(entry, col_limit)
+    if cols:
+        details.append(f"cols={', '.join(cols)}")
+    ranges = _range_hints(entry, 2 if priority else 1)
+    if ranges:
+        details.append(f"ranges={', '.join(ranges)}")
+    if not details:
+        return f"  - {logical_table}"
+    return f"  - {logical_table}: " + "; ".join(details)
+
+
+def _fit_lines_to_budget(header: str, lines: list[str], footer: str, max_tokens: int) -> str:
+    kept: list[str] = []
+    omitted = 0
+    for line in lines:
+        candidate_lines = [header, *kept, line]
+        if footer:
+            candidate_lines.append(footer)
+        if _token_count("\n".join(candidate_lines)) > max_tokens:
+            omitted += 1
+            continue
+        kept.append(line)
+    if omitted:
+        kept.append(f"  ... {omitted} lower-priority table(s) omitted; call search_catalog if needed.")
+    return "\n".join([header, *kept, footer]).strip()
+
+
+def _sanitize_execution_context(text: str) -> str:
+    """Remove observability-only sections and enforce the execution-context budget."""
+    if not text:
+        return ""
+    lines: list[str] = []
+    skip = False
+    removed_sections: set[str] = set()
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        upper = stripped.upper()
+        if any(upper.startswith(header) for header in _OBSERVABILITY_ONLY_HEADERS):
+            skip = True
+            removed_sections.add(upper.split("(", 1)[0].strip().rstrip(":"))
+            continue
+        if skip:
+            if not stripped:
+                skip = False
+                continue
+            if stripped == "---" or (stripped.endswith(":") and upper == stripped):
+                skip = False
+            else:
+                continue
+        if not skip:
+            lines.append(raw_line)
+    cleaned = "\n".join(lines).strip()
+    if removed_sections:
+        chat_logger.info(
+            "prompt_context_observability_sections_omitted",
+            sections=sorted(removed_sections),
+            original_tokens=_token_count(text),
+            cleaned_tokens=_token_count(cleaned),
+        )
+    return _cap_text_tokens(cleaned, _EXECUTION_CONTEXT_TOKEN_BUDGET)
 
 
 def _neutralize_description(desc: str) -> str:
@@ -145,8 +325,8 @@ Max {max_calls} tool calls total.
 """
 
 
-_DESC_MAX_CHARS = 200  # max characters shown per file description in the prompt
-_DIM_METRIC_LIMIT = 4  # max key_dimensions / key_metrics shown per file
+_DESC_MAX_CHARS = 90  # max characters shown per file description in the prompt
+_DIM_METRIC_LIMIT = 2  # max key_dimensions / key_metrics shown per file
 
 
 def build_parquet_note(
@@ -171,83 +351,63 @@ def build_parquet_note(
             catalog_by_blob[bp] = entry
 
     if parquet_paths_all:
-        lines = []
-        for blob, pq in parquet_paths_all.items():
-            entry = catalog_by_blob.get(blob)
+        ordered_blobs: list[str] = []
+        for entry in catalog:
+            blob = entry.get("blob_path")
+            if blob and blob in parquet_paths_all and blob not in ordered_blobs:
+                ordered_blobs.append(blob)
+        for blob in parquet_paths_all:
+            if blob not in ordered_blobs:
+                ordered_blobs.append(blob)
+
+        lines: list[str] = []
+        for blob in ordered_blobs[:_MAX_PROMPT_TABLES]:
+            entry = catalog_by_blob.get(blob) or {"blob_path": blob}
             identity = file_identities.identity_for_blob(blob) if file_identities else None
             logical_table = identity.sql_name if identity else logical_name_from_path(blob)
-            line = f"  {logical_table}"
-            if identity and identity.sql_name != identity.logical_name:
-                line += f"  (display: {identity.logical_name})"
+            display_name = identity.logical_name if identity else None
+            lines.append(
+                _table_line(
+                    entry,
+                    logical_table,
+                    display_name=display_name,
+                    priority=(top_blob_paths is None or blob in top_blob_paths),
+                )
+            )
+        if len(ordered_blobs) > _MAX_PROMPT_TABLES:
+            lines.append(
+                f"  ... {len(ordered_blobs) - _MAX_PROMPT_TABLES} additional shortlisted logical table(s) omitted; use search_catalog."
+            )
 
-            desc = _neutralize_description(entry.get("ai_description") if entry else "")
-            if desc:
-                # Truncate description to keep per-file token cost bounded.
-                if len(desc) > _DESC_MAX_CHARS:
-                    desc = desc[:_DESC_MAX_CHARS].rsplit(" ", 1)[0] + "…"
-                line += f"\n    Description: {desc}"
-            key_dimensions = (entry.get("key_dimensions") or []) if entry else []
-            if key_dimensions:
-                line += f"\n    Key dimensions: {', '.join(key_dimensions[:_DIM_METRIC_LIMIT])}"
-            key_metrics = (entry.get("key_metrics") or []) if entry else []
-            if key_metrics:
-                line += f"\n    Key metrics: {', '.join(key_metrics[:_DIM_METRIC_LIMIT])}"
+        header = "Required logical tables in the current shortlist (compact execution view):"
+        footer = "Use these logical table names in SQL. Runtime resolves parquet/CSV storage internally."
+        note = _fit_lines_to_budget(header, lines, footer, _CATALOG_TOKEN_BUDGET)
 
-            # Surface date range so LLM knows what period the file covers
-            dr_start = entry.get("date_range_start") if entry else None
-            dr_end = entry.get("date_range_end") if entry else None
-            if dr_start or dr_end:
-                line += f"\n    Date range: {dr_start or '?'} \u2192 {dr_end or '?'}"
-
-            # Surface column stats only for top-retrieved files to keep prompt
-            # token load bounded. Lower-ranked files get date range only.
-            _is_priority = top_blob_paths is None or blob in top_blob_paths
-            if _is_priority:
-                _DATE_HINTS = ("year", "date", "period", "month", "fiscal", "quarter", "fy")
-                col_stats = (entry.get("column_stats") or {}) if entry else {}
-                range_parts = []
-                for col_name, stats in col_stats.items():
-                    if stats.get("dtype") == "numeric" and any(
-                        h in col_name.lower() for h in _DATE_HINTS
-                    ):
-                        mn, mx = stats.get("min"), stats.get("max")
-                        if mn is not None and mx is not None:
-                            range_parts.append(f"{col_name}: {mn}\u2013{mx}")
-                if range_parts:
-                    line += f"\n    Column ranges: {', '.join(range_parts[:4])}"
-
-            lines.append(line)
-
-        note = (
-            "Initial shortlist of likely logical tables:\n"
-            + "\n".join(lines)
-            + "\nUse these names directly in SQL FROM/JOIN clauses. Parquet/CSV storage is resolved internally."
-        )
-
-        # Also list CSV-only files (no parquet conversion)
+        # Also list a small number of CSV-only files (no parquet conversion).
         csv_only = [e for e in catalog if e.get("blob_path") and e["blob_path"] not in parquet_paths_all]
         if csv_only:
-            csv_lines = []
-            for entry in csv_only:
+            csv_lines: list[str] = []
+            for entry in csv_only[:_MAX_CSV_ONLY_TABLES]:
                 bp = entry["blob_path"]
                 identity = file_identities.identity_for_blob(bp) if file_identities else None
                 logical_table = identity.sql_name if identity else logical_name_from_path(bp)
-                csv_line = f"  {logical_table}"
-                desc = _neutralize_description(entry.get("ai_description") or "")
-                if desc:
-                    csv_line += f"\n    Description: {desc}"
-                # Note: leave key_dimensions / key_metrics intact below.
-                key_dimensions = entry.get("key_dimensions") or []
-                if key_dimensions:
-                    csv_line += f"\n    Key dimensions: {', '.join(key_dimensions[:6])}"
-                key_metrics = entry.get("key_metrics") or []
-                if key_metrics:
-                    csv_line += f"\n    Key metrics: {', '.join(key_metrics[:6])}"
-                csv_lines.append(csv_line)
-            note += (
-                "\n\nCSV-only logical tables (runtime may execute them more slowly):\n"
-                + "\n".join(csv_lines)
+                csv_lines.append(
+                    _table_line(
+                        entry,
+                        logical_table,
+                        display_name=(identity.logical_name if identity else None),
+                        priority=False,
+                    )
+                )
+            if len(csv_only) > _MAX_CSV_ONLY_TABLES:
+                csv_lines.append(f"  ... {len(csv_only) - _MAX_CSV_ONLY_TABLES} CSV-only table(s) omitted; use search_catalog.")
+            csv_note = _fit_lines_to_budget(
+                "CSV-only logical tables (compact view):",
+                csv_lines,
+                "These may execute more slowly; use only if relevant.",
+                max(300, _CATALOG_TOKEN_BUDGET // 4),
             )
+            note = "\n\n".join([note, csv_note])
         return note
 
     if parquet_blob_path:
@@ -259,7 +419,7 @@ def build_parquet_note(
     return ""
 
 
-_CONV_CONTEXT_MAX_CHARS = 2000  # cap conversation history to bound token growth
+_CONV_CONTEXT_MAX_CHARS = 1200  # cap conversation history to bound token growth
 
 
 def build_system_prompt(
@@ -293,12 +453,18 @@ def build_system_prompt(
 
     shortlist_count = len(catalog)
     full_count = total_file_count if total_file_count is not None else shortlist_count
+    prompt_visible_count = min(shortlist_count, _MAX_PROMPT_TABLES)
     if full_count > shortlist_count:
         shortlist_header = (
-            f"Showing the top {shortlist_count} of {full_count} ingested files "
-            f"(retrieval-ranked for this query). The other "
-            f"{full_count - shortlist_count} files are NOT shown — call "
-            f"search_catalog to reach them."
+            f"Retrieval shortlisted {shortlist_count} of {full_count} ingested files. "
+            f"The prompt shows a compact top {prompt_visible_count}; call "
+            f"search_catalog to reach omitted shortlist files or the other "
+            f"{full_count - shortlist_count} catalog files."
+        )
+    elif prompt_visible_count < shortlist_count:
+        shortlist_header = (
+            f"All {full_count} ingested files are authorized. The prompt shows a compact top "
+            f"{prompt_visible_count}; call search_catalog to reach omitted files."
         )
     else:
         shortlist_header = f"All {full_count} ingested files are shown below."
@@ -348,11 +514,12 @@ def build_system_prompt(
     # so the LLM reads its constraints alongside its work instructions.
     # Workflow topology note (reachable joins + orphaned files) is injected
     # immediately after the SQL context block so the planner sees both together.
-    _context_block = ""
+    _raw_context_block = ""
     if sql_context_note:
-        _context_block = sql_context_note
+        _raw_context_block = sql_context_note
     if workflow_topology_note:
-        _context_block = "\n\n".join(filter(None, [_context_block, workflow_topology_note]))
+        _raw_context_block = "\n\n".join(filter(None, [_raw_context_block, workflow_topology_note]))
+    _context_block = _sanitize_execution_context(_raw_context_block)
     if _context_block:
         _marker = "--- HOW TO WORK ---"
         if _marker in system_prompt:
@@ -362,6 +529,7 @@ def build_system_prompt(
         else:
             system_prompt += "\n\n" + _context_block
 
+    conversation_tokens = 0
     if conversation_context:
         # Truncate conversation history to bound per-request token cost.
         # Long conversations grow linearly; most context is in the last few turns.
@@ -372,6 +540,7 @@ def build_system_prompt(
             nl = _ctx.find("\n")
             if 0 < nl < 200:
                 _ctx = _ctx[nl + 1:]
+            conversation_tokens = _token_count(_ctx)
         system_prompt += (
             "\n\n--- CONVERSATION HISTORY ---\n"
             "The user is continuing a conversation. Use this context to understand "
@@ -381,11 +550,28 @@ def build_system_prompt(
             "---\n"
         )
 
-    chat_logger.info("system_prompt_size",
-                     chars=len(system_prompt),
-                     words=len(system_prompt.split()),
-                     parquet_file_count=len(parquet_paths_all),
-                     has_conversation_context=bool(conversation_context))
+    final_prompt_was_capped = False
+    prompt_tokens_before_hard_cap = _token_count(system_prompt)
+    if prompt_tokens_before_hard_cap > _SYSTEM_PROMPT_TOKEN_BUDGET:
+        system_prompt = _cap_text_tokens(system_prompt, _SYSTEM_PROMPT_TOKEN_BUDGET)
+        final_prompt_was_capped = True
+
+    final_tokens = _token_count(system_prompt)
+    chat_logger.info(
+        "system_prompt_size",
+        chars=len(system_prompt),
+        tokens=final_tokens,
+        token_budget=_SYSTEM_PROMPT_TOKEN_BUDGET,
+        prompt_tokens_before_hard_cap=prompt_tokens_before_hard_cap,
+        final_prompt_was_capped=final_prompt_was_capped,
+        catalog_tokens=_token_count(parquet_note),
+        execution_context_tokens=_token_count(_context_block),
+        raw_execution_context_tokens=_token_count(_raw_context_block),
+        conversation_tokens=conversation_tokens,
+        parquet_file_count=len(parquet_paths_all),
+        shown_catalog_file_count=min(len(parquet_paths_all), _MAX_PROMPT_TABLES),
+        has_conversation_context=bool(conversation_context),
+    )
 
     return system_prompt
 

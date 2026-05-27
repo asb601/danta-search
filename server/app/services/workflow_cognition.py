@@ -777,49 +777,41 @@ def score_workflow_candidate(
     )
 
 
-def render_workflow_assembly_note(result: WorkflowAssemblyResult, *, max_candidates: int = 10) -> str:
-    """Render planner-visible workflow assembly facts."""
+def render_workflow_assembly_note(result: WorkflowAssemblyResult, *, max_candidates: int = 0) -> str:
+    """Render only execution-critical workflow constraints for the prompt.
+
+    Full candidate decisions and scoring evidence stay in WorkflowAssemblyResult
+    and orchestration trace. The LLM only needs task boundaries, temporal scope,
+    and the runtime policy guardrails required to avoid invalid workflow joins.
+    """
     if not result.workflow_query:
         return ""
-    lines = ["--- QUERY-TIME WORKFLOW ASSEMBLY ---"]
+    lines = ["--- WORKFLOW EXECUTION CONSTRAINTS ---"]
     lines.append(
-        "workflow_query: true; "
-        f"tasks: {len(result.tasks)}; "
-        f"selected_candidates: {result.summary.get('selected_count', 0)}; "
-        f"rejected_candidates: {result.summary.get('rejected_count', 0)}"
+        "workflow_query=true; "
+        f"tasks={len(result.tasks)}; "
+        f"selected_evidence_tables={result.summary.get('selected_count', 0)}"
     )
     if result.query_temporal_window[0] and result.query_temporal_window[1]:
         lines.append(
-            "temporal_window: "
+            "temporal_window="
             f"{result.query_temporal_window[0]} to {result.query_temporal_window[1]}"
         )
     if result.tasks:
-        lines.append("WORKFLOW TASKS:")
-        for task in result.tasks[:8]:
+        lines.append("tasks:")
+        for task in result.tasks[:4]:
             targets = ",".join(task.target_business_objects[:4]) or "unspecified_object"
             domains = ",".join(task.target_operational_domains[:4]) or "unspecified_domain"
             lines.append(
-                f"  - {task.task_id}: {task.label}; objects={targets}; domains={domains}; "
-                f"signals={','.join(task.required_signals[:4])}"
+                f"  - {task.task_id}: {task.label}; objects={targets}; domains={domains}; signals={','.join(task.required_signals[:4])}"
             )
     if result.warnings:
-        lines.append("WORKFLOW WARNINGS:")
-        for warning in result.warnings[:8]:
+        lines.append("warnings:")
+        for warning in result.warnings[:3]:
             lines.append(f"  - {warning}")
-    if result.decisions:
-        lines.append("CANDIDATE WORKFLOW DECISIONS:")
-        for decision in result.decisions[:max_candidates]:
-            status = "selected" if decision.selected else "rejected"
-            reasons = ",".join(decision.rejection_reasons or decision.rationale or ["scored"])
-            lines.append(
-                f"  - {decision.blob_path}: {status}; score={decision.score:.2f}; "
-                f"task={decision.best_task_id or 'none'}; temporal={decision.temporal_eligibility.status}; "
-                f"authority={decision.transactional_authority.source_type}:{decision.transactional_authority.score:.2f}; "
-                f"reasons={reasons}"
-            )
     lines.append(
-        "policy: out-of-window candidates and transformed analytics surfaces are not primary "
-        "workflow evidence unless the query explicitly asks for analytical summaries."
+        "policy: use transactional workflow evidence first; do not use transformed analytics surfaces "
+        "as primary evidence unless explicitly requested."
     )
     lines.append("---")
     return "\n".join(lines)

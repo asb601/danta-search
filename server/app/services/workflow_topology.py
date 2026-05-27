@@ -11,10 +11,10 @@ PURPOSE:
 WHAT THE PLANNER GAINS:
   1. Direct joins (both in shortlist) — already in sql_context, listed here for context
   2. Reachable joins (path via non-shortlisted table) — new visibility
-  3. Isolated files — explicit signal that no approved path exists
+    3. Isolated files — explicit signal that no approved path exists
 
-  The planner can then call search_catalog for intermediate tables, or call
-  extract_relations to find candidate paths before concluding files can't be joined.
+    Full bridge details are observability data. Prompt rendering is intentionally
+    compact so the LLM receives only execution-critical reachability guardrails.
 
 DB QUERY STRATEGY:
   ONE additional query per request.
@@ -25,7 +25,7 @@ DESIGN CONSTRAINTS:
   - ONE DB query. Non-fatal: returns empty on any error.
   - Zero LLM calls.
   - Does NOT replace or modify the approved_joins list from sql_context_builder.
-  - Only appends a supplementary prompt section.
+    - Only appends a compact supplementary prompt section when callers choose to use it.
   - _MAX_REACHABLE_PATHS = 8 cap prevents prompt overflow.
 """
 from __future__ import annotations
@@ -238,44 +238,21 @@ def _render_topology_note(
     reachable_paths: list[ReachablePath],
     orphaned_tables: list[str],
 ) -> str:
-    """Render the topology summary as an injectable prompt section."""
+    """Render a compact topology summary without bridge diagnostics."""
     if not reachable_paths and not orphaned_tables:
         return ""
 
-    lines = ["--- WORKFLOW TOPOLOGY ---"]
+    lines = ["--- JOIN REACHABILITY SUMMARY ---"]
 
     if reachable_paths:
         lines.append(
-            "REACHABLE JOIN PATHS (require an intermediate table not yet in context):"
+            f"reachable_external_paths={len(reachable_paths)}; call extract_relations with selected tables if a bridge join is required."
         )
-        lines.append(
-            "  These joins are structurally available. To use them, call"
-            " search_catalog with the intermediate table hint below."
-        )
-        for rp in reachable_paths[:_MAX_REACHABLE_PATHS]:
-            details = []
-            if rp.via_blob_path:
-                details.append(f"file: {rp.via_blob_path}")
-            if rp.via_domain_labels:
-                details.append(f"roles: {', '.join(rp.via_domain_labels[:4])}")
-            detail_suffix = f" ({'; '.join(details)})" if details else ""
-            lines.append(
-                f"  {rp.source_table}  →  {rp.target_table}"
-                f"  via {rp.via_table}{detail_suffix}  [confidence: {rp.path_confidence:.2f}]"
-            )
-        lines.append("")
 
     if orphaned_tables:
-        lines.append(
-            "ISOLATED FILES (no approved join path found to any other shortlisted file):"
-        )
-        lines.append(
-            "  Call extract_relations to check for candidate join paths before"
-            " concluding these files cannot be joined."
-        )
-        for t in orphaned_tables[:6]:
-            lines.append(f"  {t}")
-        lines.append("")
+        shown = ", ".join(orphaned_tables[:6])
+        suffix = f" (+{len(orphaned_tables) - 6} more)" if len(orphaned_tables) > 6 else ""
+        lines.append(f"isolated_tables={shown}{suffix}; do not invent joins for isolated tables.")
 
     lines.append("---")
     return "\n".join(lines)

@@ -188,19 +188,25 @@ class _PipelinePrettyFormatter(logging.Formatter):
         parquet = ev.get("parquet_file_count", "?")
         rels    = ev.get("has_relationships", False)
         ctx     = ev.get("has_conversation_context", False)
-        prompt  = ev.get("system_prompt", "")
+        prompt  = ev.get("system_prompt_preview") or ev.get("system_prompt", "")
+        prompt_chars = ev.get("system_prompt_chars", len(str(prompt)))
+        prompt_tokens = ev.get("system_prompt_tokens", "?")
+        truncated = ev.get("system_prompt_preview_truncated", False)
         lines   = [
-            self._step_header("3", "SYSTEM PROMPT BUILT (sent to LLM)", ts),
+            self._step_header("3", "SYSTEM PROMPT BUILT (bounded execution context)", ts),
             f"  Query      : {ev.get('query', '')}",
             f"  Container  : {ev.get('container', '')}",
             f"  Files in catalog  : {files}  |  Parquet-ready: {parquet}",
             f"  Relationships     : {'yes' if rels else 'none'}  |  Conv context: {'yes' if ctx else 'none'}",
+            f"  Prompt size        : {prompt_chars} chars  |  {prompt_tokens} tokens",
             _DIV,
-            "  FULL PROMPT SENT TO LLM:",
+            "  PROMPT PREVIEW (full prompt omitted from logs):",
             _DIV,
         ]
         for line in prompt.splitlines():
             lines.append("  " + line)
+        if truncated:
+            lines.append("  ... preview truncated; prompt text is bounded before LLM invocation.")
         lines.append(_DIV2)
         return "\n".join(lines)
 
@@ -229,6 +235,8 @@ class _PipelinePrettyFormatter(logging.Formatter):
                     lines.append("    " + line)
                 if len(content.splitlines()) > 60:
                     lines.append(f"    … ({len(content.splitlines()) - 60} more lines)")
+                if m.get("content_truncated"):
+                    lines.append(f"    … content truncated for logging ({m.get('content_chars')} chars total)")
             if tid:
                 lines.append(f"    tool_call_id: {tid}")
             if tcs:
@@ -284,7 +292,7 @@ class _PipelinePrettyFormatter(logging.Formatter):
             f"\n  ⚙  TOOL START  [{ts}]  #{iter_n}  →  {tool}",
         ]
         if inp:
-            inp_str = json.dumps(inp, indent=4, default=str)
+            inp_str = inp if isinstance(inp, str) else json.dumps(inp, indent=4, default=str)
             for line in inp_str.splitlines():
                 lines.append("    " + line)
         return "\n".join(lines)
