@@ -22,6 +22,7 @@ TRACE STAGES (all optional — absent if pipeline short-circuited):
   graph_expansion      — anchor files + expansion result
   retrieval_fusion     — retrieved files + RRF scores (summary)
   retrieval_decision   — per-file survival/rejection telemetry with channels + reasons
+    workflow_assembly    — query-time workflow tasks, candidate scores, temporal/authority decisions
   approved_joins       — validated join pairs + graph_verified / fallback_inferred flags
   grounding_quality    — hydration coverage, graph health, retrieval degradation level
   execution_strategy   — cluster mode + cluster breakdown
@@ -222,6 +223,23 @@ class OrchestrationTrace:
                 "shortlisted_count": len(shortlisted),
                 "rejected_count":    len(rejected),
             })
+        except Exception:
+            pass
+
+    def set_workflow_assembly(self, workflow_result: Any) -> None:
+        """Record query-time workflow cognition decisions.
+
+        Captures decomposed workflow tasks, candidate selection/rejection
+        rationale, temporal eligibility, transactional authority, and summary
+        warning flags. The result object is intentionally duck-typed so the
+        trace module does not depend on service-layer dataclasses.
+        """
+        try:
+            if hasattr(workflow_result, "to_trace_dict"):
+                payload = workflow_result.to_trace_dict()
+            else:
+                payload = workflow_result
+            self._stages["workflow_assembly"] = _safe_val(payload)
         except Exception:
             pass
 

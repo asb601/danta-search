@@ -33,6 +33,7 @@ from app.agent.prompts.prompt_builder import build_system_prompt
 from app.agent.search_normalization import tokenize_search_query
 from app.services.workflow_capability_resolver import resolve_workflow_requirements
 from app.services.semantic_expansion import decide_expansion, render_workflow_continuity_note
+from app.services.workflow_cognition import assemble_workflow_cognition, render_workflow_assembly_note
 from app.retrieval.semantic_recovery import semantic_recovery_retrieve
 from app.services.workflow_topology import build_workflow_topology
 from app.retrieval.orchestrator import (
@@ -928,6 +929,38 @@ async def _build_agent_context(
             )
             pipeline_logger.info("workflow_requirements_after_expansion", **_workflow_reqs.to_dict())
 
+    # ── STEP 2.58: QUERY-TIME WORKFLOW COGNITION ASSEMBLY ───────────────────
+    # Builds lightweight workflow primitives from the already-loaded catalog,
+    # decomposes workflow-like queries into capability tasks, and reranks the
+    # shortlist by workflow fit, temporal eligibility, process continuity, and
+    # transactional authority. This is deliberately query-time assembly: no ERP
+    # ontology generation and no ingestion-time workflow intelligence.
+    _workflow_assembly = assemble_workflow_cognition(
+        query=query,
+        intent_plan=intent_plan,
+        current_shortlist=catalog,
+        full_catalog=full_catalog,
+        grounding_quality=_grounding_quality,
+    )
+    if _workflow_assembly.workflow_query:
+        catalog = _workflow_assembly.ranked_shortlist
+        parquet_paths_all = {
+            k: v for k, v in all_parquet_paths.items()
+            if k in {e.get("blob_path") for e in catalog}
+        }
+        if not retrieved_with_scores:
+            top_blob_paths = {e.get("blob_path") for e in catalog[:3] if e.get("blob_path")}
+        pipeline_logger.info(
+            "workflow_cognition_assembled",
+            **_workflow_assembly.summary,
+            tasks=[task.task_id for task in _workflow_assembly.tasks],
+            warnings=_workflow_assembly.warnings,
+            selected=[d.blob_path for d in _workflow_assembly.decisions if d.selected][:8],
+            rejected=[d.blob_path for d in _workflow_assembly.decisions if not d.selected][:8],
+        )
+    trace.set_workflow_assembly(_workflow_assembly)
+    _workflow_assembly_note = render_workflow_assembly_note(_workflow_assembly)
+
     _workflow_continuity_note = render_workflow_continuity_note(
         _workflow_reqs,
         _expansion,
@@ -1183,6 +1216,7 @@ async def _build_agent_context(
                 sql_context_note=sql_context_note,
                 top_blob_paths=top_blob_paths,
                 workflow_topology_note="\n\n".join(filter(None, [
+                    _workflow_assembly_note,
                     _workflow_continuity_note,
                     _wf_topology.topology_note,
                 ])),
