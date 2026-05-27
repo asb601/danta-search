@@ -27,9 +27,12 @@ from app.agent.catalog_hydration import hydrate_files, merge_hydrated
 from app.agent.graph.graph_builder import build_graph
 from app.agent.llm import get_llm_mini
 from app.services.business_intent_planner import BusinessIntentPlan, build_business_intent_plan
+from app.services.brain_prompt_slice import render_brain_context_prompt
+from app.services.brain_service import BrainService, record_brain_context_trace
 from app.services.entity_resolver import EntityCandidate, resolve_entities
 from app.services.sql_context_builder import build_sql_context
 from app.services.execution_strategy import plan_execution_strategy
+from app.services.plan_ir import build_plan_ir_from_context, validate_plan_ir
 from app.agent.prompts.prompt_builder import build_system_prompt
 from app.agent.search_normalization import tokenize_search_query
 from app.services.workflow_capability_resolver import resolve_workflow_requirements
@@ -524,6 +527,38 @@ async def _build_agent_context(
     allowed_blob_paths = file_identity_map.allowed_physical_uris()
     trace.set_file_identity_map(file_identity_map)
 
+    # ── STEP 2.42: GOVERNED BRAIN CONTEXT ──────────────────────────────────
+    # Read-only, bounded semantic memory assembled from ingestion-time facts.
+    # It may guide retrieval/ranking and validation, but it never authorizes
+    # files, joins, physical paths, or SQL execution.
+    brain_context = None
+    brain_anchor_file_ids: list[str] = []
+    try:
+        brain_context = await BrainService(db).resolve(
+            query=query,
+            container_id=resolved_container_id,
+            user_id=user_id or None,
+            intent_plan=intent_plan,
+            authorized_file_ids=set(allowed_file_ids),
+        )
+        brain_anchor_file_ids = list(brain_context.retrieval_guidance.anchor_file_ids)
+        if brain_context.records:
+            metrics.inc("brain_context_resolved_count")
+        else:
+            metrics.inc("brain_context_empty_count")
+        pipeline_logger.info(
+            "brain_context_resolved",
+            records=len(brain_context.records),
+            anchors=len(brain_anchor_file_ids),
+            ambiguity_flags=brain_context.retrieval_guidance.ambiguity_flags,
+            token_estimate=brain_context.token_estimate,
+        )
+    except Exception as exc:
+        brain_context = None
+        brain_anchor_file_ids = []
+        metrics.inc("brain_context_empty_count")
+        pipeline_logger.warning("brain_context_failed_open", error=str(exc)[:200])
+
     # ── STEP 2.45: ENTITY RESOLUTION ─────────────────────────────────────────
     # Deterministic, metadata-driven. Answers WHERE each planner entity lives.
     # One batch DB query (column_semantic_roles). No LLM. No schema-wide scans.
@@ -554,6 +589,7 @@ async def _build_agent_context(
         for e in full_catalog
         if e.get("blob_path") in resolver_pinned_blobs and e.get("file_id")
     ] if resolver_pinned_blobs else []
+    retrieval_anchor_file_ids = list(dict.fromkeys(resolver_pinned_file_ids + brain_anchor_file_ids))
 
     # ── STEP 2.5: RETRIEVAL — filter catalog to top-K relevant files ─────────
     # Run the 9-stage retrieval pipeline (temporal → BM25 → fuzzy → vector →
@@ -570,7 +606,8 @@ async def _build_agent_context(
             retrieved_with_scores = await retrieve_with_scores(
                 query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K,
                 container_id=container_id,
-                anchor_file_ids=resolver_pinned_file_ids or None,
+                anchor_file_ids=retrieval_anchor_file_ids or None,
+                brain_context=brain_context,
             )
         except Exception as exc:
             retrieval_error = str(exc)[:200]
@@ -1072,9 +1109,74 @@ async def _build_agent_context(
         cluster_sizes=[len(c.file_ids) for c in exec_strategy.clusters],
     )
     trace.set_execution_strategy(exec_strategy)
-    # Both constraint sections are injected at the same prompt location
-    # (before HOW TO WORK), so combine them into a single note.
-    sql_context_note = "\n\n".join(filter(None, [sql_context_note, exec_strategy_note]))
+
+    # Bind BrainContext to the final execution envelope and persist a compact
+    # trace row. The same bounded slice is then injected with SQL constraints.
+    brain_context_note = ""
+    if brain_context:
+        try:
+            brain_context = brain_context.with_execution_scope(
+                shortlist_file_ids=shortlist_ids,
+                approved_join_count=len(getattr(sql_ctx, "approved_joins", []) or []),
+                execution_mode=exec_strategy.mode,
+            )
+            trace.set_brain_context(brain_context)
+            brain_context_note = render_brain_context_prompt(brain_context)
+            await record_brain_context_trace(
+                db,
+                request_id=req_id_for_trace,
+                container_id=resolved_container_id,
+                user_id=user_id or None,
+                query=query,
+                context=brain_context,
+            )
+        except Exception as exc:
+            pipeline_logger.warning("brain_context_trace_failed", error=str(exc)[:200])
+
+    # ── STEP 2.85: PLAN IR + VALIDATOR-FIRST ENVELOPE ──────────────────────
+    plan_ir_note = ""
+    try:
+        plan_ir = build_plan_ir_from_context(
+            intent_plan=intent_plan,
+            catalog=catalog,
+            sql_ctx=sql_ctx,
+            exec_strategy=exec_strategy,
+            brain_context=brain_context,
+        )
+        envelope = brain_context.execution_envelope if brain_context else None
+        if envelope is None:
+            from app.services.brain_context import ExecutionEnvelope  # noqa: PLC0415
+
+            envelope = ExecutionEnvelope(shortlist_file_ids=shortlist_ids)
+        plan_validation = validate_plan_ir(plan_ir, envelope, intent_plan=intent_plan)
+        trace.set_plan_ir(plan_ir, plan_validation)
+        warnings = sum(1 for issue in plan_validation.issues if issue.severity == "warning")
+        errors = sum(1 for issue in plan_validation.issues if issue.severity == "error")
+        if warnings:
+            metrics.inc("plan_ir_validation_warning_count", warnings)
+        if errors:
+            metrics.inc("plan_ir_validation_error_count", errors)
+        plan_ir_note = plan_ir.to_prompt_section(plan_validation)
+        pipeline_logger.info(
+            "plan_ir_validated",
+            stages=len(plan_ir.stages),
+            kpi_contracts=len(plan_ir.kpi_contracts),
+            ok=plan_validation.ok,
+            warnings=warnings,
+            errors=errors,
+        )
+    except Exception as exc:
+        plan_ir = None
+        pipeline_logger.warning("plan_ir_failed_open", error=str(exc)[:200])
+
+    # Constraint sections are injected at the same prompt location
+    # (before HOW TO WORK), so combine them into a single bounded note.
+    sql_context_note = "\n\n".join(filter(None, [
+        brain_context_note,
+        sql_context_note,
+        exec_strategy_note,
+        plan_ir_note,
+    ]))
 
     # ── STEP 2.9: GRAPH HEALTH + ORCHESTRATION CONFIDENCE ───────────────────
     # graph_health (pure CPU) and _avg_ing_conf (pure math) are independent of
@@ -1187,6 +1289,8 @@ async def _build_agent_context(
         "intent_entities": list(intent_plan.entities) if intent_plan else [],
         "confidence_level": confidence.level,
         "confidence_score": confidence.score,
+        "brain_memory_ids": [record.id for record in brain_context.records] if brain_context else [],
+        "plan_ir_id": getattr(plan_ir, "id", None),
     }
 
     # Build tools
@@ -1312,6 +1416,8 @@ async def _build_agent_context(
         "entity_resolution": entity_resolution,
         "graph_health": graph_health,
         "confidence": confidence,
+        "brain_context": brain_context,
+        "plan_ir": plan_ir,
     }
 
 

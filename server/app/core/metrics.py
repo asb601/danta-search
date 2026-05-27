@@ -66,6 +66,12 @@ _counters: dict[str, int | float] = {
     # Confidence telemetry
     "low_confidence_query_count":  0,   # orchestration confidence < 0.50
     "ingestion_audit_error_count": 0,   # ingestion audit found error-level findings
+    # Governed semantic memory / BrainContext
+    "semantic_memory_records_upserted": 0,
+    "brain_context_resolved_count": 0,
+    "brain_context_empty_count": 0,
+    "plan_ir_validation_warning_count": 0,
+    "plan_ir_validation_error_count": 0,
 }
 
 

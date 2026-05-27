@@ -19,6 +19,7 @@ from app.core.database import async_session as _async_session
 from app.core.db_logger import log_ingest_event as _db_log
 from app.core.duckdb_client import sample_file
 from app.core.logger import ingest_logger
+from app.core import metrics
 from app.models.container import ContainerConfig
 from app.models.file import File
 from app.models.file_analytics import FileAnalytics
@@ -815,6 +816,24 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
             ingest_logger.warning(
                 "ingestion_confidence_failed", file_id=file_id, error=str(exc)[:200]
             )
+
+        # ── Governed semantic memory extraction ──────────────────────────────
+        # Runs after all ingestion stages so metadata, roles, semantic layer,
+        # enrichment, relationships, and confidence are available as evidence.
+        try:
+            from app.services.semantic_memory_extractor import upsert_semantic_memory_for_file  # noqa: PLC0415
+
+            memory_result = await upsert_semantic_memory_for_file(file_id, db)
+            metrics.inc("semantic_memory_records_upserted", int(memory_result.get("records") or 0))
+            ingest_logger.info(
+                "semantic_memory_stage",
+                file_id=file_id,
+                records=memory_result.get("records", 0),
+                deprecated=memory_result.get("deprecated", 0),
+                duration_ms=memory_result.get("duration_ms"),
+            )
+        except Exception as exc:
+            ingest_logger.warning("semantic_memory_failed", file_id=file_id, error=str(exc)[:200])
 
     try:
         from app.agent.catalog_cache import invalidate_catalog_cache  # noqa: PLC0415

@@ -22,7 +22,9 @@ TRACE STAGES (all optional — absent if pipeline short-circuited):
   graph_expansion      — anchor files + expansion result
   retrieval_fusion     — retrieved files + RRF scores (summary)
     retrieval_decision   — per-file survival/rejection telemetry with channels + reasons
+        brain_context       — governed semantic memory selected for this request
     workflow_assembly    — query-time workflow tasks, candidate scores, temporal/authority decisions
+    plan_ir             — deterministic staged Plan IR + validator findings
   approved_joins       — validated join pairs + graph_verified / fallback_inferred flags
   grounding_quality    — hydration coverage, graph health, retrieval degradation level
   execution_strategy   — cluster mode + cluster breakdown
@@ -245,6 +247,43 @@ class OrchestrationTrace:
             else:
                 payload = workflow_result
             self._stages["workflow_assembly"] = _safe_val(payload)
+        except Exception:
+            pass
+
+    def set_brain_context(self, brain_context: Any) -> None:
+        """Record bounded semantic memory selected for the request."""
+        try:
+            if hasattr(brain_context, "to_trace_dict"):
+                payload = brain_context.to_trace_dict()
+            else:
+                payload = brain_context
+            self._stages["brain_context"] = _safe_val(payload)
+        except Exception:
+            pass
+
+    def set_plan_ir(self, plan_ir: Any, validation: Any) -> None:
+        """Record deterministic Plan IR and validator output."""
+        try:
+            stages = []
+            for stage in list(getattr(plan_ir, "stages", []) or [])[:_MAX_LIST]:
+                stages.append({
+                    "id": getattr(stage, "id", None),
+                    "operation": getattr(stage, "operation", None),
+                    "file_count": len(getattr(stage, "file_ids", []) or []),
+                    "depends_on": list(getattr(stage, "depends_on", []) or []),
+                })
+            if hasattr(validation, "to_trace_dict"):
+                validation_payload = validation.to_trace_dict()
+            else:
+                validation_payload = validation
+            self._stages["plan_ir"] = _safe_val({
+                "plan_id": getattr(plan_ir, "id", None),
+                "stages": stages,
+                "stage_count": len(getattr(plan_ir, "stages", []) or []),
+                "kpi_contract_count": len(getattr(plan_ir, "kpi_contracts", []) or []),
+                "lifecycle_validations": list(getattr(plan_ir, "lifecycle_validations", []) or []),
+                "validation": validation_payload,
+            })
         except Exception:
             pass
 

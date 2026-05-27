@@ -23,6 +23,7 @@ from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
 from app.models.semantic_layer import SemanticEntity, SemanticRelationship
+from app.models.semantic_memory import SemanticMemoryRecord
 from app.services.semantic_roles import is_dynamic_role, role_kind
 
 
@@ -73,6 +74,7 @@ async def _file_id_batch(
 
 async def _clear_semantic_artifacts(container_id: str, batch_size: int) -> dict[str, int]:
     deleted = {
+        "semantic_memory_records": 0,
         "semantic_relationships": 0,
         "semantic_entities": 0,
         "file_relationships": 0,
@@ -80,6 +82,10 @@ async def _clear_semantic_artifacts(container_id: str, batch_size: int) -> dict[
     }
 
     async with async_session() as db:
+        result = await db.execute(
+            delete(SemanticMemoryRecord).where(SemanticMemoryRecord.container_id == container_id)
+        )
+        deleted["semantic_memory_records"] = int(result.rowcount or 0)
         result = await db.execute(
             delete(SemanticRelationship).where(SemanticRelationship.container_id == container_id)
         )
@@ -159,6 +165,14 @@ async def _run_semantic_enrichment_for_file(file_id: str) -> int:
     return int(result.get("additions") or 0)
 
 
+async def _run_semantic_memory_for_file(file_id: str) -> int:
+    from app.services.semantic_memory_extractor import upsert_semantic_memory_for_file
+
+    async with async_session() as db:
+        result = await upsert_semantic_memory_for_file(file_id, db)
+    return int(result.get("records") or 0)
+
+
 async def rebuild_container_semantics(
     container_id: str,
     *,
@@ -188,6 +202,7 @@ async def rebuild_container_semantics(
         "relationship_rows_created": 0,
         "semantic_relationships_upserted": 0,
         "semantic_enrichment_additions": 0,
+        "semantic_memory_records_upserted": 0,
         "file_failures": [],
     }
 
@@ -265,6 +280,13 @@ async def rebuild_container_semantics(
                 if len(counters["file_failures"]) < failure_sample_limit:
                     counters["file_failures"].append({"file_id": file_id, "stage": "semantic_enrichment", "error": str(exc)[:300]})
                 ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="semantic_enrichment", error=str(exc)[:300])
+
+            try:
+                counters["semantic_memory_records_upserted"] += await _run_semantic_memory_for_file(file_id)
+            except Exception as exc:
+                if len(counters["file_failures"]) < failure_sample_limit:
+                    counters["file_failures"].append({"file_id": file_id, "stage": "semantic_memory", "error": str(exc)[:300]})
+                ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="semantic_memory", error=str(exc)[:300])
 
     async with async_session() as db:
         counters["evaluation"] = await evaluate_container_semantics(container_id, db, batch_size=batch_size)
@@ -426,5 +448,8 @@ async def evaluate_container_semantics(
         "indexes": {
             "key_registry_rows": key_registry_rows,
             "semantic_entities": semantic_entity_count,
+            "semantic_memory_records": int((await db.execute(
+                select(func.count(SemanticMemoryRecord.id)).where(SemanticMemoryRecord.container_id == container_id)
+            )).scalar_one() or 0),
         },
     }

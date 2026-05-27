@@ -28,6 +28,7 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.logs import router as logs_router
 from app.api.v1.access import router as access_router
 from app.api.v1.organizations import router as organizations_router
+from app.api.v1.semantic_memory import router as semantic_memory_router
 import app.models.file  # ensure File table is created
 import app.models.access_request  # ensure AccessRequest table is created
 import app.models.container  # ensure ContainerConfig table is created
@@ -35,6 +36,7 @@ import app.models.file_metadata  # ensure FileMetadata table is created
 import app.models.file_analytics  # ensure FileAnalytics table is created
 import app.models.column_key_registry  # ensure ColumnKeyRegistry table is created
 import app.models.semantic_layer  # ensure semantic layer tables are created
+import app.models.semantic_memory  # ensure governed semantic memory tables are created
 import app.models.background_job  # ensure BackgroundJob table is created
 import app.models.conversation  # ensure Conversation + Message tables are created
 import app.models.organization  # ensure Organization table is created
@@ -146,6 +148,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("semantic_layer_migration_failed", error=str(exc)[:300])
 
+    # Governed semantic memory + BrainContext trace tables
+    from app.migrations.semantic_memory_schema_upgrade import migrate as _semantic_memory_migrate
+    try:
+        await _semantic_memory_migrate()
+    except Exception as exc:
+        chat_logger.warning("semantic_memory_migration_failed", error=str(exc)[:300])
+
     # Drop legacy audit_logs table — all audit events now go to server_logs
     from app.migrations.drop_audit_logs import migrate as _drop_audit_logs
     try:
@@ -241,6 +250,7 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(logs_router, prefix="/api")
 app.include_router(access_router, prefix="/api")
 app.include_router(organizations_router, prefix="/api")
+app.include_router(semantic_memory_router, prefix="/api")
 
 
 @app.get("/api/health")

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import contextvars
 from datetime import date
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,6 +114,35 @@ def _trust_attenuate(
         return fused  # never block retrieval
 
 
+def _brain_guidance_rescore(
+    fused: list[tuple[FileMetadata, float]],
+    brain_context: Any | None,
+) -> list[tuple[FileMetadata, float]]:
+    """Apply bounded semantic-memory authority as a small ranking modifier.
+
+    This never adds files and never bypasses RBAC. It only reorders files that
+    already survived the authorized retrieval pipeline.
+    """
+    if not fused or not brain_context:
+        return fused
+    try:
+        guidance = getattr(brain_context, "retrieval_guidance", None)
+        authority_by_file_id = dict(getattr(guidance, "authority_by_file_id", {}) or {})
+        anchor_file_ids = set(getattr(guidance, "anchor_file_ids", []) or [])
+        if not authority_by_file_id and not anchor_file_ids:
+            return fused
+        rescored: list[tuple[FileMetadata, float]] = []
+        for meta, score in fused:
+            authority = float(authority_by_file_id.get(meta.file_id, 0.0) or 0.0)
+            anchor_bonus = 0.08 if meta.file_id in anchor_file_ids else 0.0
+            multiplier = 1.0 + min(0.25, authority * 0.18 + anchor_bonus)
+            rescored.append((meta, score * multiplier))
+        rescored.sort(key=lambda item: item[1], reverse=True)
+        return rescored
+    except Exception:
+        return fused
+
+
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _prune_and_dedup(
@@ -151,6 +181,7 @@ async def retrieve_with_scores(
     top_k: int = 20,
     container_id: str | None = None,
     anchor_file_ids: list[str] | None = None,
+    brain_context: Any | None = None,
 ) -> list[tuple[FileMetadata, float]]:
     """
     Full 9-stage retrieval pipeline.
@@ -232,7 +263,10 @@ async def retrieve_with_scores(
                 _record_stage_error("opensearch_graph_expand", exc)
                 chat_logger.warning("retrieval_graph_expand_error", error=str(exc)[:200])
                 graph_results = []
-            _os_fused = _trust_attenuate(rrf_fuse([os_results, graph_results], top_k=top_k))
+            _os_fused = _brain_guidance_rescore(
+                _trust_attenuate(rrf_fuse([os_results, graph_results], top_k=top_k)),
+                brain_context,
+            )
             # ── Telemetry side-effects (OpenSearch path) ─────────────────────
             _os_cm: dict[str, list[str]] = {}
             for _m, _ in os_results:
@@ -333,7 +367,10 @@ async def retrieve_with_scores(
                 break
             _trim = min(_excess, len(_all_candidates[_trim_idx]))
             _all_candidates[_trim_idx] = _all_candidates[_trim_idx][:-_trim]
-    fused = _trust_attenuate(rrf_fuse(_all_candidates, top_k=top_k))
+    fused = _brain_guidance_rescore(
+        _trust_attenuate(rrf_fuse(_all_candidates, top_k=top_k)),
+        brain_context,
+    )
 
     # ── Telemetry side-effects (Postgres path) ───────────────────────────────
     # Build channel membership map BEFORE _all_candidates is trimmed above;

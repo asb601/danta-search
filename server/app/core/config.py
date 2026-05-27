@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     OPENSEARCH_SHARDS: int = 1
     OPENSEARCH_REPLICAS: int = 0
 
+    # Governed SemanticMemory / BrainContext runtime caps. These are deployment
+    # tunables; they do not encode tenant-specific business logic.
+    BRAIN_CONTEXT_MAX_RECORDS: int = 8
+    BRAIN_CONTEXT_MAX_CANDIDATES: int = 60
+    BRAIN_CONTEXT_MAX_TERMS: int = 24
+    BRAIN_CONTEXT_MAX_ANCHOR_FILES: int = 8
+    BRAIN_CONTEXT_TOKEN_BUDGET: int = 900
+    BRAIN_CONTEXT_MIN_SCORE: float = 0.12
+    BRAIN_CONTEXT_TRACE_ENABLED: bool = True
+    PLAN_IR_MAX_STAGES: int = 6
+    PLAN_IR_MAX_CONTRACTS: int = 12
+
     model_config = {"env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"), "extra": "ignore"}
 
     def __getattr__(self, name: str):
