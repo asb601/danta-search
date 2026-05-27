@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     # Governed SemanticMemory / BrainContext runtime caps. These are deployment
     # tunables; they do not encode tenant-specific business logic.
     BRAIN_CONTEXT_MAX_RECORDS: int = 8
+    BRAIN_CONTEXT_MAX_DOMAINS: int = 6
     BRAIN_CONTEXT_MAX_CANDIDATES: int = 60
     BRAIN_CONTEXT_MAX_TERMS: int = 24
     BRAIN_CONTEXT_MAX_ANCHOR_FILES: int = 8
@@ -104,6 +105,11 @@ class Settings(BaseSettings):
     BRAIN_CONTEXT_TRACE_ENABLED: bool = True
     PLAN_IR_MAX_STAGES: int = 6
     PLAN_IR_MAX_CONTRACTS: int = 12
+    SEMANTIC_DOMAIN_MAX_SOURCE_MEMORIES: int = 800
+    SEMANTIC_DOMAIN_MAX_CLUSTERS: int = 120
+    SEMANTIC_DOMAIN_MIN_FILES: int = 2
+    SEMANTIC_DOMAIN_MAX_TERMS: int = 28
+    SEMANTIC_DOMAIN_DECAY_PER_CONFLICT: float = 0.08
 
     model_config = {"env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"), "extra": "ignore"}
 

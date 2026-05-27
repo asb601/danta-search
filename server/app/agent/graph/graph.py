@@ -541,16 +541,23 @@ async def _build_agent_context(
             intent_plan=intent_plan,
             authorized_file_ids=set(allowed_file_ids),
         )
-        brain_anchor_file_ids = list(brain_context.retrieval_guidance.anchor_file_ids)
+        brain_anchor_file_ids = list(dict.fromkeys(
+            list(brain_context.retrieval_guidance.anchor_file_ids)
+            + list(brain_context.retrieval_guidance.domain_anchor_file_ids)
+        ))
         if brain_context.records:
             metrics.inc("brain_context_resolved_count")
         else:
             metrics.inc("brain_context_empty_count")
+        if brain_context.domains:
+            metrics.inc("brain_context_domains_resolved_count")
         pipeline_logger.info(
             "brain_context_resolved",
             records=len(brain_context.records),
+            domains=len(brain_context.domains),
             anchors=len(brain_anchor_file_ids),
             ambiguity_flags=brain_context.retrieval_guidance.ambiguity_flags,
+            topology_hints=brain_context.retrieval_guidance.topology_hints,
             token_estimate=brain_context.token_estimate,
         )
     except Exception as exc:
@@ -1290,6 +1297,7 @@ async def _build_agent_context(
         "confidence_level": confidence.level,
         "confidence_score": confidence.score,
         "brain_memory_ids": [record.id for record in brain_context.records] if brain_context else [],
+        "brain_domain_ids": [domain.id for domain in brain_context.domains] if brain_context else [],
         "plan_ir_id": getattr(plan_ir, "id", None),
     }
 

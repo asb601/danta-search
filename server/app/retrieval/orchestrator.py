@@ -128,14 +128,18 @@ def _brain_guidance_rescore(
     try:
         guidance = getattr(brain_context, "retrieval_guidance", None)
         authority_by_file_id = dict(getattr(guidance, "authority_by_file_id", {}) or {})
+        domain_authority_by_file_id = dict(getattr(guidance, "domain_authority_by_file_id", {}) or {})
         anchor_file_ids = set(getattr(guidance, "anchor_file_ids", []) or [])
-        if not authority_by_file_id and not anchor_file_ids:
+        domain_anchor_file_ids = set(getattr(guidance, "domain_anchor_file_ids", []) or [])
+        if not authority_by_file_id and not domain_authority_by_file_id and not anchor_file_ids and not domain_anchor_file_ids:
             return fused
         rescored: list[tuple[FileMetadata, float]] = []
         for meta, score in fused:
             authority = float(authority_by_file_id.get(meta.file_id, 0.0) or 0.0)
+            domain_authority = float(domain_authority_by_file_id.get(meta.file_id, 0.0) or 0.0)
             anchor_bonus = 0.08 if meta.file_id in anchor_file_ids else 0.0
-            multiplier = 1.0 + min(0.25, authority * 0.18 + anchor_bonus)
+            domain_bonus = 0.1 if meta.file_id in domain_anchor_file_ids else 0.0
+            multiplier = 1.0 + min(0.32, authority * 0.14 + domain_authority * 0.18 + anchor_bonus + domain_bonus)
             rescored.append((meta, score * multiplier))
         rescored.sort(key=lambda item: item[1], reverse=True)
         return rescored

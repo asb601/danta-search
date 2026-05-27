@@ -178,6 +178,167 @@ class SemanticMemoryTermIndex(Base):
     )
 
 
+class SemanticDomainCluster(Base):
+    __tablename__ = "semantic_domain_clusters"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    container_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("container_configs.id", ondelete="CASCADE"), nullable=False
+    )
+    domain_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    domain_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    normalized_terms: Mapped[list] = mapped_column(JSONB, default=list)
+    workflow_terms: Mapped[list] = mapped_column(JSONB, default=list)
+    lifecycle_terms: Mapped[list] = mapped_column(JSONB, default=list)
+    kpi_terms: Mapped[list] = mapped_column(JSONB, default=list)
+    synonym_terms: Mapped[list] = mapped_column(JSONB, default=list)
+    contributor_file_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    contributor_memory_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    conflict_count: Mapped[int] = mapped_column(Integer, default=0)
+    conflict_summary: Mapped[dict] = mapped_column(JSONB, default=dict)
+    confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
+    authority_score: Mapped[float] = mapped_column(Float, default=0.0)
+    drift_score: Mapped[float] = mapped_column(Float, default=0.0)
+    governance_status: Mapped[str] = mapped_column(String(20), default="candidate")
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "container_id",
+            "domain_type",
+            "domain_key",
+            name="uq_semantic_domain_cluster",
+        ),
+        Index("idx_sdc_container_status_type", "container_id", "status", "governance_status", "domain_type"),
+        Index("idx_sdc_terms_gin", "normalized_terms", postgresql_using="gin"),
+        Index("idx_sdc_workflow_terms_gin", "workflow_terms", postgresql_using="gin"),
+        Index("idx_sdc_lifecycle_terms_gin", "lifecycle_terms", postgresql_using="gin"),
+        Index("idx_sdc_kpi_terms_gin", "kpi_terms", postgresql_using="gin"),
+    )
+
+
+class SemanticDomainEvidence(Base):
+    __tablename__ = "semantic_domain_evidence"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    domain_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("semantic_domain_clusters.id", ondelete="CASCADE"), nullable=False
+    )
+    memory_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("semantic_memory_records.id", ondelete="CASCADE"), nullable=False
+    )
+    file_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("files.id", ondelete="CASCADE"), nullable=True
+    )
+    evidence_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    evidence_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    evidence_terms: Mapped[list] = mapped_column(JSONB, default=list)
+    contribution_weight: Mapped[float] = mapped_column(Float, default=0.0)
+    confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
+    authority_score: Mapped[float] = mapped_column(Float, default=0.0)
+    decay_factor: Mapped[float] = mapped_column(Float, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("domain_id", "memory_id", name="uq_semantic_domain_evidence_memory"),
+        Index("idx_sde_domain", "domain_id"),
+        Index("idx_sde_file", "file_id"),
+        Index("idx_sde_memory", "memory_id"),
+    )
+
+
+class SemanticDomainFileIndex(Base):
+    __tablename__ = "semantic_domain_file_index"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    container_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("container_configs.id", ondelete="CASCADE"), nullable=False
+    )
+    domain_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("semantic_domain_clusters.id", ondelete="CASCADE"), nullable=False
+    )
+    file_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("files.id", ondelete="CASCADE"), nullable=False
+    )
+    domain_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    terms: Mapped[list] = mapped_column(JSONB, default=list)
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("domain_id", "file_id", name="uq_semantic_domain_file"),
+        Index("idx_sdfi_file", "file_id", "domain_type", "score"),
+        Index("idx_sdfi_container", "container_id", "domain_type"),
+    )
+
+
+class SemanticDomainTermIndex(Base):
+    __tablename__ = "semantic_domain_term_index"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    container_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("container_configs.id", ondelete="CASCADE"), nullable=False
+    )
+    domain_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("semantic_domain_clusters.id", ondelete="CASCADE"), nullable=False
+    )
+    term: Mapped[str] = mapped_column(String(120), nullable=False)
+    domain_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("container_id", "term", "domain_id", name="uq_semantic_domain_term"),
+        Index("idx_sdti_container_term", "container_id", "term", "status"),
+        Index("idx_sdti_domain", "domain_id"),
+    )
+
+
+class SemanticDomainConflict(Base):
+    __tablename__ = "semantic_domain_conflicts"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    container_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("container_configs.id", ondelete="CASCADE"), nullable=False
+    )
+    domain_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("semantic_domain_clusters.id", ondelete="CASCADE"), nullable=False
+    )
+    conflict_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    conflict_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), default="warning")
+    file_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    memory_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    resolution_status: Mapped[str] = mapped_column(String(20), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("domain_id", "conflict_type", "conflict_key", name="uq_semantic_domain_conflict"),
+        Index("idx_sdcf_domain", "domain_id", "resolution_status"),
+        Index("idx_sdcf_container", "container_id", "severity"),
+    )
+
+
 class BrainContextTrace(Base):
     __tablename__ = "brain_context_traces"
 
@@ -193,6 +354,7 @@ class BrainContextTrace(Base):
     )
     query_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     selected_memory_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    selected_domain_ids: Mapped[list] = mapped_column(JSONB, default=list)
     ambiguity_flags: Mapped[list] = mapped_column(JSONB, default=list)
     retrieval_guidance: Mapped[dict] = mapped_column(JSONB, default=dict)
     execution_envelope: Mapped[dict] = mapped_column(JSONB, default=dict)

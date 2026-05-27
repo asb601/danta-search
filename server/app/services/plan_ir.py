@@ -84,8 +84,29 @@ def build_plan_ir_from_context(
         operation = "decompose"
 
     stages: list[PlanStage] = []
+    catalog_file_ids = {entry["file_id"] for entry in catalog if entry.get("file_id")}
+    domain_stage_count = 0
+    if brain_context:
+        for domain in brain_context.domains:
+            if domain.domain_type not in {"workflow_domain", "lifecycle_domain", "business_capability"}:
+                continue
+            domain_file_ids = [file_id for file_id in domain.contributor_file_ids if file_id in catalog_file_ids]
+            if not domain_file_ids:
+                continue
+            domain_stage_count += 1
+            stages.append(PlanStage(
+                id=f"domain_stage_{domain_stage_count}",
+                operation=domain.domain_type,
+                file_ids=domain_file_ids[:8],
+                contracts=[domain.id],
+            ))
+            if len(stages) >= max_stages:
+                break
+
     clusters = list(getattr(exec_strategy, "clusters", []) or [])
-    if clusters:
+    if stages:
+        pass
+    elif clusters:
         for idx, cluster in enumerate(clusters[:max_stages], 1):
             stages.append(PlanStage(
                 id=f"stage_{idx}",
@@ -108,10 +129,24 @@ def build_plan_ir_from_context(
                 grain=None,
                 source_memory_id=record.id,
             ))
+        remaining = max(0, int(settings.PLAN_IR_MAX_CONTRACTS) - len(contracts))
+        for domain in [d for d in brain_context.domains if d.domain_type == "kpi_domain"][:remaining]:
+            metric = (domain.kpi_terms or domain.terms or [domain.title])[0]
+            contracts.append(KPIContract(
+                id=f"kpi_{uuid.uuid4().hex[:8]}",
+                metric=metric,
+                aggregation="SUM" if "aggregation" in (domain.kpi_terms + domain.terms) else None,
+                grain=None,
+                source_memory_id=domain.id,
+            ))
 
     lifecycle_validations = []
     if any(getattr(record, "memory_type", "") == "temporal" for record in (brain_context.records if brain_context else [])):
         lifecycle_validations.append("temporal_scope_available")
+    if any(getattr(domain, "domain_type", "") == "lifecycle_domain" for domain in (brain_context.domains if brain_context else [])):
+        lifecycle_validations.append("lifecycle_domain_available")
+    if any(getattr(domain, "domain_type", "") == "workflow_domain" for domain in (brain_context.domains if brain_context else [])):
+        lifecycle_validations.append("workflow_domain_available")
     if getattr(sql_ctx, "approved_joins", None):
         lifecycle_validations.append("approved_join_scope_available")
 

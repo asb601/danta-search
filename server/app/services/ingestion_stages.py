@@ -822,14 +822,22 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
         # enrichment, relationships, and confidence are available as evidence.
         try:
             from app.services.semantic_memory_extractor import upsert_semantic_memory_for_file  # noqa: PLC0415
+            from app.services.semantic_domain_consolidator import consolidate_semantic_domains_for_container  # noqa: PLC0415
 
             memory_result = await upsert_semantic_memory_for_file(file_id, db)
             metrics.inc("semantic_memory_records_upserted", int(memory_result.get("records") or 0))
+            domain_result = None
+            if file and file.container_id:
+                domain_result = await consolidate_semantic_domains_for_container(file.container_id, db)
+                metrics.inc("semantic_domain_clusters_upserted", int(domain_result.get("clusters") or 0))
+                metrics.inc("semantic_domain_conflict_count", int(domain_result.get("conflicts") or 0))
             ingest_logger.info(
                 "semantic_memory_stage",
                 file_id=file_id,
                 records=memory_result.get("records", 0),
                 deprecated=memory_result.get("deprecated", 0),
+                domain_clusters=(domain_result or {}).get("clusters", 0),
+                domain_conflicts=(domain_result or {}).get("conflicts", 0),
                 duration_ms=memory_result.get("duration_ms"),
             )
         except Exception as exc:
