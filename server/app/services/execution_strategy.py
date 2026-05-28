@@ -86,7 +86,7 @@ class ExecutionStrategy:
       "single_joined"         — all shortlisted files connect via approved joins;
                                 execute as one SQL query.
       "multi_cluster"         — files split into 2+ groups; ≥1 group is joinable;
-                                execute one SQL per cluster, merge narratively.
+                                choose relevant cluster(s), merge narratively.
       "independent_analyses"  — no approved joins between any files;
                                 analyze each file independently.
     """
@@ -121,7 +121,9 @@ class ExecutionStrategy:
             lines += [
                 f"Mode: MULTI-CLUSTER EXECUTION ({n} independent clusters)",
                 "Files form separate clusters — no approved cross-cluster join path exists.",
-                "Execute ONE SQL per cluster. Merge results narratively in your response.",
+                "Treat clusters as join-safety boundaries, not a checklist.",
+                "Query only the smallest cluster(s) that directly answer the user's primary business subject.",
+                "Do NOT query standalone clusters merely because a requested output facet mentions a similar word.",
                 "CRITICAL: Do NOT join files across different clusters.",
                 "",
             ]

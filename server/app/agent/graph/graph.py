@@ -510,7 +510,7 @@ async def _build_agent_context(
     # Phase 2 (future): entity_resolution will constrain retrieve_with_scores()
     # scoring so files matching resolved entities rank higher in the shortlist.
     entity_resolution: dict[str, list[EntityCandidate]] = await resolve_entities(
-        intent_plan.entities, full_catalog, db
+        intent_plan.entities, full_catalog, db, top_k=6
     )
     trace.set_entity_resolver(entity_resolution)
 

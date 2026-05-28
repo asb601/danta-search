@@ -40,9 +40,12 @@ from app.core.logger import chat_logger
 _AGG_RE = re.compile(
     r"\btotal\b|\bsum\b|\bcount\b|\bhow many\b|\bnumber of\b"
     r"|\baverage\b|\bavg\b|\bmaximum\b|\bmax\b|\bminimum\b|\bmin\b"
-    r"|\bhighest\b|\blowest\b|\blargest\b|\bsmallest\b",
+    r"|\bhighest\b|\blowest\b|\blargest\b|\bsmallest\b"
+    r"|\bsummari[sz]e\b|\bsummary\b",
     re.I,
 )
+
+_SUMMARY_RE = re.compile(r"\banaly[sz]e\b|\bsummari[sz]e\b|\bsummary\b", re.I)
 
 _TIME_RE = re.compile(
     r"\blast\s+\d+\s+days?\b|\blast\s+\d+\s+months?\b|\blast\s+month\b"
@@ -117,14 +120,16 @@ class BusinessIntentPlan:
 
 def _detect_signals(query: str) -> dict:
     top_n_match = _TOP_N_RE.search(query)
+    has_summary_request = bool(_SUMMARY_RE.search(query))
     return {
         "has_aggregation": bool(_AGG_RE.search(query)),
         "has_time_filter": bool(_TIME_RE.search(query)),
         "has_open_item": bool(_OPEN_ITEM_RE.search(query)),
-        "has_detail_request": bool(_DETAIL_RE.search(query)),
+        "has_detail_request": bool(_DETAIL_RE.search(query)) and not has_summary_request,
         "has_top_n": bool(top_n_match),
         "top_n_value": int(top_n_match.group(1) or top_n_match.group(2)) if top_n_match else None,
         "is_complex": bool(_COMPLEX_RE.search(query)),
+        "has_summary_request": has_summary_request,
     }
 
 
@@ -173,6 +178,8 @@ def _collect_behaviors(signals: dict) -> list[str]:
         behaviors.append("top_n")
     if signals["has_detail_request"] and not signals["has_aggregation"]:
         behaviors.append("detail_rows")
+    if signals.get("has_summary_request"):
+        behaviors.append("summary")
     if signals["is_complex"]:
         behaviors.append("multi_step")
     return behaviors

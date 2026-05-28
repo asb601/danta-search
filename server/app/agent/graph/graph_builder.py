@@ -71,7 +71,16 @@ def build_agent_node(all_tools: list):
     async def agent_node(state: AgentState) -> dict:
         count = state.get("tool_call_count", 0)
         if count >= MAX_TOOL_CALLS:
-            return {"messages": [AIMessage(content="I've gathered enough data. Let me summarise.")]}
+            final_instruction = SystemMessage(content=(
+                "Tool-call budget is exhausted. Do not call tools. Write the final analyst response now "
+                "using only the schemas and tool results already present in the conversation. Follow the "
+                "mandatory output style from the system prompt."
+            ))
+            try:
+                response = await _active_llm.ainvoke(state["messages"] + [final_instruction])
+                return {"messages": [response]}
+            except Exception:
+                return {"messages": [AIMessage(content="Here are the results I was able to verify from the available data.")]}
 
         # gpt-4o-mini: higher quota, lower latency. gpt-4o escalation disabled.
         llm_with_tools = _llm_with_tools

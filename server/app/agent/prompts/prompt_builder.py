@@ -113,6 +113,23 @@ Five principles. Apply them to every situation.
 5. search_catalog searches metadata (logical table names, descriptions, column names).
     It does NOT search row values. To find a row value, filter inside a logical table.
 
+6. PRIMARY SUBJECT FIRST
+   For summary questions with sections or bullets, anchor on the primary business
+   subject from the first clause. Treat later section labels as requested facets,
+   not as permission to switch to unrelated domains. Add related tables only when
+   they directly support the primary subject and have validated relationship evidence.
+
+7. SUMMARIES USE AGGREGATES
+    For analyze/summarize questions, write compact aggregate SQL that returns the
+    requested counts/statuses/issues. Do not return raw detail rows unless the user
+    explicitly asks to list or display rows without asking for a summary.
+
+8. EACH REQUESTED FACET NEEDS EVIDENCE
+    Do not infer one requested facet from another. Approval/status evidence does
+    not prove delivery, invoice matching, payment, or fulfillment. If a requested
+    facet has a relevant related table in the shortlist, use it with validated
+    relationship evidence; otherwise state that the facet could not be verified.
+
 --- QUESTION TYPE ---
 Conceptual ("how does X work", "explain Y"): answer from knowledge + file
 descriptions. No SQL needed unless you need a column list.
@@ -401,8 +418,11 @@ def build_entity_extraction_prompt(query: str) -> str:
     Output contract: strict JSON {"entities": ["snake_case_noun", ...]}.
     """
     return (
-        "Extract business entity nouns from the following query.\n"
+        "Extract only the primary durable business object nouns from the following query.\n"
         'Return ONLY valid JSON: {"entities": ["entity_1", "entity_2"]}.\n'
-        "Normalize to snake_case. No prose, no SQL, no schema names.\n\n"
+        "Normalize to snake_case. Prefer 1-3 entities. No prose, no SQL, no schema names.\n"
+        "Keep subjects like customer, invoice, sales_order, purchase_order, material.\n"
+        "Exclude dates, years, metrics, actions, recommendations, and requested output facets such as status, pending approval, delivery status, or issue summaries.\n"
+        "If the query asks to summarize sections after a colon, treat those sections as output facets unless they are the only business object.\n\n"
         f"Query: {query}"
     )

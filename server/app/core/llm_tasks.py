@@ -3,12 +3,114 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 
 from app.core.config import get_settings
 from app.core.logger import chat_logger, ingest_logger
 from app.core.openai_client import get_client
 from app.core.token_counter import count_tokens, elapsed_ms, track_and_log
+
+
+_ENTITY_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+_ENTITY_DETAIL_TOKENS = frozenset({"detail", "details", "record", "records", "row", "rows"})
+_ENTITY_NOISE_TOKENS = frozenset({
+    "action",
+    "actions",
+    "approval",
+    "approvals",
+    "count",
+    "current",
+    "date",
+    "issue",
+    "issues",
+    "matching",
+    "month",
+    "next",
+    "pending",
+    "problem",
+    "problems",
+    "quarter",
+    "recommendation",
+    "recommendations",
+    "recommended",
+    "status",
+    "statuses",
+    "summary",
+    "time",
+    "total",
+    "value",
+    "year",
+})
+_ENTITY_FACET_SUFFIXES = frozenset({
+    "action",
+    "actions",
+    "approval",
+    "approvals",
+    "issue",
+    "issues",
+    "problem",
+    "problems",
+    "recommendation",
+    "recommendations",
+    "status",
+    "statuses",
+})
+_SUMMARY_SECTION_RE = re.compile(r"\b(?:summari[sz]e|including|include|covering|with)\b\s*[:\-]", re.I)
+
+
+def _entity_tokens(text: str) -> list[str]:
+    return [t for t in _ENTITY_TOKEN_RE.split(text.lower()) if t]
+
+
+def _entity_acronym(tokens: list[str]) -> str:
+    return "".join(t[0] for t in tokens if t)
+
+
+def _primary_query_segment(query: str) -> tuple[str, bool]:
+    marker = _SUMMARY_SECTION_RE.search(query)
+    if marker:
+        return query[:marker.start()], True
+    if ":" in query:
+        return query.split(":", 1)[0], True
+    return query, False
+
+
+def _mentioned_in_primary_segment(tokens: list[str], primary_text: str) -> bool:
+    primary_tokens = set(_entity_tokens(primary_text))
+    if not primary_tokens:
+        return False
+    acronym = _entity_acronym(tokens) if len(tokens) > 1 else ""
+    return all(t in primary_tokens for t in tokens) or bool(acronym and acronym in primary_tokens)
+
+
+def _clean_extracted_entities(entities: list, query: str = "") -> list[str]:
+    """Keep only durable business objects; drop output facets and time terms."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    primary_text, has_summary_sections = _primary_query_segment(query or "")
+    primary_subject_tokens = {
+        t for t in _entity_tokens(primary_text)
+        if t not in _ENTITY_NOISE_TOKENS and t not in _ENTITY_DETAIL_TOKENS
+    }
+    enforce_primary_segment = has_summary_sections and bool(primary_subject_tokens)
+    for raw in entities:
+        tokens = _entity_tokens(str(raw))
+        while tokens and tokens[-1] in _ENTITY_DETAIL_TOKENS:
+            tokens.pop()
+        if not tokens:
+            continue
+        if enforce_primary_segment and not _mentioned_in_primary_segment(tokens, primary_text):
+            continue
+        if all(t in _ENTITY_NOISE_TOKENS for t in tokens):
+            continue
+        if len(tokens) > 1 and tokens[-1] in _ENTITY_FACET_SUFFIXES:
+            continue
+        entity = "_".join(tokens)
+        if entity and entity not in seen:
+            cleaned.append(entity)
+            seen.add(entity)
+    return cleaned[:4]
 
 
 def safe_parse_json(text: str) -> dict:
@@ -201,7 +303,7 @@ async def extract_entities_for_query(query: str) -> list[str]:
         parsed = safe_parse_json(raw)
         entities = parsed.get("entities", [])
         if isinstance(entities, list):
-            return [str(e).strip().lower() for e in entities if e and str(e).strip()]
+            return _clean_extracted_entities(entities, query)
         return []
 
     try:

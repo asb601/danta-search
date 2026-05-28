@@ -30,10 +30,11 @@ Scoring signal hierarchy (strongest → weakest):
   1. semantic_role entity_key match  — this IS the master table for the entity
   2. semantic_role reference_key     — this REFERENCES the entity (transactions)
   3. key_dimensions overlap          — entity appears in filtering/grouping cols
-  4. column_name overlap             — entity token in a raw column name
-  5. ai_description coverage         — entity mentioned in the file description
-  6. good_for coverage               — entity in natural-language use-case list
-  7. key_metrics reference           — entity in metric column names (weak)
+    4. table/logical name ownership    — entity appears in the table name itself
+    5. column_name overlap             — entity token in a raw column name
+    6. ai_description coverage         — entity mentioned in the file description
+    7. good_for coverage               — entity in natural-language use-case list
+    8. key_metrics reference           — entity in metric column names (weak)
 """
 from __future__ import annotations
 
@@ -87,6 +88,7 @@ class EntityResolution:
 _REASON_ENTITY_KEY      = "semantic_role_match"     # entity_key role → master table
 _REASON_REFERENCE_KEY   = "transactional_reference" # reference_key role → FK holder
 _REASON_KEY_DIMENSION   = "key_dimension_match"
+_REASON_TABLE_NAME      = "table_name_match"
 _REASON_COLUMN_NAME     = "column_name_match"
 _REASON_DESCRIPTION     = "description_match"
 _REASON_GOOD_FOR        = "good_for_match"
@@ -100,6 +102,7 @@ _REASON_KEY_METRIC      = "metric_reference"
 _W_ENTITY_KEY    = 0.55   # column is the primary key for this entity
 _W_REFERENCE_KEY = 0.28   # column is a foreign-key reference to this entity
 _W_KEY_DIMENSION = 0.38   # entity appears in key_dimensions
+_W_TABLE_NAME    = 0.42   # entity appears in filename/logical table name
 _W_COLUMN_NAME   = 0.28   # entity token in a raw column name
 _W_DESCRIPTION   = 0.18   # entity mentioned in ai_description
 _W_GOOD_FOR      = 0.14   # entity in good_for phrases
@@ -117,6 +120,7 @@ _MIN_OVERLAP     = 0.50
 # Role format: "custom:<kind>:<label>"  e.g. "custom:entity_key:profit_center"
 
 _ROLE_RE = re.compile(r"^custom:([a-z_]+):(.+)$")
+_HASH_PREFIX_RE = re.compile(r"^[0-9a-f]{8}_", re.IGNORECASE)
 
 
 def _parse_role(role_str: str | None) -> tuple[str, str] | None:
@@ -150,12 +154,52 @@ def _extract_role_pairs(column_semantic_roles: dict | None) -> list[tuple[str, s
 _NON_ALPHA_RE = re.compile(r"[^a-z0-9]+")
 
 
-def _tokens(text: str) -> frozenset[str]:
-    """Normalize text to a set of lowercase alphanumeric tokens (len ≥ 2)."""
-    return frozenset(t for t in _NON_ALPHA_RE.split(text.lower()) if len(t) >= 2)
+def _tokens(text: str) -> tuple[str, ...]:
+    """Normalize text to ordered lowercase alphanumeric tokens (len ≥ 2)."""
+    return tuple(dict.fromkeys(t for t in _NON_ALPHA_RE.split(text.lower()) if len(t) >= 2))
 
 
-def _overlap(entity_tokens: frozenset[str], target: str) -> float:
+def _acronym(tokens: tuple[str, ...]) -> str:
+    return "".join(t[0] for t in tokens if t)
+
+
+def _clean_table_name(path: str) -> str:
+    name = (path or "").rsplit("/", 1)[-1]
+    name = _HASH_PREFIX_RE.sub("", name)
+    return name.rsplit(".", 1)[0] if "." in name else name
+
+
+def _table_overlap(entity_tokens: tuple[str, ...], target: str) -> float:
+    """Strict ownership match for table names; partial phrases are not enough."""
+    if not entity_tokens or not target:
+        return 0.0
+    target_tokens = _tokens(target)
+    target_token_set = set(target_tokens)
+    entity_acronym = _acronym(entity_tokens) if len(entity_tokens) > 1 else ""
+    if entity_acronym and entity_acronym in target_token_set:
+        return 1.0
+    hits = sum(1 for t in entity_tokens if t in target_token_set)
+    if len(entity_tokens) > 1 and hits < len(entity_tokens):
+        return 0.0
+    return hits / len(entity_tokens)
+
+
+def _candidate_sort_name(path: str) -> str:
+    return _clean_table_name(path).lower()
+
+
+def _candidate_table_rank(path: str) -> int:
+    tokens = set(_tokens(_candidate_sort_name(path)))
+    if tokens & {"header", "headers", "master"}:
+        return 0
+    if tokens & {"line", "lines", "item", "items"}:
+        return 1
+    if tokens & {"distribution", "distributions", "schedule", "schedules"}:
+        return 2
+    return 3
+
+
+def _overlap(entity_tokens: tuple[str, ...], target: str) -> float:
     """
     Fraction of entity tokens present in target text.
 
@@ -165,12 +209,20 @@ def _overlap(entity_tokens: frozenset[str], target: str) -> float:
     """
     if not entity_tokens or not target:
         return 0.0
-    target_toks = _tokens(target)
-    hits = sum(1 for t in entity_tokens if t in target_toks)
+    target_tokens = _tokens(target)
+    target_token_set = set(target_tokens)
+    entity_acronym = _acronym(entity_tokens) if len(entity_tokens) > 1 else ""
+    target_acronym = _acronym(target_tokens) if len(target_tokens) > 1 else ""
+    if entity_acronym and entity_acronym in target_token_set:
+        return 1.0
+    hits = sum(
+        1 for t in entity_tokens
+        if t in target_token_set or (2 <= len(t) <= 5 and t == target_acronym)
+    )
     return hits / len(entity_tokens)
 
 
-def _max_overlap(entity_tokens: frozenset[str], items: list[str]) -> float:
+def _max_overlap(entity_tokens: tuple[str, ...], items: list[str]) -> float:
     """Max overlap of entity_tokens across a list of target strings."""
     if not items:
         return 0.0
@@ -180,7 +232,7 @@ def _max_overlap(entity_tokens: frozenset[str], items: list[str]) -> float:
 # ── Per-entry scorer ───────────────────────────────────────────────────────────
 
 def _score_entry(
-    entity_tokens: frozenset[str],
+    entity_tokens: tuple[str, ...],
     entry: dict,
     role_pairs: list[tuple[str, str]],   # (kind, label) for all columns in this file
 ) -> tuple[float, str]:
@@ -195,6 +247,12 @@ def _score_entry(
     """
     score = 0.0
     reason = "no_match"
+    table_text = " ".join(filter(None, [
+        _clean_table_name(entry.get("blob_path") or ""),
+        entry.get("logical_name") or "",
+        entry.get("display_name") or "",
+    ]))
+    table_overlap = _table_overlap(entity_tokens, table_text)
 
     # ── 1. Semantic role — entity_key (master table) ───────────────────────
     # A file whose column carries entity_key:vendor IS the vendor master.
@@ -226,6 +284,12 @@ def _score_entry(
             reason = _REASON_KEY_DIMENSION
 
     # ── 4. Column names ────────────────────────────────────────────────────
+    if table_overlap >= _MIN_OVERLAP:
+        score += _W_TABLE_NAME * table_overlap
+        if reason == "no_match":
+            reason = _REASON_TABLE_NAME
+
+    # ── 5. Column names ────────────────────────────────────────────────────
     col_names: list[str] = entry.get("column_names") or []
     col_overlap = _max_overlap(entity_tokens, col_names)
     if col_overlap >= _MIN_OVERLAP:
@@ -233,14 +297,14 @@ def _score_entry(
         if reason == "no_match":
             reason = _REASON_COLUMN_NAME
 
-    # ── 5. ai_description ─────────────────────────────────────────────────
+    # ── 6. ai_description ─────────────────────────────────────────────────
     desc_overlap = _overlap(entity_tokens, entry.get("ai_description") or "")
     if desc_overlap >= _MIN_OVERLAP:
         score += _W_DESCRIPTION * desc_overlap
         if reason == "no_match":
             reason = _REASON_DESCRIPTION
 
-    # ── 6. good_for phrases ────────────────────────────────────────────────
+    # ── 7. good_for phrases ────────────────────────────────────────────────
     good_for: list[str] = entry.get("good_for") or []
     gf_overlap = _max_overlap(entity_tokens, good_for)
     if gf_overlap >= _MIN_OVERLAP:
@@ -248,13 +312,18 @@ def _score_entry(
         if reason == "no_match":
             reason = _REASON_GOOD_FOR
 
-    # ── 7. key_metrics (weakest) ───────────────────────────────────────────
+    # ── 8. key_metrics (weakest) ───────────────────────────────────────────
     key_metrics: list[str] = entry.get("key_metrics") or []
     metric_overlap = _max_overlap(entity_tokens, key_metrics)
     if metric_overlap >= _MIN_OVERLAP:
         score += _W_KEY_METRIC * metric_overlap
         if reason == "no_match":
             reason = _REASON_KEY_METRIC
+
+    if entity_key_overlap >= _MIN_OVERLAP and table_overlap < _MIN_OVERLAP:
+        score = min(score, 0.74)
+        if reason == _REASON_ENTITY_KEY:
+            reason = _REASON_REFERENCE_KEY
 
     return min(score, _SCORE_CAP), reason
 
@@ -328,8 +397,34 @@ async def resolve_entities(
                     reason=reason,
                 ))
 
-        candidates.sort(key=lambda c: c.confidence, reverse=True)
-        result[entity] = candidates[:top_k]
+        reason_rank = {
+            _REASON_ENTITY_KEY: 0,
+            _REASON_TABLE_NAME: 1,
+            _REASON_REFERENCE_KEY: 2,
+            _REASON_KEY_DIMENSION: 3,
+            _REASON_COLUMN_NAME: 4,
+            _REASON_DESCRIPTION: 5,
+            _REASON_GOOD_FOR: 6,
+            _REASON_KEY_METRIC: 7,
+        }
+        candidates.sort(key=lambda c: (
+            -c.confidence,
+            reason_rank.get(c.reason, 99),
+            _candidate_table_rank(c.table),
+            _candidate_sort_name(c.table),
+            c.table,
+        ))
+        deduped: list[EntityCandidate] = []
+        seen_table_names: set[str] = set()
+        for candidate in candidates:
+            table_name = _candidate_sort_name(candidate.table)
+            if table_name in seen_table_names:
+                continue
+            deduped.append(candidate)
+            seen_table_names.add(table_name)
+            if len(deduped) >= top_k:
+                break
+        result[entity] = deduped
 
     # ── Step 3: Log summary ──────────────────────────────────────────────────
     chat_logger.info(

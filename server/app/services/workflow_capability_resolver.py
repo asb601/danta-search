@@ -520,11 +520,19 @@ def _build_semantic_domains(
 
 def _token_overlap(a: str, b: str) -> float:
     """Token overlap fraction between two label strings. Case-insensitive."""
-    ta = frozenset(t for t in re.split(r"[^a-z0-9]+", a.lower()) if t)
-    tb = frozenset(t for t in re.split(r"[^a-z0-9]+", b.lower()) if t)
+    ta = tuple(dict.fromkeys(t for t in re.split(r"[^a-z0-9]+", a.lower()) if t))
+    tb = tuple(dict.fromkeys(t for t in re.split(r"[^a-z0-9]+", b.lower()) if t))
     if not ta or not tb:
         return 0.0
-    return len(ta & tb) / min(len(ta), len(tb))
+    set_a = set(ta)
+    set_b = set(tb)
+    acronym_a = "".join(t[0] for t in ta) if len(ta) > 1 else ""
+    acronym_b = "".join(t[0] for t in tb) if len(tb) > 1 else ""
+    if acronym_a and acronym_a in set_b:
+        return 1.0
+    if acronym_b and acronym_b in set_a:
+        return 1.0
+    return len(set_a & set_b) / min(len(set_a), len(set_b))
 
 
 def _label_matches_file(label: str, file_text: str) -> bool:
