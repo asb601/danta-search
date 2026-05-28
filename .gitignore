@@ -41,7 +41,7 @@ next-env.d.ts
 # Logs
 *.log
 server/logs/
-
+ragflow/
 # Uploads & temp files
 server/uploads/
 /tmp/

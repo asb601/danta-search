@@ -79,6 +79,7 @@ from app.services.semantic_policy import get_semantic_policy
 from app.services.graph_health import score_graph_health
 from app.services.file_identity import FileIdentityMap, build_file_identity_map
 from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
+from app.services.schema_sql_validator import build_schema_index
 from app.services.trust_propagation import avg_ingestion_confidence as _avg_ing_conf
 from app.services.query_confidence import compute_confidence
 
@@ -1192,7 +1193,7 @@ async def _build_agent_context(
     # column bindings instead of free-form semantic guessing.
     # Non-fatal: an empty SQLContext produces no prompt section.
     sql_ctx = await build_sql_context(catalog, db, file_identities=file_identity_map)
-    sql_context_note = sql_ctx.to_prompt_section()
+    base_sql_context_note = sql_ctx.to_prompt_section()
     trace.set_approved_joins(sql_ctx)
 
     # ── STEP 2.75: WORKFLOW TOPOLOGY ─────────────────────────────────────────
@@ -1291,15 +1292,6 @@ async def _build_agent_context(
         plan_ir = None
         pipeline_logger.warning("plan_ir_failed_open", error=str(exc)[:200])
 
-    # Constraint sections are injected at the same prompt location
-    # (before HOW TO WORK), so combine them into a single bounded note.
-    sql_context_note = "\n\n".join(filter(None, [
-        brain_context_note,
-        sql_context_note,
-        exec_strategy_note,
-        plan_ir_note,
-    ]))
-
     # ── STEP 2.9: GRAPH HEALTH + ORCHESTRATION CONFIDENCE ───────────────────
     # graph_health (pure CPU) and _avg_ing_conf (pure math) are independent of
     # each other — compute concurrently in a thread-pool executor. Both depend
@@ -1340,6 +1332,31 @@ async def _build_agent_context(
         signals=confidence.signals,
         graph_health=graph_health.health_level,
     )
+
+    graph_guidance_trustworthy = (
+        graph_health.health_level != "poor"
+        and len(getattr(sql_ctx, "approved_joins", []) or []) > 0
+    )
+    exec_strategy_prompt_note = exec_strategy_note if graph_guidance_trustworthy else ""
+    if exec_strategy_note and not graph_guidance_trustworthy:
+        pipeline_logger.info(
+            "execution_strategy_prompt_suppressed",
+            reason="graph_guidance_untrusted",
+            health_level=graph_health.health_level,
+            edge_coverage=graph_health.edge_coverage,
+            approved_edges=len(getattr(sql_ctx, "approved_joins", []) or []),
+            mode=exec_strategy.mode,
+        )
+
+    # Constraint sections are injected at the same prompt location
+    # (before HOW TO WORK). Graph-derived execution strategy text is included
+    # only when the approved relationship graph is healthy enough to trust.
+    sql_context_note = "\n\n".join(filter(None, [
+        brain_context_note,
+        base_sql_context_note,
+        exec_strategy_prompt_note,
+        plan_ir_note,
+    ]))
 
     # ── Policy snapshot: capture active thresholds for offline debugging ──────
     trace.set_policy_snapshot()
@@ -1392,6 +1409,8 @@ async def _build_agent_context(
     # without requiring inspection of raw modifier_breakdown or replay_inputs.
     trace.set_confidence_attribution(confidence)
 
+    schema_index = build_schema_index(full_catalog, file_identity_map)
+
     # Per-request state store
     req_id = req_id_for_trace   # reuse the trace correlation ID as the request ID
     store: dict = {}
@@ -1421,6 +1440,7 @@ async def _build_agent_context(
         "query_work_order": query_work_order.to_dict(),
         "discovery_candidates": [item.to_dict() for item in _discovery_candidates[:20]],
         "promotion_state": promotion_state,
+        "schema_indexed_files": len(schema_index),
         "confidence_level": confidence.level,
         "confidence_score": confidence.score,
         "brain_memory_ids": [record.id for record in brain_context.records] if brain_context else [],
@@ -1436,6 +1456,7 @@ async def _build_agent_context(
         file_identities=file_identity_map,
         allowed_file_ids=file_identity_map.allowed_file_ids(),
         sql_ctx=sql_ctx,  # repair layer uses approved joins/columns as constraints
+        schema_index=schema_index,
     ))
     # Discovery/schema tools are scoped to the broad authorized discovery
     # candidates. run_sql remains gated by promotion_state above.
@@ -1517,6 +1538,7 @@ async def _build_agent_context(
             "workflow_constraints_chars": len(_workflow_assembly_note or ""),
             "workflow_coverage_chars": len(_workflow_continuity_note or ""),
             "topology_prompt_injected": False,
+            "exec_strategy_prompt_injected": bool(exec_strategy_prompt_note),
         },
     )
 

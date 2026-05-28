@@ -27,6 +27,11 @@ from app.services.promotion_state import (
     promoted_physical_uris,
     require_sql_promotion,
 )
+from app.services.schema_sql_validator import (
+    TableSchema,
+    overlay_inspected_schemas,
+    validate_logical_sql_schema,
+)
 from app.services.sql_plan_signature import compute_plan_signature as _compute_plan_sig
 
 
@@ -46,6 +51,7 @@ def build_sql_tools(
     file_identities: FileIdentityMap | None = None,
     allowed_file_ids: set[str] | None = None,
     sql_ctx=None,  # SQLContext | None — passed to repair layer
+    schema_index: dict[str, TableSchema] | None = None,
 ) -> list:
     """Return SQL tools bound to connection context.
 
@@ -84,15 +90,16 @@ def build_sql_tools(
             "referenced_file_ids": [],
         }
         state_store.setdefault("sql_attempts", []).append(_attempt)
+        schema_warnings: list[dict] = []
 
         if file_identities is not None:
             try:
+                logical_sql = sql
                 canonical = canonicalize_logical_sql(
-                    sql,
+                    logical_sql,
                     file_identities,
                     allowed_file_ids=allowed_file_ids,
                 )
-                sql = canonical.executable_sql
                 _attempt.update({
                     "status": "canonicalized",
                     "referenced_file_ids": canonical.referenced_file_ids,
@@ -113,6 +120,35 @@ def build_sql_tools(
                         "fatal_execution_error": True,
                         "promotion_required": True,
                     })
+
+                active_schema_index = overlay_inspected_schemas(
+                    schema_index,
+                    state_store.get("schema_columns_by_file_id"),
+                )
+                schema_report = validate_logical_sql_schema(
+                    logical_sql,
+                    file_identities,
+                    active_schema_index,
+                    allowed_file_ids=allowed_file_ids,
+                )
+                if schema_report.warnings:
+                    schema_warnings = [issue.to_dict() for issue in schema_report.warnings[:6]]
+                    _attempt["schema_warnings"] = schema_warnings
+                if not schema_report.ok:
+                    error_payload = schema_report.to_error_payload()
+                    _attempt.update({
+                        "status": "schema_validation_error",
+                        "error": error_payload["error"],
+                        "schema_issues": error_payload.get("issues", []),
+                    })
+                    state_store["execution_failure"] = {
+                        "status": "schema_validation_error",
+                        "error": error_payload["error"],
+                        "issues": error_payload.get("issues", []),
+                    }
+                    return json.dumps(error_payload)
+
+                sql = canonical.executable_sql
             except SQLCanonicalizationError as ve:
                 error_msg = str(ve)
                 _attempt.update({"status": "authorization_error", "error": error_msg})
@@ -323,6 +359,8 @@ def build_sql_tools(
         }
         if _exec_warning:
             resp["execution_warning"] = _exec_warning
+        if schema_warnings:
+            resp["schema_warnings"] = schema_warnings
         if total > len(rows):
             resp["warning"] = (
                 f"Results truncated: showing {len(rows)} of {total} total rows. "

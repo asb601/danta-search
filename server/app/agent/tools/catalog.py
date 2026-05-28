@@ -342,6 +342,10 @@ def build_catalog_tools(
             logical_table=_logical_table(match),
             tool="get_file_schema",
         )
+        if state_store is not None:
+            inspected_file_id = identity.canonical_id if identity else match.get("file_id")
+            if inspected_file_id:
+                state_store.setdefault("schema_columns_by_file_id", {})[str(inspected_file_id)] = cols
         pipeline_logger.info(
             "get_file_schema",
             file_ref=file_ref,
