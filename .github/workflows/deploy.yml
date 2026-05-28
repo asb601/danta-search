@@ -1,3 +1,4 @@
+
 name: Deploy to VM
 
 on:
@@ -6,7 +7,7 @@ on:
     paths:
       - "server/**"
       - ".github/workflows/deploy.yml"
-      
+
   workflow_dispatch:
 
 jobs:
@@ -18,11 +19,13 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           GH_TOKEN: ${{ github.token }}
+
         with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
+          host: ${{ secrets.VM_HOST_2 }}
+          username: ${{ secrets.VM_USER_2 }}
+          key: ${{ secrets.VM_SSH_KEY_2 }}
           envs: GH_TOKEN
+
           script: |
             set -e
             export PATH="$HOME/.local/bin:$PATH"
@@ -46,14 +49,12 @@ jobs:
               git clone https://github.com/asb601/G-CHAT-.git "$HOME/G-CHAT-"
             fi
 
-
             cd ~/G-CHAT-
 
-            # Keep the VM checkout clean and pinned to the branch that triggered deploy.
-            # Older deploys removed client/ from a tracked repo, leaving the VM dirty.
+            # Keep VM checkout clean and pinned to stable-demo-v1
             git restore client server/uv.lock 2>/dev/null || true
-            git fetch origin main
-            git checkout -B main origin/main
+            git fetch origin stable-demo-v1
+            git checkout -B stable-demo-v1 origin/stable-demo-v1
 
             # ── 3. Write .env from GitHub Secret ─────────────────────────────
             cat > ~/G-CHAT-/server/.env << 'ENVEOF'
@@ -65,10 +66,9 @@ jobs:
             uv sync --frozen
 
             # ── 4.1. Ensure local Redis is available for Celery ───────────────
-            # Only manage Redis when the app is configured to use localhost.
-            # External Redis setups are controlled outside this deploy script.
             if grep -q '^REDIS_URL=redis://localhost' ~/G-CHAT-/server/.env; then
               REDIS_SERVICE=""
+
               if systemctl list-unit-files redis-server.service --no-legend 2>/dev/null | grep -q '^redis-server.service'; then
                 REDIS_SERVICE="redis-server"
               elif systemctl list-unit-files redis.service --no-legend 2>/dev/null | grep -q '^redis.service'; then
@@ -80,6 +80,7 @@ jobs:
                 sudo apt-get update
                 sudo apt-get install -y redis-server
                 sudo systemctl daemon-reload
+
                 if systemctl list-unit-files redis-server.service --no-legend 2>/dev/null | grep -q '^redis-server.service'; then
                   REDIS_SERVICE="redis-server"
                 elif systemctl list-unit-files redis.service --no-legend 2>/dev/null | grep -q '^redis.service'; then
@@ -94,6 +95,7 @@ jobs:
               fi
 
               sudo systemctl enable --now "$REDIS_SERVICE"
+
               if systemctl is-active --quiet "$REDIS_SERVICE"; then
                 echo "$REDIS_SERVICE OK"
               else
@@ -103,12 +105,10 @@ jobs:
               fi
             fi
 
-            # ── 5. Create/update danta-search FastAPI service ────────────────
-            # Always rewrite the unit so an existing VM cannot keep stale service
-            # definitions after deploy script changes.
+            # ── 5. Create/update FastAPI service ─────────────────────────────
             sudo tee /etc/systemd/system/gchat.service > /dev/null << SVCEOF
             [Unit]
-            Description=danta-search FastAPI Backend
+            Description=gchat FastAPI Backend
             After=network.target
 
             [Service]
@@ -125,14 +125,16 @@ jobs:
             [Install]
             WantedBy=multi-user.target
             SVCEOF
+
             sudo systemctl daemon-reload
             sudo systemctl enable gchat
+
             echo "gchat.service installed/updated"
 
-            # ── 6. Create/update danta-search Celery worker service ──────────
+            # ── 6. Create/update Celery worker service ───────────────────────
             sudo tee /etc/systemd/system/gchat-celery.service > /dev/null << CELEOF
             [Unit]
-            Description=danta-search Celery Ingest Worker
+            Description=gchat Celery Ingest Worker
             After=network.target redis-server.service redis.service gchat.service
 
             [Service]
@@ -151,11 +153,13 @@ jobs:
             [Install]
             WantedBy=multi-user.target
             CELEOF
+
             sudo systemctl daemon-reload
             sudo systemctl enable gchat-celery
+
             echo "gchat-celery.service installed/updated"
 
-            # ── 7. Restart both services ──────────────────────────────────────
+            # ── 7. Restart services ───────────────────────────────────────────
             if sudo systemctl restart gchat; then
               echo "gchat started OK"
             else
@@ -172,12 +176,16 @@ jobs:
               exit 1
             fi
 
-            # ── 8. Wait for uvicorn to be healthy ─────────────────────────────
+            # ── 8. Health check ───────────────────────────────────────────────
             HEALTHY=0
+
             for i in $(seq 1 15); do
               sleep 4
+
               STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health 2>/dev/null || echo "000")
+
               echo "Attempt $i: status=$STATUS"
+
               if [ "$STATUS" = "200" ]; then
                 echo "Backend OK"
                 HEALTHY=1
@@ -191,12 +199,13 @@ jobs:
               exit 1
             fi
 
-            # ── 9. DB migrations (safe no-op if already applied) ──────────────
+            # ── 9. DB migrations ──────────────────────────────────────────────
             cd ~/G-CHAT-/server
             uv run python -m app.migrations.chat_memory_upgrade
+
             echo "Migrations complete"
 
-            # ── 10. Verify Celery worker is running ───────────────────────────
+            # ── 10. Verify Celery worker ──────────────────────────────────────
             if systemctl is-active --quiet gchat-celery; then
               echo "Celery worker OK"
             else
@@ -205,9 +214,10 @@ jobs:
               exit 1
             fi
 
-            # Service active is not enough: verify the worker can answer through Redis.
             CELERY_PING=$(timeout 20s uv run celery -A app.worker.ingest_tasks:celery_app inspect ping 2>&1 || true)
+
             echo "$CELERY_PING"
+
             if echo "$CELERY_PING" | grep -q "pong"; then
               echo "Celery broker/worker ping OK"
             else
