@@ -204,6 +204,17 @@ def _had_sql_error(messages: list) -> bool:
     return False
 
 
+def _had_schema_validation_error(messages: list) -> bool:
+    """True when run_sql was blocked by runtime schema/evidence validation."""
+    for m in messages:
+        if not (isinstance(m, ToolMessage) and getattr(m, "name", "") == "run_sql"):
+            continue
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        if '"schema_validation_error": true' in content or '"schema_validation_error":true' in content:
+            return True
+    return False
+
+
 _PARQUET_DTYPE_MARKERS = ("dtype", "Int64", "Invalid value ''")
 
 
@@ -312,7 +323,10 @@ def _should_force_broaden(state: AgentState) -> bool:
         (a JOIN cast error means we never even got to query the data;
         treat it the same as 0 rows so the agent gets nudged to find
         a compatible alternate file rather than surrender)
-      * NO run_sql call returned > 0 rows
+            * NO run_sql call returned > 0 rows, unless the failure was a schema
+                validation error. Schema validation means the selected table/column set
+                could not prove the requested concept, so later proxy row counts are not
+                enough reason to stop searching.
       * search_catalog has NOT been called yet
       * the failures were not exclusively relative-time-window queries
         (an empty 'last 7 days' result against historical data is a
@@ -334,13 +348,16 @@ def _should_force_broaden(state: AgentState) -> bool:
         return False
     had_zero = _had_zero_row_sql(msgs)
     had_err = _had_sql_error(msgs)
+    had_schema_err = _had_schema_validation_error(msgs)
     if not (had_zero or had_err):
-        return False
-    if _had_any_nonzero_sql(msgs):
-        # The model already got real rows from somewhere — don't second-guess.
         return False
     if _called_search_catalog(msgs):
         return False
+    if _had_any_nonzero_sql(msgs) and not had_schema_err:
+        # The model already got real rows from somewhere — don't second-guess.
+        return False
+    if had_schema_err:
+        return True
     # Suppress nudge for legitimate empty-time-window results
     if had_zero and not had_err and _zero_rows_only_from_relative_time(msgs):
         return False
@@ -354,18 +371,14 @@ def _should_force_broaden(state: AgentState) -> bool:
 
 
 _BROADEN_NUDGE = (
-    "Stop. You produced a final answer admitting the requested value could not be "
-    "found, but you have not yet broadened your search. The initial file shortlist "
-    "is only a starting point — the catalog contains additional files that may hold "
-    "this value (alternate name tables, master tables, lookup tables, alias / "
-    "search-term columns, etc.). Before concluding the value is absent you MUST:\n"
-    "  1. Call search_catalog with semantic terms describing the type of file that "
-    "would naturally store this value (for example: 'name', 'master', 'lookup', "
-    "'reference', 'code', 'directory').\n"
-    "  2. Inspect the schema of the most promising new candidate with get_file_schema.\n"
-    "  3. Run a lookup query (exact, then case-insensitive partial) against that file.\n"
-    "Only after those three steps return nothing may you tell the user the value "
-    "could not be located."
+    "Stop. A prior SQL attempt failed or runtime rejected part of the schema evidence, "
+    "and you have not yet broadened catalog search. Row counts from other tables do not "
+    "prove a missing requested concept. Before writing a final answer you MUST:\n"
+    "  1. Call search_catalog using the unresolved concept names from the user request "
+    "and the rejected column names from the tool error.\n"
+    "  2. Inspect the schema of the best new candidate with get_file_schema.\n"
+    "  3. Run SQL only on real inspected columns.\n"
+    "Only after this broadened search may you answer that the evidence is unavailable."
 )
 
 
