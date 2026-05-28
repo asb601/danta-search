@@ -2,7 +2,7 @@ name: Deploy to VM
 
 on:
   push:
-    branches: [main]
+    branches: [stable-demo-v1]
     paths:
       - "server/**"
       - ".github/workflows/deploy.yml"
