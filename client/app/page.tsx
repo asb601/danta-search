@@ -133,7 +133,7 @@ export default function HomePage() {
                 GB-scale performance
               </h3>
               <p className="text-xs text-muted-foreground">
-                Processes and queries across millions of rows from multiple Excel, CSV, and PDF files without slowdown.
+                Processes and queries across millions of rows from multiple Excel, CSV, Text, JSON, XML PDF and PPT files without slowdown.
               </p>
             </div>
             <div className="bg-surface border border-border rounded-lg p-5 text-left">
@@ -148,7 +148,7 @@ export default function HomePage() {
             <div className="bg-surface border border-border rounded-lg p-5 text-left">
               <Network className="w-5 h-5 text-primary mb-3" />
               <h3 className="text-sm font-semibold text-foreground mb-1">
-                Graph RAG engine
+                 Agentic RAG engine
               </h3>
               <p className="text-xs text-muted-foreground">
                 Builds a knowledge graph across your files to answer cross-document questions with linked reasoning.
@@ -178,7 +178,7 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="text-center text-xs text-subtle-foreground pb-8">
-        danta-search &copy; 2025 · Enterprise Data Intelligence
+        danta-search &copy; 2026 · Enterprise Data Intelligence
       </footer>
     </div>
   );
