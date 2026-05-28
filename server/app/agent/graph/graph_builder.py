@@ -372,13 +372,14 @@ def _should_force_broaden(state: AgentState) -> bool:
 
 _BROADEN_NUDGE = (
     "Stop. A prior SQL attempt failed or runtime rejected part of the schema evidence, "
-    "and you have not yet broadened catalog search. Row counts from other tables do not "
-    "prove a missing requested concept. Before writing a final answer you MUST:\n"
-    "  1. Call search_catalog using the unresolved concept names from the user request "
-    "and the rejected column names from the tool error.\n"
-    "  2. Inspect the schema of the best new candidate with get_file_schema.\n"
-    "  3. Run SQL only on real inspected columns.\n"
-    "Only after this broadened search may you answer that the evidence is unavailable."
+    "and proxy row counts from other tables do not prove a missing requested concept. "
+    "Before writing a final answer you MUST:\n"
+    "  1. Inspect the schema of the best visible or already-discovered candidate logical table.\n"
+    "  2. Use search_catalog only if the visible shortlist does not contain a table/column that "
+    "can represent the unresolved concept. Do not search for row values.\n"
+    "  3. Run SQL only on real inspected columns. If the inspected files cannot be joined with "
+    "runtime-accepted schema evidence, run separate SQL queries per file instead of forcing a join.\n"
+    "Only after this schema-driven recovery may you answer that the evidence is unavailable."
 )
 
 

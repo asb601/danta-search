@@ -14,7 +14,10 @@ export function AssistantMessage({
   isExpanded: boolean;
   onToggle: () => void;
 }) {
-  const hasData = !!(msg.payload?.data && msg.payload.data.length > 0);
+  const hasData = !!(
+    (msg.payload?.data && msg.payload.data.length > 0) ||
+    (msg.payload?.result_sets && msg.payload.result_sets.some((set) => Array.isArray(set.data) && set.data.length > 0))
+  );
   const displayText = hasData ? stripTabularContent(msg.content) : msg.content;
 
   return (
@@ -32,7 +35,7 @@ export function AssistantMessage({
               Try: &ldquo;{msg.payload.suggested_rephrase}&rdquo;
             </p>
           )}
-          {msg.payload && msg.payload.data && msg.payload.data.length > 0 && (
+          {msg.payload && hasData && (
             <ResultsAccordion
               payload={msg.payload}
               isOpen={isExpanded}

@@ -10,8 +10,9 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 
 def extract_answer(messages: list) -> str:
-    """Extract the last non-tool-call AI message as the answer."""
-    for msg in reversed(messages):
+    """Extract the terminal non-tool-call AI message as the answer."""
+    if messages:
+        msg = messages[-1]
         if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None) and msg.content:
             return msg.content if isinstance(msg.content, str) else str(msg.content)
     return ""

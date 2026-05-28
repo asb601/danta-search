@@ -15,11 +15,17 @@ export function ResultsAccordion({
   isOpen: boolean;
   onToggle: () => void;
 }) {
-  const hasData = payload.data && payload.data.length > 0;
+  const resultSets = (payload.result_sets ?? []).filter((set) => set.data && set.data.length > 0);
+  const hasData = resultSets.length > 0 || (payload.data && payload.data.length > 0);
   if (!hasData) return null;
 
-  const totalRows = payload.row_count ?? payload.data.length;
-  const displayedRows = payload.data.length;
+  const primaryData = resultSets[0]?.data ?? payload.data;
+  const totalRows = resultSets.length > 1
+    ? resultSets.reduce((sum, set) => sum + (set.row_count ?? set.data.length), 0)
+    : payload.row_count ?? primaryData.length;
+  const displayedRows = resultSets.length > 1
+    ? resultSets.reduce((sum, set) => sum + set.data.length, 0)
+    : primaryData.length;
 
   return (
     <div className="mt-3 border border-border rounded-lg overflow-hidden">
@@ -30,7 +36,9 @@ export function ResultsAccordion({
       >
         <div className="flex items-center gap-2">
           <Table2 className="w-3.5 h-3.5 text-muted-foreground" />
-          <span className="text-xs font-medium text-foreground">Results</span>
+          <span className="text-xs font-medium text-foreground">
+            {resultSets.length > 1 ? `${resultSets.length} result tables` : "Results"}
+          </span>
           <span className="bg-primary/10 text-primary text-[11px] font-mono rounded px-1.5 py-0.5">
             {totalRows.toLocaleString()} row{totalRows !== 1 ? "s" : ""}
           </span>
@@ -56,19 +64,49 @@ export function ResultsAccordion({
       {/* Accordion body */}
       {isOpen && (
         <div className="p-3 space-y-3">
-          <div className="flex items-center justify-between">
-            <p className="text-[11px] text-muted-foreground">
-              Displaying {displayedRows.toLocaleString()} of{" "}
-              {totalRows.toLocaleString()} total rows
-            </p>
-            {payload.files_used && payload.files_used.length > 0 && (
-              <DownloadPanel
-                data={payload.data}
-                filesUsed={payload.files_used}
-              />
-            )}
-          </div>
-          <DataTable data={payload.data} totalRows={totalRows} />
+          {resultSets.length > 1 ? (
+            <div className="space-y-3">
+              {resultSets.map((set, index) => {
+                const setTotalRows = set.row_count ?? set.data.length;
+                const setFiles = set.files_used ?? [];
+                return (
+                  <details key={`${set.title ?? "result"}-${index}`} open={index === 0} className="border border-border rounded-md overflow-hidden">
+                    <summary className="cursor-pointer list-none px-3 py-2 bg-surface-raised text-xs font-medium text-foreground flex items-center justify-between gap-2">
+                      <span>{set.title || `Result ${index + 1}`}</span>
+                      <span className="text-[11px] text-muted-foreground font-normal">
+                        {setTotalRows.toLocaleString()} row{setTotalRows !== 1 ? "s" : ""}
+                      </span>
+                    </summary>
+                    <div className="p-3 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-[11px] text-muted-foreground">
+                          Displaying {set.data.length.toLocaleString()} of {setTotalRows.toLocaleString()} total rows
+                        </p>
+                        {setFiles.length > 0 && <DownloadPanel data={set.data} filesUsed={setFiles} />}
+                      </div>
+                      <DataTable data={set.data} totalRows={setTotalRows} />
+                    </div>
+                  </details>
+                );
+              })}
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] text-muted-foreground">
+                  Displaying {displayedRows.toLocaleString()} of{" "}
+                  {totalRows.toLocaleString()} total rows
+                </p>
+                {payload.files_used && payload.files_used.length > 0 && (
+                  <DownloadPanel
+                    data={primaryData}
+                    filesUsed={payload.files_used}
+                  />
+                )}
+              </div>
+              <DataTable data={primaryData} totalRows={totalRows} />
+            </>
+          )}
         </div>
       )}
     </div>

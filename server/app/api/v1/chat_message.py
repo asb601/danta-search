@@ -136,6 +136,16 @@ async def chat_message(
 
         full_data = result.get("data", [])
         stored_data = full_data[:MAX_STORED_DATA_ROWS]
+        stored_result_sets = []
+        for result_set in result.get("result_sets", []) or []:
+            if not isinstance(result_set, dict):
+                continue
+            set_data = result_set.get("data", [])
+            stored_result_sets.append({
+                **result_set,
+                "data": set_data[:MAX_STORED_DATA_ROWS],
+                "data_truncated": len(set_data) > MAX_STORED_DATA_ROWS,
+            })
 
         answer_text = result.get("answer", "")
         assistant_token_count = count_tokens(answer_text)
@@ -148,6 +158,7 @@ async def chat_message(
             payload={
                 "data": stored_data,
                 "data_truncated": len(full_data) > MAX_STORED_DATA_ROWS,
+                "result_sets": stored_result_sets,
                 "chart": result.get("chart"),
                 "row_count": result.get("row_count", 0),
                 "files_used": result.get("files_used", []),

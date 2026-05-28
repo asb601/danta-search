@@ -257,12 +257,7 @@ Dataset scope: current authorized catalog.
 5. inspect_data_format \u2014 Preview raw rows from a discovery candidate; successful inspection can
                         promote that table for SQL when promotion is required.
 6. summarise_dataframe \u2014 Compute stats on the last SQL result.
-7. extract_relations   — Returns scoped join relationships and, when requested,
-                        minimal visible multi-hop paths between selected files.
-                        Call only after you have identified the smallest set of
-                        tables needed for a multi-file SQL answer. Pass only those
-                        logical table names. Start with direct joins; request multi-hop
-                        paths only when selected files are not directly connected.
+{relations_tool_note}
 
 --- HOW TO WORK ---
 Five principles. Apply them to every situation.
@@ -280,17 +275,7 @@ Five principles. Apply them to every situation.
      For multi-part workflow questions, runtime may block
     run_sql until every referenced logical table has been inspected/promoted.
 
-2. BEFORE ANY MULTI-FILE JOIN, call extract_relations first.
-    Use it only for questions that truly need more than one file. Pass the
-    smallest selected file set; do not request the global relationship graph.
-    Use the returned join_on.file_a_col, join_on.file_b_col, relationship_type,
-    path ordering, and join_type from approved relationships directly. Candidate
-    or technical_candidate relationships are evidence only: validate them with
-    schema/value inspection before joining. If direct relationships are missing
-    for selected files, request a bounded multi-hop path. Runtime blocks joins
-    between different column names unless an approved relationship supports them.
-    If no scoped path is returned, use only strong same-name keys or state that
-    the join is not supported by available evidence.
+{join_policy_note}
 
 3. EVIDENCE OVER ASSUMPTION
    If a query returns 0 rows, a JOIN fails, or a column is missing: investigate
@@ -448,6 +433,7 @@ def build_system_prompt(
     top_blob_paths: set[str] | None = None,
     workflow_topology_note: str = "",
     file_identities: FileIdentityMap | None = None,
+    relations_available: bool = True,
 ) -> str:
     """Assemble the full system prompt for the agent."""
     parquet_note = build_parquet_note(
@@ -502,6 +488,33 @@ def build_system_prompt(
     else:
         file_override_note = ""
 
+    if relations_available:
+        relations_tool_note = """7. extract_relations   — Returns scoped join relationships and, when requested,
+                        minimal visible multi-hop paths between selected files.
+                        Call only after you have identified the smallest set of
+                        tables needed for a multi-file SQL answer. Pass only those
+                        logical table names. Start with direct joins; request multi-hop
+                        paths only when selected files are not directly connected."""
+        join_policy_note = """2. BEFORE ANY MULTI-FILE JOIN, call extract_relations first.
+    Use it only for questions that truly need more than one file. Pass the
+    smallest selected file set; do not request the global relationship graph.
+    Use the returned join_on.file_a_col, join_on.file_b_col, relationship_type,
+    path ordering, and join_type from approved relationships directly. Candidate
+    or technical_candidate relationships are evidence only: validate them with
+    schema/value inspection before joining. If direct relationships are missing
+    for selected files, request a bounded multi-hop path. Runtime blocks joins
+    between different column names unless an approved relationship supports them.
+    If no scoped path is returned, use only strong same-name keys or state that
+    the join is not supported by available evidence."""
+    else:
+        relations_tool_note = """7. extract_relations   — Unavailable for this request because the relationship graph is not trusted."""
+        join_policy_note = """2. MULTI-FILE SQL WITH UNTRUSTED RELATIONSHIPS
+    Do not call extract_relations and do not use graph relationships for join planning.
+    Join tables only when inspected schemas expose a strong same-name key that runtime accepts.
+    If the needed files cannot be joined with inspected schema evidence, run separate SQL
+    queries per logical table instead of forcing a joined answer. The UI can render each
+    successful query as its own result table below the answer."""
+
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         container_name=container_name,
         max_calls=MAX_TOOL_CALLS,
@@ -511,6 +524,8 @@ def build_system_prompt(
         shortlist_count=shortlist_count,
         total_file_count=full_count,
         file_override_note=file_override_note,
+        relations_tool_note=relations_tool_note,
+        join_policy_note=join_policy_note,
         today_iso=today.isoformat(),
         today_human=today.strftime("%A, %d %B %Y"),
         this_month_start=first_of_this_month.isoformat(),

@@ -178,6 +178,16 @@ async def chat_message_stream(
                 answer_text = final_payload.get("answer", "")
                 full_data = final_payload.get("data", [])
                 stored_data = full_data[:MAX_STORED_DATA_ROWS]
+                stored_result_sets = []
+                for result_set in final_payload.get("result_sets", []) or []:
+                    if not isinstance(result_set, dict):
+                        continue
+                    set_data = result_set.get("data", [])
+                    stored_result_sets.append({
+                        **result_set,
+                        "data": set_data[:MAX_STORED_DATA_ROWS],
+                        "data_truncated": len(set_data) > MAX_STORED_DATA_ROWS,
+                    })
                 assistant_token_count = count_tokens(answer_text)
 
                 # Use a fresh session — the agent's DB reads (e.g. vector search)
@@ -192,6 +202,7 @@ async def chat_message_stream(
                         payload={
                             "data": stored_data,
                             "data_truncated": len(full_data) > MAX_STORED_DATA_ROWS,
+                            "result_sets": stored_result_sets,
                             "chart": final_payload.get("chart"),
                             "row_count": final_payload.get("row_count", 0),
                             "files_used": final_payload.get("files_used", []),

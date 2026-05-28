@@ -8,6 +8,13 @@ export interface ChartMeta {
 export interface AssistantPayload {
   answer: string;
   data: Record<string, unknown>[];
+  result_sets?: Array<{
+    title?: string;
+    data: Record<string, unknown>[];
+    row_count?: number;
+    columns?: string[];
+    files_used?: string[];
+  }>;
   chart: ChartMeta | null;
   row_count?: number;
   total_rows?: number;

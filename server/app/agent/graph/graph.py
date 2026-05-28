@@ -438,6 +438,17 @@ async def _try_planner(
         return {
             "answer": answer,
             "data": rows,
+            "result_sets": [{
+                "title": ", ".join(canonical.referenced_tables) if canonical.referenced_tables else "Planner result",
+                "data": rows,
+                "row_count": total,
+                "columns": list(rows[0].keys()) if rows else [],
+                "files_used": [
+                    file_identities.by_id[file_id].blob_path
+                    for file_id in canonical.referenced_file_ids
+                    if file_id in file_identities.by_id
+                ],
+            }],
             "chart": chart,
             "route": "planner",
             "row_count": total,
@@ -1480,7 +1491,15 @@ async def _build_agent_context(
     # lookup_field_definition — standalone tool for explicit semantic lookups.
     # Uses the same pre-loaded dict as inspect_column — zero extra SQL calls.
     all_tools.extend(build_definition_lookup_tool(field_definitions))
-    all_tools.extend(build_relations_tool(db, _discovery_tool_catalog, file_identities=file_identity_map))
+    if graph_guidance_trustworthy:
+        all_tools.extend(build_relations_tool(db, _discovery_tool_catalog, file_identities=file_identity_map))
+    else:
+        pipeline_logger.info(
+            "relations_tool_disabled",
+            reason="graph_guidance_untrusted",
+            health_level=graph_health.health_level,
+            approved_edges=len(getattr(sql_ctx, "approved_joins", []) or []),
+        )
     all_tools.extend(build_stats_tool(store))
     # inspect_data_format previews rows for discovery candidates and promotes
     # successfully inspected files before SQL.
@@ -1514,6 +1533,7 @@ async def _build_agent_context(
                     _workflow_continuity_note,
                 ])),
                 file_identities=file_identity_map,
+                relations_available=graph_guidance_trustworthy,
             ),
         ),
     )
@@ -1730,6 +1750,7 @@ async def run_agent_query(
     return {
         "answer": answer,
         "data": sql_results,
+        "result_sets": store.get("sql_result_sets", []),
         "chart": chart,
         "route": "agent",
         "row_count": sql_total_rows,
@@ -1835,6 +1856,7 @@ async def run_agent_query_stream(
     chat_logger.info("agent_stream_start", query=query[:200], file_count=ctx["catalog_len"])
 
     answer_tokens: list[str] = []
+    candidate_final_answer = ""
     tool_calls_made = 0
     files_used: set[str] = set()
     tool_outputs: list[str] = []
@@ -1867,6 +1889,8 @@ async def run_agent_query_stream(
                 # `llm_input` for the same invocation; logging again here would
                 # duplicate every LLM Input/Decision panel in the UI and made
                 # the pipeline trace look like the model was being called twice.
+                if candidate_final_answer:
+                    candidate_final_answer = ""
                 pending_chunks = []
 
             elif kind == "on_chat_model_end":
@@ -1890,14 +1914,14 @@ async def run_agent_query_stream(
                         file_identities=ctx.get("file_identity_map"),
                     )
                 ):
-                    for piece in pending_chunks:
-                        answer_tokens.append(piece)
-                        yield {"type": "token", "content": piece}
+                    candidate_final_answer = "".join(pending_chunks)
                 pending_chunks = []
 
             elif kind == "on_tool_start":
                 tool_name = event.get("name", "")
                 tool_input = event["data"].get("input", {})
+                if candidate_final_answer:
+                    candidate_final_answer = ""
                 tool_calls_made += 1
                 pipeline_logger.info(
                     "tool_call_start",
@@ -1940,7 +1964,7 @@ async def run_agent_query_stream(
         with _stores_lock:
             _request_stores.pop(req_id, None)
 
-    final_answer = "".join(answer_tokens) if answer_tokens else ""
+    final_answer = candidate_final_answer or ("".join(answer_tokens) if answer_tokens else "")
     sql_results = store.get("sql_results", [])
     total_ms = round((time.perf_counter() - pipeline_start) * 1000, 2)
 
@@ -2064,6 +2088,7 @@ async def run_agent_query_stream(
         "payload": {
             "answer": final_answer,
             "data": sql_results,
+            "result_sets": store.get("sql_result_sets", []),
             "chart": chart,
             "route": "agent",
             "row_count": sql_total_rows,

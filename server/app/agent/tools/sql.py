@@ -352,6 +352,20 @@ def build_sql_tools(
             for file_id in _attempt["referenced_file_ids"]:
                 if file_id not in used:
                     used.append(file_id)
+        referenced_tables = [str(table) for table in (_attempt.get("referenced_tables") or []) if table]
+        referenced_file_ids = [str(file_id) for file_id in (_attempt.get("referenced_file_ids") or []) if file_id]
+        result_sets = state_store.setdefault("sql_result_sets", [])
+        result_sets.append({
+            "title": ", ".join(referenced_tables) if referenced_tables else f"Result {len(result_sets) + 1}",
+            "data": rows,
+            "row_count": total,
+            "columns": list(rows[0].keys()) if rows else [],
+            "files_used": [
+                file_identities.by_id[file_id].blob_path
+                for file_id in referenced_file_ids
+                if file_identities is not None and file_id in file_identities.by_id
+            ],
+        })
         resp: dict = {
             "row_count": len(rows),
             "total_rows": total,
