@@ -8,7 +8,9 @@ Key properties:
 from __future__ import annotations
 
 import json
+import re
 import time
+from typing import Any
 
 from langchain_core.tools import tool
 
@@ -24,12 +26,152 @@ from app.services.file_identity import FileIdentityMap
 from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
 from app.services.sql_plan_signature import compute_plan_signature as _compute_plan_sig
 
+try:
+    import sqlglot
+    import sqlglot.errors
+    from sqlglot import exp as sg_exp
+    _SQLGLOT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    sqlglot = None  # type: ignore[assignment]
+    sg_exp = None  # type: ignore[assignment]
+    _SQLGLOT_AVAILABLE = False
+
 
 def _execute(sql: str, connection_string: str, container_name: str, max_rows: int) -> tuple:
     """Route to DataFusion or DuckDB based on QUERY_ENGINE config flag."""
     if get_settings().QUERY_ENGINE == "datafusion":
         return _datafusion_execute(sql, connection_string, max_rows=max_rows, container_name=container_name)
     return _duckdb_execute(sql, connection_string, max_rows=max_rows)
+
+
+def _norm(value: str) -> str:
+    return (value or "").strip().strip('`"[]').lower()
+
+
+def _schema_gate_payload(
+    logical_sql: str,
+    referenced_file_ids: list[str],
+    referenced_tables: list[str],
+    state_store: dict,
+    file_identities: FileIdentityMap,
+) -> dict[str, Any] | None:
+    inspected: dict = state_store.get("_inspected_schemas", {}) or {}
+    missing = [
+        (fid, table)
+        for fid, table in zip(referenced_file_ids, referenced_tables)
+        if fid not in inspected
+    ]
+    if missing:
+        return {
+            "error": "Schema inspection required before run_sql.",
+            "schema_required": True,
+            "required_schema_tools": [
+                {"tool": "get_file_schema", "file_ref": table}
+                for _, table in missing
+            ],
+            "hint": "Call get_file_schema for every table in the SQL, then retry using only columns shown by the schema tool.",
+        }
+
+    if not _SQLGLOT_AVAILABLE:
+        return _business_semantic_guard(logical_sql)
+
+    try:
+        tree = sqlglot.parse_one(
+            logical_sql,
+            dialect="duckdb",
+            error_level=sqlglot.errors.ErrorLevel.RAISE,
+        )
+    except Exception:
+        return _business_semantic_guard(logical_sql)
+
+    cte_names = {
+        _norm(getattr(cte, "alias_or_name", "") or "")
+        for cte in tree.find_all(sg_exp.CTE)
+    }
+    qualifier_to_fid: dict[str, str] = {}
+    for table in tree.find_all(sg_exp.Table):
+        table_name = table.name
+        if not table_name or _norm(table_name) in cte_names:
+            continue
+        try:
+            identity = file_identities.resolve_table(table_name)
+        except Exception:
+            continue
+        qualifier_to_fid[_norm(table_name)] = identity.canonical_id
+        alias = table.alias_or_name
+        if alias:
+            qualifier_to_fid[_norm(alias)] = identity.canonical_id
+
+    output_aliases = {
+        _norm(alias.alias)
+        for alias in tree.find_all(sg_exp.Alias)
+        if getattr(alias, "alias", None)
+    }
+    schema_cols = {
+        fid: set((inspected.get(fid) or {}).get("columns") or set())
+        for fid in referenced_file_ids
+    }
+    unknown: list[dict[str, str]] = []
+    for column in tree.find_all(sg_exp.Column):
+        col_name = column.name
+        if not col_name or col_name == "*":
+            continue
+        col_key = _norm(col_name)
+        if col_key in output_aliases:
+            continue
+        qualifier = _norm(column.table or "")
+        if qualifier:
+            fid = qualifier_to_fid.get(qualifier)
+            if fid and col_key not in schema_cols.get(fid, set()):
+                unknown.append({
+                    "table": (inspected.get(fid) or {}).get("logical_table") or qualifier,
+                    "column": col_name,
+                })
+        elif len(referenced_file_ids) == 1:
+            fid = referenced_file_ids[0]
+            if col_key not in schema_cols.get(fid, set()):
+                unknown.append({
+                    "table": (inspected.get(fid) or {}).get("logical_table") or referenced_tables[0],
+                    "column": col_name,
+                })
+        elif not any(col_key in cols for cols in schema_cols.values()):
+            unknown.append({"table": "<unqualified>", "column": col_name})
+
+    if unknown:
+        return {
+            "error": "SQL references columns that were not present in inspected schemas.",
+            "schema_validation_error": True,
+            "unknown_columns": unknown[:12],
+            "hint": "Rewrite the SQL using only exact column names returned by get_file_schema. Do not use semantic role labels as SQL column names.",
+        }
+
+    return _business_semantic_guard(logical_sql)
+
+
+def _business_semantic_guard(logical_sql: str) -> dict[str, Any] | None:
+    sql = " ".join((logical_sql or "").split())
+    lowered = sql.lower()
+    aliases = {
+        re.sub(r"[^a-z0-9]", "", alias.lower())
+        for alias in re.findall(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)", sql, flags=re.IGNORECASE)
+    }
+    checks = (
+        (r"approved\w*\s*=\s*'?(?:y|yes|true|approved)'?", ("pending", "open", "waiting"), "approved status is positive evidence, not pending/open evidence"),
+        (r"delivered\w*\s*=\s*'?(?:y|yes|true|delivered)'?", ("notdelivered", "pending", "issue", "problem"), "delivered status is positive evidence, not a delivery issue"),
+        (r"matched\w*\s*=\s*'?(?:y|yes|true|matched)'?", ("unmatched", "mismatch", "issue", "problem"), "matched status is positive evidence, not an invoice issue"),
+        (r"paid\w*\s*=\s*'?(?:y|yes|true|paid)'?", ("unpaid", "pending", "open", "issue"), "paid status is positive evidence, not an unpaid/open issue"),
+        (r"cleared\w*\s*=\s*'?(?:y|yes|true|cleared)'?", ("uncleared", "open", "pending"), "cleared status is positive evidence, not open/uncleared evidence"),
+    )
+    for condition_pattern, bad_alias_tokens, message in checks:
+        if not re.search(condition_pattern, lowered, flags=re.IGNORECASE):
+            continue
+        if any(any(token in alias for token in bad_alias_tokens) for alias in aliases):
+            return {
+                "error": "SQL alias conflicts with status semantics.",
+                "semantic_validation_error": True,
+                "hint": f"{message}. Use the opposite/null/not-equal condition for that facet, or report that the facet cannot be verified from inspected columns.",
+            }
+    return None
 
 
 def build_sql_tools(
@@ -81,13 +223,26 @@ def build_sql_tools(
                     file_identities,
                     allowed_file_ids=allowed_file_ids,
                 )
-                sql = canonical.executable_sql
                 _attempt.update({
                     "status": "canonicalized",
                     "referenced_file_ids": canonical.referenced_file_ids,
                     "referenced_tables": canonical.referenced_tables,
                     "physical_uris": canonical.physical_uris,
                 })
+                gate_payload = _schema_gate_payload(
+                    canonical.logical_sql,
+                    canonical.referenced_file_ids,
+                    canonical.referenced_tables,
+                    state_store,
+                    file_identities,
+                )
+                if gate_payload:
+                    _attempt.update({
+                        "status": "schema_gate_rejected",
+                        "error": gate_payload.get("error", "schema gate rejected"),
+                    })
+                    return json.dumps(gate_payload)
+                sql = canonical.executable_sql
             except SQLCanonicalizationError as ve:
                 error_msg = str(ve)
                 _attempt.update({"status": "authorization_error", "error": error_msg})

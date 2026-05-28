@@ -64,7 +64,7 @@ import traceback as _traceback
 from app.retrieval.embeddings import build_search_text
 from app.services.semantic_policy import get_semantic_policy
 from app.services.graph_health import score_graph_health
-from app.services.file_identity import FileIdentityMap, build_file_identity_map
+from app.services.file_identity import FileIdentityMap, build_file_identity_map, normalise_identity_key
 from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
 from app.services.trust_propagation import avg_ingestion_confidence as _avg_ing_conf
 from app.services.query_confidence import compute_confidence
@@ -179,6 +179,86 @@ def _extract_mentioned_files(query: str, full_catalog: list[dict]) -> list[dict]
     return mentioned
 
 
+def _prune_summary_shortlist(
+    catalog: list[dict],
+    entity_resolution: dict[str, list[EntityCandidate]],
+    retrieved_with_scores: list,
+    mentioned_entries: list[dict],
+    intent_plan: BusinessIntentPlan,
+    all_parquet_paths: dict[str, str],
+) -> tuple[list[dict], dict[str, str]]:
+    """Keep summary prompts focused on primary-subject evidence files."""
+    behaviors = set(intent_plan.behaviors or [])
+    current_blobs = {e.get("blob_path") for e in catalog}
+    current_parquet = {k: v for k, v in all_parquet_paths.items() if k in current_blobs}
+    if mentioned_entries or not ({"summary", "aggregation"} & behaviors):
+        return catalog, current_parquet
+
+    keep_ids: set[str] = set()
+    for candidates in entity_resolution.values():
+        for candidate in candidates[:6]:
+            if candidate.file_id and candidate.confidence >= 0.70:
+                keep_ids.add(candidate.file_id)
+
+    for meta, _ in (retrieved_with_scores or [])[:4]:
+        file_id = getattr(meta, "file_id", "")
+        if file_id:
+            keep_ids.add(file_id)
+
+    if not keep_ids:
+        return catalog, current_parquet
+
+    pruned = [e for e in catalog if e.get("file_id") in keep_ids]
+    seen_names: set[str] = set()
+    deduped: list[dict] = []
+    for entry in pruned:
+        name = normalise_identity_key(entry.get("blob_path") or entry.get("file_id") or "")
+        if name in seen_names:
+            continue
+        deduped.append(entry)
+        seen_names.add(name)
+
+    if len(deduped) < 3:
+        return catalog, current_parquet
+
+    pruned_blobs = {e.get("blob_path") for e in deduped}
+    parquet_paths = {k: v for k, v in all_parquet_paths.items() if k in pruned_blobs}
+    pipeline_logger.info(
+        "summary_shortlist_pruned",
+        before=len(catalog),
+        after=len(deduped),
+        kept=[e.get("blob_path") for e in deduped],
+        entities=list(entity_resolution.keys()),
+    )
+    return deduped, parquet_paths
+
+
+def _schema_cache_from_catalog(catalog: list[dict], file_identity_map: FileIdentityMap) -> dict[str, dict]:
+    cache: dict[str, dict] = {}
+    for entry in catalog:
+        file_id = str(entry.get("file_id") or "")
+        if not file_id:
+            continue
+        column_names: list[str] = []
+        for col in entry.get("columns_info") or []:
+            if isinstance(col, dict) and col.get("name"):
+                column_names.append(str(col["name"]))
+            elif isinstance(col, str):
+                column_names.append(col)
+        if not column_names:
+            column_names = [str(c) for c in (entry.get("column_names") or []) if isinstance(c, str)]
+        if not column_names:
+            continue
+        identity = file_identity_map.by_id.get(file_id)
+        cache[file_id] = {
+            "logical_table": identity.sql_name if identity else entry.get("blob_path") or file_id,
+            "display_name": identity.display_name if identity else entry.get("blob_path") or file_id,
+            "columns": {name.lower() for name in column_names},
+            "column_names": column_names,
+        }
+    return cache
+
+
 async def _get_approved_neighbor_ids(
     seed_file_ids: list[str],
     db: AsyncSession,
@@ -271,6 +351,271 @@ async def _polish_answer(raw: str) -> str:
     for cosmetic rewriting with marginal value. Returns raw unchanged.
     Kept as a no-op so callers don't break."""
     return raw
+
+
+def _entry_columns(entry: dict) -> dict[str, str]:
+    cols: list[str] = []
+    for col in entry.get("columns_info") or []:
+        if isinstance(col, dict) and col.get("name"):
+            cols.append(str(col["name"]))
+        elif isinstance(col, str):
+            cols.append(col)
+    if not cols:
+        cols = [str(c) for c in (entry.get("column_names") or []) if isinstance(c, str)]
+    return {c.lower(): c for c in cols}
+
+
+def _has_col(cols: dict[str, str], *names: str) -> str | None:
+    for name in names:
+        if name.lower() in cols:
+            return cols[name.lower()]
+    return None
+
+
+def _sql_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _logical_for_entry(entry: dict, file_identities: FileIdentityMap) -> str:
+    identity = file_identities.by_id.get(str(entry.get("file_id") or ""))
+    return identity.sql_name if identity else str(entry.get("blob_path") or "")
+
+
+def _rank_summary_entry(entry: dict) -> int:
+    name = normalise_identity_key(entry.get("blob_path") or "")
+    if "header" in name or "master" in name:
+        return 0
+    if "line_location" in name or "distribution" in name:
+        return 1
+    if "line" in name or "item" in name:
+        return 2
+    return 3
+
+
+async def _try_entity_summary_fast_path(
+    query: str,
+    ctx: dict,
+    pipeline_start: float,
+) -> dict | None:
+    """Deterministic aggregate for focused year-filtered entity summaries."""
+    try:
+        intent_plan: BusinessIntentPlan = ctx.get("intent_plan")
+        if not intent_plan or "summary" not in set(intent_plan.behaviors or []):
+            return None
+        date_range = str((intent_plan.constraints or {}).get("date_range") or "")
+        if not re.fullmatch(r"20\d{2}", date_range):
+            return None
+        entity_label = str((intent_plan.entities or ["record"])[0] or "record").replace("_", " ").strip() or "record"
+        entity_slug = re.sub(r"[^a-z0-9]+", "_", entity_label.lower()).strip("_") or "record"
+        entity_plural_slug = entity_slug if entity_slug.endswith("s") else f"{entity_slug}s"
+        entity_display = f"{entity_label}(s)"
+
+        catalog = ctx["initial_state"]["catalog"]
+        file_identities: FileIdentityMap | None = ctx.get("file_identity_map")
+        if not catalog or file_identities is None:
+            return None
+
+        by_id = {e.get("file_id"): e for e in catalog if e.get("file_id")}
+        candidate_ids: list[str] = []
+        for candidates in (ctx.get("entity_resolution") or {}).values():
+            for candidate in candidates[:6]:
+                if candidate.file_id in by_id and candidate.file_id not in candidate_ids:
+                    candidate_ids.append(candidate.file_id)
+
+        candidates = [by_id[fid] for fid in candidate_ids if fid in by_id] or catalog
+        primary = next(
+            (
+                entry for entry in sorted(candidates, key=_rank_summary_entry)
+                if _has_col(_entry_columns(entry), "po_header_id", "header_id")
+                and _has_col(_entry_columns(entry), "creation_date", "created_date", "ordered_date", "date")
+            ),
+            None,
+        )
+        if not primary:
+            return None
+
+        primary_cols = _entry_columns(primary)
+        primary_table = _logical_for_entry(primary, file_identities)
+        header_col = _has_col(primary_cols, "po_header_id", "header_id")
+        date_col = _has_col(primary_cols, "creation_date", "created_date", "ordered_date", "date")
+        approved_col = _has_col(primary_cols, "approved_flag", "approval_status", "authorization_status", "status")
+        if not header_col or not date_col:
+            return None
+
+        year_start = f"{date_range}-01-01"
+        year_end = f"{date_range}-12-31"
+        header_expr = _sql_ident(header_col)
+        date_expr = _sql_ident(date_col)
+
+        select_parts = [
+            f"(SELECT COUNT(*) FROM primary_entity) AS total_{entity_plural_slug}",
+        ]
+        if approved_col:
+            status_expr = f"LOWER(CAST({_sql_ident(approved_col)} AS VARCHAR))"
+            positive = "('y','yes','true','approved','a')"
+            select_parts.extend([
+                f"(SELECT COALESCE(SUM(CASE WHEN {status_expr} IN {positive} THEN 1 ELSE 0 END), 0) FROM primary_entity) AS approved_{entity_plural_slug}",
+                f"(SELECT COALESCE(SUM(CASE WHEN {status_expr} IS NULL OR {status_expr} NOT IN {positive} THEN 1 ELSE 0 END), 0) FROM primary_entity) AS pending_approvals",
+            ])
+        else:
+            select_parts.append("CAST(NULL AS BIGINT) AS pending_approvals")
+
+        referenced_tables = [primary_table]
+        delivery_entry = None
+        delivery_sql = "CAST(NULL AS BIGINT) AS pending_delivery_lines"
+        for entry in candidates:
+            if entry is primary:
+                continue
+            cols = _entry_columns(entry)
+            entry_header = _has_col(cols, "po_header_id", "header_id")
+            qty_ordered = _has_col(cols, "quantity", "quantity_ordered", "ordered_quantity")
+            qty_done = _has_col(cols, "quantity_received", "quantity_delivered", "delivered_quantity", "confirmed_quantity")
+            if entry_header and qty_ordered and qty_done:
+                delivery_entry = entry
+                delivery_table = _logical_for_entry(entry, file_identities)
+                referenced_tables.append(delivery_table)
+                delivery_sql = (
+                    f"(SELECT COALESCE(SUM(CASE WHEN COALESCE({_sql_ident(qty_done)}, 0) < COALESCE({_sql_ident(qty_ordered)}, 0) "
+                    f"THEN 1 ELSE 0 END), 0) FROM {delivery_table} "
+                    f"WHERE {_sql_ident(entry_header)} IN (SELECT {header_expr} FROM primary_entity)) AS pending_delivery_lines"
+                )
+                break
+        select_parts.append(delivery_sql)
+
+        invoice_entry = None
+        invoice_sql = "CAST(NULL AS BIGINT) AS invoice_lines"
+        issue_sql = "CAST(NULL AS BIGINT) AS invoice_matching_issues"
+        for entry in candidates:
+            name = normalise_identity_key(entry.get("blob_path") or "")
+            if "invoice" not in name:
+                continue
+            cols = _entry_columns(entry)
+            entry_header = _has_col(cols, "po_header_id", "header_id")
+            entry_line = _has_col(cols, "po_line_id", "line_id")
+            mismatch_col = next((c for key, c in cols.items() if any(tok in key for tok in ("mismatch", "match_issue", "matching_issue", "hold"))), None)
+            if not (entry_header or entry_line):
+                continue
+            invoice_entry = entry
+            invoice_table = _logical_for_entry(entry, file_identities)
+            referenced_tables.append(invoice_table)
+            if entry_header:
+                filter_sql = f"{_sql_ident(entry_header)} IN (SELECT {header_expr} FROM primary_entity)"
+            else:
+                line_table = next(
+                    (e for e in candidates if _has_col(_entry_columns(e), "po_line_id", "line_id") and _has_col(_entry_columns(e), "po_header_id", "header_id")),
+                    None,
+                )
+                if not line_table:
+                    continue
+                line_cols = _entry_columns(line_table)
+                line_table_name = _logical_for_entry(line_table, file_identities)
+                if line_table_name not in referenced_tables:
+                    referenced_tables.append(line_table_name)
+                line_id_col = _has_col(line_cols, "po_line_id", "line_id")
+                line_header_col = _has_col(line_cols, "po_header_id", "header_id")
+                filter_sql = (
+                    f"{_sql_ident(entry_line)} IN (SELECT {_sql_ident(line_id_col)} FROM {line_table_name} "
+                    f"WHERE {_sql_ident(line_header_col)} IN (SELECT {header_expr} FROM primary_entity))"
+                )
+            invoice_sql = f"(SELECT COUNT(*) FROM {invoice_table} WHERE {filter_sql}) AS invoice_lines"
+            if mismatch_col:
+                issue_sql = (
+                    f"(SELECT COALESCE(SUM(CASE WHEN LOWER(CAST({_sql_ident(mismatch_col)} AS VARCHAR)) IN ('y','yes','true','mismatch','issue','hold') "
+                    f"THEN 1 ELSE 0 END), 0) FROM {invoice_table} WHERE {filter_sql}) AS invoice_matching_issues"
+                )
+            break
+        select_parts.extend([invoice_sql, issue_sql])
+
+        sql = (
+            f"WITH primary_entity AS ("
+            f"SELECT * FROM {primary_table} WHERE {date_expr} BETWEEN DATE '{year_start}' AND DATE '{year_end}'"
+            f") SELECT " + ", ".join(select_parts)
+        )
+        canonical = canonicalize_logical_sql(
+            sql,
+            file_identities,
+            allowed_file_ids=ctx.get("allowed_file_ids"),
+        )
+        executable_sql = validate_and_normalise(
+            canonical.executable_sql,
+            allowed_blob_paths=ctx.get("allowed_blob_paths"),
+        )
+        import asyncio as _asyncio
+        loop = _asyncio.get_event_loop()
+        rows, total = await loop.run_in_executor(
+            None,
+            lambda: _sql_execute(
+                executable_sql,
+                ctx["initial_state"]["connection_string"],
+                ctx["initial_state"]["container_name"],
+                max_rows=100,
+            ),
+        )
+        if not rows:
+            return None
+
+        row = rows[0]
+        total_entities = row.get(f"total_{entity_plural_slug}")
+        approved = row.get(f"approved_{entity_plural_slug}")
+        pending = row.get("pending_approvals")
+        pending_delivery = row.get("pending_delivery_lines")
+        invoice_lines = row.get("invoice_lines")
+        invoice_issues = row.get("invoice_matching_issues")
+        invoice_note = (
+            f"{invoice_issues} explicit invoice matching issue(s) were found."
+            if invoice_issues is not None
+            else f"{invoice_lines or 0} related invoice line(s) exist, but no explicit mismatch/status column was available to verify matching issues."
+        )
+        delivery_note = (
+            f"{pending_delivery} line(s) still appear pending delivery."
+            if pending_delivery is not None
+            else "Delivery status could not be verified from the focused schemas."
+        )
+        source_labels: list[str] = []
+        for table in dict.fromkeys(referenced_tables):
+            label = table
+            for identity in file_identities.by_id.values():
+                if identity.sql_name == table:
+                    label = identity.blob_path.rsplit("/", 1)[-1]
+                    break
+            source_labels.append(label)
+        answer = (
+            f"1. **Direct answer** - For {date_range}, {total_entities} {entity_display} were found; "
+            f"{approved if approved is not None else 'unknown'} are approved and {pending if pending is not None else 'unknown'} are pending approval.\n\n"
+            "2. **Key insights**:\n"
+            f"   - **Current status**: {approved if approved is not None else 'No'} approved {entity_display} were verified from {source_labels[0] if source_labels else primary_table}.\n"
+            f"   - **Pending approvals**: {pending if pending is not None else 'Not verifiable'} pending approval record(s) were calculated from the inspected status column.\n"
+            f"   - **Delivery status**: {delivery_note}\n"
+            f"   - **Invoice matching**: {invoice_note}\n\n"
+            "3. **Table note** - See the results table below for the full data.\n\n"
+            f"4. **Source** - Data was sourced from {', '.join(source_labels)} with a {date_range} date filter."
+        )
+        total_ms = round((time.perf_counter() - pipeline_start) * 1000, 2)
+        pipeline_logger.info(
+            "entity_summary_fast_path_complete",
+            query=query,
+            sql=sql,
+            row_count=len(rows),
+            total_duration_ms=total_ms,
+            referenced_tables=referenced_tables,
+        )
+        chart = infer_chart(answer, rows)
+        return {
+            "answer": answer,
+            "data": rows,
+            "chart": chart,
+            "route": "entity_summary",
+            "row_count": total,
+            "files_used": [
+                file_identities.by_id[file_id].blob_path
+                for file_id in canonical.referenced_file_ids
+                if file_id in file_identities.by_id
+            ],
+            "tool_calls": 0,
+        }
+    except Exception as exc:
+        chat_logger.warning("entity_summary_fast_path_error", error=str(exc)[:300])
+        return None
 
 
 # ── Semantic Planner fast path ─────────────────────────────────────────────────
@@ -934,6 +1279,17 @@ async def _build_agent_context(
         full_catalog,
     )
 
+    catalog, parquet_paths_all = _prune_summary_shortlist(
+        catalog,
+        entity_resolution,
+        retrieved_with_scores,
+        mentioned_entries,
+        intent_plan,
+        all_parquet_paths,
+    )
+    if "summary" in set(intent_plan.behaviors or []):
+        top_blob_paths = {e.get("blob_path") for e in catalog if e.get("blob_path")}
+
     # ── STEP 2.6: HYDRATE HEAVY FIELDS for the shortlist only ───────────────
     # The cached catalog is intentionally lean (no columns_info samples,
     # sample_rows, or column_stats). We now load those heavy fields ONLY for
@@ -1107,6 +1463,7 @@ async def _build_agent_context(
     store: dict = {}
     with _stores_lock:
         _request_stores[req_id] = store
+    store["_inspected_schemas"] = _schema_cache_from_catalog(catalog, file_identity_map)
 
     # ── Request-local orchestration scratchpad ────────────────────────────────
     # Stores deterministic computations produced during context-build so that
@@ -1139,6 +1496,7 @@ async def _build_agent_context(
     all_tools.extend(build_catalog_tools(
         full_catalog, all_parquet_paths, container_name, db,
         file_identities=file_identity_map,
+        state_store=store,
     ))
     # inspect_column — bound to full catalog with optional schema dict enrichment.
     # For non-hydrated files, falls back to a bounded SQL probe.
@@ -1284,6 +1642,12 @@ async def run_agent_query(
     # For deterministic structured queries (aggregations, time-filtered analytics),
     # the planner resolves join paths from the ontology layer and generates SQL
     # directly — bypassing the full LangGraph agent. Falls back automatically.
+    entity_summary_result = await _try_entity_summary_fast_path(query, ctx, pipeline_start)
+    if entity_summary_result:
+        with _stores_lock:
+            _request_stores.pop(req_id, None)
+        return entity_summary_result
+
     planner_result = await _try_planner(query, ctx, db, pipeline_start)
     if planner_result:
         # Store was registered during _build_agent_context; clean it up here

@@ -86,8 +86,9 @@ Five principles. Apply them to every situation.
     Before writing any SQL, call get_file_schema on the target logical table (and
    inspect_column for any column whose storage format is unclear — dates,
    codes, years, identifiers). Use only column names and values you actually
-   see in those outputs. Never assume, guess, or carry over schema knowledge
-   from a previous query.
+    see in those outputs. run_sql rejects tables whose schema was not inspected
+    in this request. Never assume, guess, or carry over schema knowledge from a
+    previous query.
 
 2. BEFORE ANY MULTI-FILE JOIN, call extract_relations first.
     Use it only for questions that truly need more than one file. Pass the
@@ -164,6 +165,21 @@ Max {max_calls} tool calls total.
 
 _DESC_MAX_CHARS = 200  # max characters shown per file description in the prompt
 _DIM_METRIC_LIMIT = 4  # max key_dimensions / key_metrics shown per file
+_PROMPT_COLUMN_LIMIT = 40  # exact columns shown for priority files
+
+
+def _column_names_for_prompt(entry: dict | None) -> list[str]:
+    if not entry:
+        return []
+    names: list[str] = []
+    for col in entry.get("columns_info") or []:
+        if isinstance(col, dict) and col.get("name"):
+            names.append(str(col["name"]))
+        elif isinstance(col, str):
+            names.append(col)
+    if not names:
+        names = [str(c) for c in (entry.get("column_names") or []) if isinstance(c, str)]
+    return names[:_PROMPT_COLUMN_LIMIT]
 
 
 def build_parquet_note(
@@ -219,6 +235,11 @@ def build_parquet_note(
             # Surface column stats only for top-retrieved files to keep prompt
             # token load bounded. Lower-ranked files get date range only.
             _is_priority = top_blob_paths is None or blob in top_blob_paths
+            if _is_priority:
+                columns = _column_names_for_prompt(entry)
+                if columns:
+                    line += f"\n    Available columns: {', '.join(columns)}"
+
             if _is_priority:
                 _DATE_HINTS = ("year", "date", "period", "month", "fiscal", "quarter", "fy")
                 col_stats = (entry.get("column_stats") or {}) if entry else {}

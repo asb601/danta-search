@@ -56,6 +56,7 @@ def build_catalog_tools(
     container_name: str = "",
     db: AsyncSession | None = None,
     file_identities: FileIdentityMap | None = None,
+    state_store: dict | None = None,
 ) -> list:
     """Return search_catalog and get_file_schema tools bound to the catalog."""
 
@@ -324,6 +325,13 @@ def build_catalog_tools(
                 })
 
         identity = _identity_for(match)
+        if state_store is not None and match.get("file_id"):
+            state_store.setdefault("_inspected_schemas", {})[str(match["file_id"])] = {
+                "logical_table": _logical_table(match),
+                "display_name": identity.display_name if identity else match.get("blob_path"),
+                "columns": {str(c.get("name", "")).lower() for c in cols if c.get("name")},
+                "column_names": [c.get("name") for c in cols if c.get("name")],
+            }
         pipeline_logger.info(
             "get_file_schema",
             file_ref=file_ref,
