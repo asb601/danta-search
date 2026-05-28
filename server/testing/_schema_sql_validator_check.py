@@ -16,7 +16,11 @@ if _server_root not in sys.path:
 import app.agent.tools.sql as sql_tools
 from app.services.file_identity import build_file_identity_map
 from app.services.promotion_state import build_initial_promotion_state
-from app.services.schema_sql_validator import build_schema_index, validate_logical_sql_schema
+from app.services.schema_sql_validator import (
+    build_schema_index,
+    enrich_schema_index_with_field_definitions,
+    validate_logical_sql_schema,
+)
 from app.services.sql_context_builder import ApprovedJoin, SQLContext
 
 
@@ -245,10 +249,34 @@ def test_supported_neutral_aggregate_alias_is_allowed() -> None:
     identities, schema_index = _validator_inputs()
     report = validate_logical_sql_schema(
         """
-        SELECT po_header_id, SUM(quantity) AS total_quantity
+        SELECT po_header_id, SUM(quantity) AS sum_quantity
         FROM PO_LINES_ALL
         WHERE po_header_id IS NOT NULL
         GROUP BY po_header_id
+        """,
+        identities,
+        schema_index,
+        allowed_file_ids=identities.allowed_file_ids(),
+    )
+    assert report.ok, report.to_error_payload()
+
+
+def test_aggregate_alias_can_use_column_definition_evidence() -> None:
+    identities, schema_index = _validator_inputs()
+    schema_index = enrich_schema_index_with_field_definitions(
+        schema_index,
+        {
+            "QUANTITY": {
+                "description": "Ordered item count used as delivery quantity evidence",
+                "notes": None,
+            }
+        },
+    )
+    report = validate_logical_sql_schema(
+        """
+        SELECT SUM(quantity) AS delivery_quantity
+        FROM PO_LINES_ALL
+        WHERE quantity > 0
         """,
         identities,
         schema_index,
@@ -298,6 +326,7 @@ def main() -> None:
         test_case_literal_label_projection_is_blocked,
         test_unsupported_aggregate_business_alias_is_blocked,
         test_supported_neutral_aggregate_alias_is_allowed,
+        test_aggregate_alias_can_use_column_definition_evidence,
         test_run_sql_uses_schema_validation_before_engine,
     ]
     for check in checks:

@@ -11,27 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-_SHORT_FUNCTION_WORDS = {"of", "in", "on", "by", "to", "an", "or", "as", "at", "is", "be", "me", "my", "we", "us", "all", "any", "each"}
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:[&'][a-z0-9]+)*", re.I)
-_QUERY_INTENT_WORDS = {
-    "show", "give", "find", "list", "tell", "fetch", "display",
-    "what", "when", "where", "which", "with", "from", "have",
-    "does", "that", "this", "them", "they", "will", "been",
-    "were", "much", "many", "also", "just", "more", "than",
-}
-
-
-def _tokenize(text: str, *, min_length: int = 2) -> list[str]:
-    tokens: list[str] = []
-    for match in _TOKEN_RE.findall(str(text or "").casefold()):
-        normalized = re.sub(r"[^a-z0-9]+", "", match)
-        is_compound = len(normalized) < len(match)
-        if not is_compound and len(normalized) < min_length:
-            continue
-        if normalized in _QUERY_INTENT_WORDS:
-            continue
-        tokens.append(normalized)
-    return tokens
 
 
 @dataclass(frozen=True)
@@ -73,10 +53,8 @@ class QueryWorkOrder:
 
 
 def _clean_label(value: str) -> str:
-    return " ".join(
-        token for token in _tokenize(str(value or ""), min_length=2)
-        if token not in _SHORT_FUNCTION_WORDS
-    )
+    normalized = re.sub(r"[_\s]+", " ", str(value or "").casefold())
+    return " ".join(_TOKEN_RE.findall(normalized))
 
 
 def _dedup(items: list[str], *, limit: int = 12) -> list[str]:
@@ -102,21 +80,12 @@ def _filters_from_constraints(constraints: dict) -> tuple[list[WorkOrderFilter],
         text_value = str(value)
         filters.append(WorkOrderFilter(kind=str(key), value=text_value))
         terms.extend([str(key), text_value])
-        if str(key) == "date_range" and text_value.isdigit() and len(text_value) == 4:
-            terms.append(f"year {text_value}")
     return filters, _dedup(terms, limit=8)
 
 
 def _task_type(intent_plan: Any) -> str:
-    behaviors = set(getattr(intent_plan, "behaviors", []) or [])
     if len(getattr(intent_plan, "output_terms", []) or []) > 1:
         return "multi_output_analysis"
-    if "open_items" in behaviors and "time_filtered" in behaviors:
-        return "time_filtered_state_analysis"
-    if "aggregation" in behaviors:
-        return "aggregation_analysis"
-    if "detail_rows" in behaviors:
-        return "detail_lookup"
     return getattr(intent_plan, "intent", None) or "analysis"
 
 

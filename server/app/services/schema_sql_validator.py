@@ -38,6 +38,7 @@ class ColumnSchema:
     name: str
     normalised_name: str
     data_type: str = ""
+    evidence_text: str = ""
     known_values: tuple[str, ...] = ()
     values_are_exhaustive: bool = False
 
@@ -164,9 +165,49 @@ def overlay_inspected_schemas(
             logical_table=logical_table,
             raw_columns=columns,
         )
+        if existing:
+            table_schema = _merge_existing_column_evidence(existing, table_schema)
         if table_schema.columns:
             merged[file_id] = table_schema
     return merged
+
+
+def enrich_schema_index_with_field_definitions(
+    schema_index: dict[str, TableSchema] | None,
+    field_definitions: dict[str, dict] | None,
+) -> dict[str, TableSchema]:
+    if not schema_index or not field_definitions:
+        return schema_index or {}
+
+    enriched: dict[str, TableSchema] = {}
+    for file_id, table_schema in schema_index.items():
+        columns: dict[str, ColumnSchema] = {}
+        changed = False
+        for key, column_schema in table_schema.columns.items():
+            definition = field_definitions.get(column_schema.name.upper())
+            if not definition:
+                columns[key] = column_schema
+                continue
+            evidence_text = _join_evidence_text(
+                column_schema.evidence_text,
+                definition.get("description"),
+                definition.get("notes"),
+            )
+            columns[key] = ColumnSchema(
+                name=column_schema.name,
+                normalised_name=column_schema.normalised_name,
+                data_type=column_schema.data_type,
+                evidence_text=evidence_text,
+                known_values=column_schema.known_values,
+                values_are_exhaustive=column_schema.values_are_exhaustive,
+            )
+            changed = True
+        enriched[file_id] = TableSchema(
+            file_id=table_schema.file_id,
+            logical_table=table_schema.logical_table,
+            columns=columns,
+        ) if changed else table_schema
+    return enriched
 
 
 def validate_logical_sql_schema(
@@ -278,10 +319,46 @@ def _table_schema_from_columns(
             name=name,
             normalised_name=_column_key(name),
             data_type=str(column_entry.get("type") or column_entry.get("dtype") or ""),
+            evidence_text=_column_evidence_text(column_entry),
             known_values=tuple(values),
             values_are_exhaustive=exhaustive,
         )
     return TableSchema(file_id=file_id, logical_table=logical_table, columns=columns)
+
+
+def _merge_existing_column_evidence(existing: TableSchema, replacement: TableSchema) -> TableSchema:
+    columns: dict[str, ColumnSchema] = {}
+    for key, column_schema in replacement.columns.items():
+        existing_column = existing.columns.get(key)
+        if not existing_column or not existing_column.evidence_text:
+            columns[key] = column_schema
+            continue
+        columns[key] = ColumnSchema(
+            name=column_schema.name,
+            normalised_name=column_schema.normalised_name,
+            data_type=column_schema.data_type,
+            evidence_text=_join_evidence_text(column_schema.evidence_text, existing_column.evidence_text),
+            known_values=column_schema.known_values,
+            values_are_exhaustive=column_schema.values_are_exhaustive,
+        )
+    return TableSchema(file_id=replacement.file_id, logical_table=replacement.logical_table, columns=columns)
+
+
+def _column_evidence_text(column_entry: dict) -> str:
+    return _join_evidence_text(
+        column_entry.get("description"),
+        column_entry.get("definition"),
+        column_entry.get("business_meaning"),
+        column_entry.get("meaning"),
+        column_entry.get("label"),
+        column_entry.get("notes"),
+        column_entry.get("comment"),
+    )
+
+
+def _join_evidence_text(*values: Any) -> str:
+    parts = [str(value).strip() for value in values if value is not None and str(value).strip()]
+    return " ".join(dict.fromkeys(parts))
 
 
 def _known_values(column_entry: dict) -> tuple[list[str], bool]:
@@ -600,12 +677,6 @@ def _projection_literal_label_values(expression) -> list[str]:
     return []
 
 
-_ALIAS_UTILITY_TOKENS = {
-    "avg", "average", "count", "distinct", "max", "min", "num", "number", "per",
-    "pct", "percent", "ratio", "rate", "row", "sum", "total",
-    "amount", "cost", "price", "qty", "quantity", "value",
-    "line", "record", "item",
-}
 _TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 
 
@@ -623,10 +694,11 @@ def _validate_projection_alias_evidence(
         inner_expr = getattr(projection, "this", None)
         if not alias or inner_expr is None or inner_expr.find(exp.AggFunc) is None:
             continue
-        alias_tokens = _semantic_alias_tokens(alias)
+        evidence_tokens = _expression_evidence_tokens(inner_expr, select_expr, scope, schema_index)
+        alias_tokens = _name_tokens(alias)
         if not alias_tokens:
             continue
-        missing_tokens = sorted(token for token in alias_tokens if token not in source_tokens)
+        missing_tokens = sorted(token for token in alias_tokens if token not in source_tokens and token not in evidence_tokens)
         if not missing_tokens:
             continue
         issues.append(SchemaSQLIssue(
@@ -640,7 +712,7 @@ def _validate_projection_alias_evidence(
                 "missing_tokens": missing_tokens[:12],
                 "source_tokens": sorted(source_tokens)[:40],
                 "fix": (
-                    "Use a neutral aggregate alias such as count/total, or select/filter a real column "
+                    "Use a structural aggregate alias such as count or sum_quantity, or select/filter a real column "
                     "that proves the requested business concept."
                 ),
             },
@@ -667,18 +739,27 @@ def _select_source_tokens(select_expr, scope: _Scope, schema_index: dict[str, Ta
         if expression is None:
             continue
         for column_expr in expression.find_all(exp.Column):
-            tokens.update(_name_tokens(getattr(column_expr, "name", "") or ""))
+            resolution = _resolve_column(column_expr, scope, schema_index)
+            if resolution.column_schema:
+                tokens.update(_column_tokens(resolution.column_schema))
+            else:
+                tokens.update(_name_tokens(getattr(column_expr, "name", "") or ""))
         for literal_expr in expression.find_all(exp.Literal):
             if literal_expr.is_string:
                 tokens.update(_name_tokens(str(literal_expr.this)))
     return tokens
 
 
-def _semantic_alias_tokens(alias: str) -> set[str]:
-    return {
-        token for token in _name_tokens(alias)
-        if token not in _ALIAS_UTILITY_TOKENS and len(token) > 1
-    }
+def _expression_evidence_tokens(
+    expression,
+    select_expr,
+    scope: _Scope,
+    schema_index: dict[str, TableSchema],
+) -> set[str]:
+    tokens = _select_source_tokens(select_expr, scope, schema_index)
+    for agg_expr in expression.find_all(exp.AggFunc):
+        tokens.update(_name_tokens(type(agg_expr).__name__))
+    return tokens
 
 
 def _name_tokens(value: str) -> set[str]:
@@ -693,6 +774,10 @@ def _name_tokens(value: str) -> set[str]:
             token = token[:-1]
         tokens.add(token)
     return tokens
+
+
+def _column_tokens(column_schema: ColumnSchema) -> set[str]:
+    return _name_tokens(column_schema.name) | _name_tokens(column_schema.evidence_text)
 
 
 def _validate_cross_table_eq_contracts(

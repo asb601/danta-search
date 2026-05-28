@@ -77,6 +77,27 @@ def test_po_work_order_splits_sources_outputs_and_filters() -> None:
     assert any("po" in variant and "invoice" in variant for variant in work_order.candidate_search_queries)
 
 
+def test_work_order_preserves_planner_terms_without_static_stopwords() -> None:
+    plan = BusinessIntentPlan(
+        intent="analysis",
+        entities=["what_is_pending_now"],
+        behaviors=[],
+        constraints={"date_range": "2025"},
+        confidence=0.7,
+        source_anchor_terms=["show_me_po_details"],
+        output_terms=["what_is_pending_now"],
+        filter_terms=["with_each_status"],
+    )
+
+    work_order = build_query_work_order("show me PO details with each status", plan)
+
+    assert "show me po details" in work_order.source_anchor_terms
+    assert "what is pending now" in work_order.requested_outputs
+    assert "with each status" in work_order.filter_terms
+    assert "date range" in work_order.filter_terms
+    assert "year 2025" not in work_order.filter_terms
+
+
 def test_po_discovery_evidence_finds_related_tables_without_year_pin() -> None:
     query = (
         "Analyze PO details for year 2025 and summarize: current status; "
@@ -155,6 +176,7 @@ def test_schema_error_forces_broaden_even_after_proxy_rows() -> None:
 if __name__ == "__main__":
     checks = [
         test_po_work_order_splits_sources_outputs_and_filters,
+        test_work_order_preserves_planner_terms_without_static_stopwords,
         test_po_discovery_evidence_finds_related_tables_without_year_pin,
         test_schema_error_forces_broaden_even_after_proxy_rows,
     ]

@@ -79,7 +79,7 @@ from app.services.semantic_policy import get_semantic_policy
 from app.services.graph_health import GraphHealthScore, score_graph_health
 from app.services.file_identity import FileIdentityMap, build_file_identity_map
 from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
-from app.services.schema_sql_validator import build_schema_index
+from app.services.schema_sql_validator import build_schema_index, enrich_schema_index_with_field_definitions
 from app.services.trust_propagation import avg_ingestion_confidence as _avg_ing_conf
 from app.services.query_confidence import compute_confidence
 
@@ -188,6 +188,50 @@ def _execution_failure_payload(
     if total_files is not None:
         payload["total_files"] = total_files
     return payload
+
+
+def _schema_blockers_from_tool_outputs(tool_outputs: list[str]) -> list[dict]:
+    import json as _json
+
+    blockers: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for output in tool_outputs:
+        if not output or "schema_validation_error" not in output:
+            continue
+        try:
+            payload = _json.loads(output)
+        except Exception:
+            continue
+        for issue in payload.get("issues", []) or []:
+            if not isinstance(issue, dict):
+                continue
+            code = str(issue.get("code") or "")
+            column = str(issue.get("column") or "")
+            if code not in {"unsupported_metric_alias", "literal_label_projection", "unknown_column"}:
+                continue
+            key = (code, column)
+            if key in seen:
+                continue
+            seen.add(key)
+            blockers.append(issue)
+    return blockers
+
+
+def _schema_blocker_answer(sql_results: list[dict], blockers: list[dict]) -> str:
+    blocked = [str(issue.get("column") or issue.get("table") or issue.get("code")) for issue in blockers]
+    blocked = [item for item in blocked if item]
+    blocked_text = ", ".join(blocked[:6]) if blocked else "some requested business concepts"
+    if sql_results:
+        return (
+            "I could only return the schema-backed results that were actually proven by the inspected files. "
+            f"The requested concept(s) {blocked_text} were blocked because the SQL tried to name or infer business meanings "
+            "that were not present in the referenced columns, filters, literals, or table names. "
+            "The table below contains the validated result set that did run; treat it as structural data, not as proof of the blocked business statuses."
+        )
+    return (
+        "I could not produce a data-backed answer because the inspected schemas did not contain columns that prove "
+        f"the requested concept(s): {blocked_text}. The runtime blocked SQL aliases or columns that would have fabricated those meanings."
+    )
 
 # ── Explicit file-name extractor ─────────────────────────────────────────────
 # When the user writes "on file_a.csv" or "use file_b.csv",
@@ -1414,7 +1458,10 @@ async def _build_agent_context(
     # without requiring inspection of raw modifier_breakdown or replay_inputs.
     trace.set_confidence_attribution(confidence)
 
-    schema_index = build_schema_index(full_catalog, file_identity_map)
+    schema_index = enrich_schema_index_with_field_definitions(
+        build_schema_index(full_catalog, file_identity_map),
+        field_definitions,
+    )
 
     # Per-request state store
     req_id = req_id_for_trace   # reuse the trace correlation ID as the request ID
@@ -1935,9 +1982,12 @@ async def run_agent_query_stream(
                     output=_payload_preview(tool_output, max_chars=3000),
                     output_chars=len(str(tool_output)),
                 )
-                tool_output_str = tool_output if isinstance(tool_output, str) else str(tool_output)
-                if isinstance(tool_output, str):
-                    files_used.update(extract_blob_paths(tool_output))
+                if isinstance(tool_output, ToolMessage):
+                    tool_output_str = tool_output.content if isinstance(tool_output.content, str) else str(tool_output.content)
+                else:
+                    tool_output_str = tool_output if isinstance(tool_output, str) else str(tool_output)
+                if tool_output_str:
+                    files_used.update(extract_blob_paths(tool_output_str))
                 if tool_output_str:
                     tool_outputs.append(tool_output_str)
 
@@ -1998,16 +2048,6 @@ async def run_agent_query_stream(
         yield {"type": "done", "payload": failure_payload}
         return
 
-    # ── FINAL STEP: ANSWER READY ─────────────────────────────────────────────
-    pipeline_logger.info(
-        "final_answer",
-        query=query,
-        answer=final_answer,
-        row_count=len(sql_results),
-        tool_calls=tool_calls_made,
-        total_duration_ms=total_ms,
-    )
-
     # ── Silent-model recovery ─────────────────────────────────────────────────
     # gpt-4o-mini sometimes produces zero text tokens in its final turn after a
     # multi-tool chain (it just stops without writing the answer). Detect this
@@ -2017,7 +2057,11 @@ async def run_agent_query_stream(
         "", "Here are the results:",
         "I've gathered enough data. Let me summarise.",
     }
-    if final_answer.strip() in _HOLLOW and tool_calls_made > 0:
+    schema_blockers = _schema_blockers_from_tool_outputs(tool_outputs)
+    if final_answer.strip() in _HOLLOW and schema_blockers:
+        final_answer = _schema_blocker_answer(sql_results, schema_blockers)
+        yield {"type": "token", "content": final_answer}
+    elif final_answer.strip() in _HOLLOW and tool_calls_made > 0:
         _context_parts: list[str] = []
         if sql_results:
             import json as _j
@@ -2065,6 +2109,17 @@ async def run_agent_query_stream(
 
     # Polish pass — no-op currently, kept for future use
     final_answer = await _polish_answer(final_answer)
+
+    # ── FINAL STEP: ANSWER READY ─────────────────────────────────────────────
+    pipeline_logger.info(
+        "final_answer",
+        query=query,
+        answer=final_answer,
+        row_count=len(sql_results),
+        tool_calls=tool_calls_made,
+        total_duration_ms=total_ms,
+        schema_blockers=len(schema_blockers),
+    )
 
     chart = infer_chart(final_answer, sql_results)
     sql_total_rows = store.get("sql_total_rows", len(sql_results))
