@@ -14,6 +14,7 @@ from app.agent.search_normalization import (
     tokenize_search_query,
 )
 from app.retrieval.embeddings import build_search_text
+from app.services.promotion_state import mark_schema_inspected
 
 # Hard cap on how many files search_catalog returns to the LLM.
 # Was 15 — cut to 10 to trim token cost when search_catalog is called.
@@ -56,6 +57,7 @@ def build_catalog_tools(
     container_name: str = "",
     db: AsyncSession | None = None,
     file_identities: FileIdentityMap | None = None,
+    state_store: dict | None = None,
 ) -> list:
     """Return search_catalog and get_file_schema tools bound to the catalog."""
 
@@ -93,6 +95,15 @@ def build_catalog_tools(
             if not cols:
                 cols = [c for c in (f.get("column_names") or []) if isinstance(c, str)]
             identity = _identity_for(f)
+            discovery_evidence = None
+            if state_store:
+                evidence_items = state_store.get("_scratchpad", {}).get("discovery_candidates", [])
+                evidence_by_id = {
+                    item.get("file_id"): item
+                    for item in evidence_items
+                    if isinstance(item, dict) and item.get("file_id")
+                }
+                discovery_evidence = evidence_by_id.get(identity.canonical_id if identity else f.get("file_id"))
             return {
                 "match_score": score,
                 "matched_terms": matched_terms,
@@ -105,6 +116,7 @@ def build_catalog_tools(
                 **({"key_metrics": f["key_metrics"]} if f.get("key_metrics") else {}),
                 **({"key_dimensions": f["key_dimensions"]} if f.get("key_dimensions") else {}),
                 **({"good_for": f["good_for"][:3]} if f.get("good_for") else {}),
+                **({"discovery_evidence": discovery_evidence} if discovery_evidence else {}),
                 "date_range": f"{f.get('date_range_start')} \u2192 {f.get('date_range_end')}",
             }
 
@@ -324,6 +336,12 @@ def build_catalog_tools(
                 })
 
         identity = _identity_for(match)
+        mark_schema_inspected(
+            state_store,
+            file_id=identity.canonical_id if identity else match.get("file_id"),
+            logical_table=_logical_table(match),
+            tool="get_file_schema",
+        )
         pipeline_logger.info(
             "get_file_schema",
             file_ref=file_ref,

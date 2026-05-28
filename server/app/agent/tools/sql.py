@@ -22,6 +22,11 @@ import app.services.sql_repair as _repair
 from app.services.execution_guards import ExecutionGuard, ExecutionGuardError
 from app.services.file_identity import FileIdentityMap
 from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
+from app.services.promotion_state import (
+    PromotionRequiredError,
+    promoted_physical_uris,
+    require_sql_promotion,
+)
 from app.services.sql_plan_signature import compute_plan_signature as _compute_plan_sig
 
 
@@ -57,6 +62,12 @@ def build_sql_tools(
     # ExecutionPolicy — hoisting avoids that cost on every run_sql invocation.
     _guard = ExecutionGuard()
 
+    def _active_allowed_blob_paths() -> set[str] | None:
+        promoted = promoted_physical_uris(state_store, file_identities)
+        if promoted is not None:
+            return promoted
+        return allowed_blob_paths
+
     @tool
     def run_sql(sql: str) -> str:
         """Execute read-only SQL against logical tables from the current catalog.
@@ -88,6 +99,20 @@ def build_sql_tools(
                     "referenced_tables": canonical.referenced_tables,
                     "physical_uris": canonical.physical_uris,
                 })
+                try:
+                    require_sql_promotion(state_store, canonical.referenced_file_ids)
+                except PromotionRequiredError as pe:
+                    error_msg = str(pe)
+                    _attempt.update({"status": "promotion_required", "error": error_msg})
+                    state_store["execution_failure"] = {
+                        "status": "promotion_required",
+                        "error": error_msg,
+                    }
+                    return json.dumps({
+                        "error": error_msg,
+                        "fatal_execution_error": True,
+                        "promotion_required": True,
+                    })
             except SQLCanonicalizationError as ve:
                 error_msg = str(ve)
                 _attempt.update({"status": "authorization_error", "error": error_msg})
@@ -99,7 +124,7 @@ def build_sql_tools(
                 return json.dumps({"error": error_msg, "fatal_execution_error": True})
 
         try:
-            sql = validate_and_normalise(sql, allowed_blob_paths=allowed_blob_paths)
+            sql = validate_and_normalise(sql, allowed_blob_paths=_active_allowed_blob_paths())
         except ValueError as ve:
             error_msg = str(ve)
             _attempt.update({"status": "validation_error", "error": error_msg})
@@ -206,7 +231,7 @@ def build_sql_tools(
                     if repaired and repaired != current_sql:
                         try:
                             repaired = validate_and_normalise(
-                                repaired, allowed_blob_paths=allowed_blob_paths
+                                repaired, allowed_blob_paths=_active_allowed_blob_paths()
                             )
                             pipeline_logger.info(
                                 "sql_repair_retry",

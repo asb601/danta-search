@@ -18,6 +18,7 @@ from app.core.duckdb_client import execute_query_sync as _duckdb_execute
 from app.core.datafusion_client import execute_query_sync as _datafusion_execute
 from app.core.logger import pipeline_logger
 from app.services.file_identity import FileIdentityMap
+from app.services.promotion_state import mark_data_inspected, mark_schema_inspected
 
 
 def _execute(sql: str, connection_string: str, container_name: str | None, max_rows: int) -> tuple:
@@ -42,6 +43,7 @@ def build_sample_tool(
     container_name: str | None = None,
     connection_string: str | None = None,
     file_identities: FileIdentityMap | None = None,
+    state_store: dict | None = None,
 ) -> list:
     """Return the inspect_data_format tool bound to the full request catalog.
 
@@ -170,6 +172,18 @@ def build_sample_tool(
             rows=rows,
         )
         identity = file_identities.identity_for_blob(resolved_blob_path) if file_identities else None
+        mark_data_inspected(
+            state_store,
+            file_id=identity.canonical_id if identity else entry.get("file_id"),
+            logical_table=identity.sql_name if identity else resolved_blob_path,
+            tool="inspect_data_format",
+        )
+        mark_schema_inspected(
+            state_store,
+            file_id=identity.canonical_id if identity else entry.get("file_id"),
+            logical_table=identity.sql_name if identity else resolved_blob_path,
+            tool="inspect_data_format",
+        )
         return json.dumps({
             "logical_table": identity.sql_name if identity else resolved_blob_path,
             "canonical_id": identity.canonical_id if identity else entry.get("file_id"),

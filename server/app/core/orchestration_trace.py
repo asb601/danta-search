@@ -122,6 +122,31 @@ class OrchestrationTrace:
         except Exception:
             pass  # never raise from trace
 
+    def set_query_work_order(self, work_order: Any) -> None:
+        """Record source/output/filter split and discovery search variants."""
+        try:
+            if hasattr(work_order, "to_dict"):
+                payload = work_order.to_dict()
+            else:
+                payload = work_order
+            self._stages["query_work_order"] = _safe_val(payload)
+        except Exception:
+            pass
+
+    def set_discovery_candidates(self, candidates: list[Any]) -> None:
+        """Record request-time discovery evidence before execution gating."""
+        try:
+            payload = [
+                item.to_dict() if hasattr(item, "to_dict") else item
+                for item in list(candidates or [])[:_MAX_LIST]
+            ]
+            self._stages["discovery_candidates"] = _safe_val({
+                "count": len(candidates or []),
+                "top": payload,
+            })
+        except Exception:
+            pass
+
     def set_entity_resolver(
         self,
         entity_resolution: dict[str, list[Any]],

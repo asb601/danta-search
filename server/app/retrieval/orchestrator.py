@@ -73,6 +73,9 @@ retrieval_all_candidate_fids: contextvars.ContextVar[set[str]] = (
 retrieval_stage_errors: contextvars.ContextVar[list[dict[str, str]]] = (
     contextvars.ContextVar("retrieval_stage_errors", default=[])
 )
+retrieval_discovery_evidence: contextvars.ContextVar[dict[str, dict[str, Any]]] = (
+    contextvars.ContextVar("retrieval_discovery_evidence", default={})
+)
 
 # ── Retrieval stage bounds ─────────────────────────────────────────────────────
 # All retrieval caps and score floors are governed by RetrievalPolicy.
@@ -205,6 +208,7 @@ async def retrieve_with_scores(
     retrieval_channel_map.set({})
     retrieval_all_candidate_fids.set(set())
     retrieval_stage_errors.set([])
+    retrieval_discovery_evidence.set({})
 
     if not query or not query.strip():
         return []
@@ -405,6 +409,136 @@ async def retrieve_with_scores(
     )
 
     return fused
+
+
+def _work_order_query_variants(query: str, work_order: Any | None) -> list[str]:
+    seen: set[str] = set()
+    variants: list[str] = []
+    for item in [query] + list(getattr(work_order, "candidate_search_queries", []) or []):
+        value = str(item or "").strip()
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        variants.append(value)
+        if len(variants) >= 8:
+            break
+    return variants
+
+
+async def retrieve_discovery_candidates(
+    work_order: Any,
+    query: str,
+    user_id: str,
+    is_admin: bool,
+    db: AsyncSession,
+    top_k: int = 20,
+    container_id: str | None = None,
+    anchor_file_ids: list[str] | None = None,
+    brain_context: Any | None = None,
+) -> list[tuple[FileMetadata, float]]:
+    """Retrieve a broad, authorized discovery set from work-order variants.
+
+    This keeps SQL execution unchanged. It only widens the retrieval evidence
+    phase by trying the original query plus bounded source/output/filter search
+    variants produced by QueryWorkOrder.
+    """
+    variants = _work_order_query_variants(query, work_order)
+    if len(variants) <= 1:
+        results = await retrieve_with_scores(
+            query=query,
+            user_id=user_id,
+            is_admin=is_admin,
+            db=db,
+            top_k=top_k,
+            container_id=container_id,
+            anchor_file_ids=anchor_file_ids,
+            brain_context=brain_context,
+        )
+        retrieval_discovery_evidence.set({
+            getattr(meta, "file_id", ""): {
+                "matched_queries": [query],
+                "channels": retrieval_channel_map.get().get(getattr(meta, "file_id", ""), []),
+                "variant_count": 1,
+            }
+            for meta, _ in results
+            if getattr(meta, "file_id", None)
+        })
+        return results
+
+    aggregated: dict[str, dict[str, Any]] = {}
+    candidate_ids: set[str] = set()
+    stage_errors: list[dict[str, str]] = []
+    channel_map: dict[str, list[str]] = {}
+    max_variant_top_k = min(_MAX_TOP_K, max(top_k, min(top_k * 2, _MAX_TOP_K)))
+
+    for index, variant in enumerate(variants):
+        try:
+            variant_results = await retrieve_with_scores(
+                query=variant,
+                user_id=user_id,
+                is_admin=is_admin,
+                db=db,
+                top_k=max_variant_top_k,
+                container_id=container_id,
+                anchor_file_ids=anchor_file_ids,
+                brain_context=brain_context,
+            )
+        except Exception as exc:
+            _record_stage_error("discovery_variant", exc)
+            variant_results = []
+
+        current_channels = dict(retrieval_channel_map.get() or {})
+        current_candidates = set(retrieval_all_candidate_fids.get() or set())
+        current_errors = list(retrieval_stage_errors.get() or [])
+        candidate_ids.update(current_candidates)
+        stage_errors.extend(current_errors)
+
+        variant_weight = 1.0 / (1.0 + index * 0.15)
+        for meta, score in variant_results:
+            file_id = meta.file_id
+            item = aggregated.setdefault(file_id, {
+                "meta": meta,
+                "score": 0.0,
+                "matched_queries": [],
+                "channels": [],
+            })
+            item["score"] = float(item["score"]) + float(score) * variant_weight
+            item["matched_queries"].append(variant)
+            item["channels"].extend(current_channels.get(file_id, []))
+            channel_map.setdefault(file_id, []).extend(current_channels.get(file_id, []))
+
+    ranked = sorted(
+        aggregated.values(),
+        key=lambda item: (float(item["score"]), len(set(item["matched_queries"]))),
+        reverse=True,
+    )[:top_k]
+    final_results = [(item["meta"], float(item["score"])) for item in ranked]
+    final_channel_map = {
+        file_id: list(dict.fromkeys(channels))
+        for file_id, channels in channel_map.items()
+    }
+    evidence = {
+        file_id: {
+            "matched_queries": list(dict.fromkeys(item["matched_queries"]))[:6],
+            "channels": list(dict.fromkeys(item["channels"]))[:8],
+            "variant_count": len(set(item["matched_queries"])),
+        }
+        for file_id, item in aggregated.items()
+    }
+    retrieval_channel_map.set(final_channel_map)
+    retrieval_all_candidate_fids.set(candidate_ids | set(aggregated.keys()))
+    retrieval_stage_errors.set(stage_errors[:12])
+    retrieval_discovery_evidence.set(evidence)
+
+    chat_logger.info(
+        "retrieval_discovery_complete",
+        variants=len(variants),
+        fused=len(final_results),
+        candidate_count=len(candidate_ids | set(aggregated.keys())),
+        anchor_seeds=len(anchor_file_ids) if anchor_file_ids else 0,
+    )
+    return final_results
 
 
 async def retrieve(

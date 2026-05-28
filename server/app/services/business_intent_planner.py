@@ -29,7 +29,7 @@ Design constraints (non-negotiable):
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.core.llm_tasks import extract_entities_for_query
 from app.core.logger import chat_logger
@@ -80,6 +80,30 @@ _LAST_N_DAYS_RE = re.compile(r"\blast\s+(\d+)\s+days?\b", re.I)
 _LAST_N_MONTHS_RE = re.compile(r"\blast\s+(\d+)\s+months?\b", re.I)
 _YEAR_RE = re.compile(r"\b(20\d{2})\b")
 
+_OUTPUT_PREFIX_RE = re.compile(
+    r"\b(summari[sz]e|include|show|list|provide|return|need|want|explain|analy[sz]e)\b",
+    re.I,
+)
+_SPLIT_OUTPUT_RE = re.compile(r"(?:\n|\r|[;•]|\s+-\s+|\s+\*\s+|,)+")
+_GENERIC_OUTPUT_WORDS_RE = re.compile(
+    r"\b(all|any|each|for|with|and|or|the|a|an|of|to|in|on|by)\b",
+    re.I,
+)
+_TEMPORAL_FILTER_LABELS = {
+    "date",
+    "dates",
+    "day",
+    "days",
+    "month",
+    "months",
+    "period",
+    "quarter",
+    "quarters",
+    "time",
+    "year",
+    "years",
+}
+
 
 
 
@@ -102,6 +126,9 @@ class BusinessIntentPlan:
     behaviors: list[str]
     constraints: dict
     confidence: float
+    source_anchor_terms: list[str] = field(default_factory=list)
+    output_terms: list[str] = field(default_factory=list)
+    filter_terms: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -110,6 +137,9 @@ class BusinessIntentPlan:
             "behaviors": self.behaviors,
             "constraints": self.constraints,
             "confidence": self.confidence,
+            "source_anchor_terms": self.source_anchor_terms,
+            "output_terms": self.output_terms,
+            "filter_terms": self.filter_terms,
         }
 
 
@@ -213,6 +243,121 @@ def _extract_constraints(query: str, signals: dict) -> dict:
     return constraints
 
 
+# ── Entity role split ─────────────────────────────────────────────────────────
+
+def _normalize_label(value: str) -> str:
+    parts = [p for p in _NON_WORD_SPLIT_RE.split(str(value or "").lower()) if p]
+    return "_".join(parts)
+
+
+_NON_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _label_tokens(value: str) -> set[str]:
+    return set(t for t in _NON_WORD_SPLIT_RE.split(str(value or "").lower()) if len(t) >= 2)
+
+
+def _dedup_labels(items: list[str], *, limit: int = 20) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        label = _normalize_label(item)
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _output_phrases(query: str) -> list[str]:
+    """Extract requested-output phrases from action tails such as "summarize: ..."."""
+    tail = ""
+    if ":" in query:
+        before, after = query.split(":", 1)
+        if _OUTPUT_PREFIX_RE.search(before[-120:]):
+            tail = after
+    if not tail:
+        return []
+
+    phrases: list[str] = []
+    for raw in _SPLIT_OUTPUT_RE.split(tail):
+        cleaned = _GENERIC_OUTPUT_WORDS_RE.sub(" ", raw)
+        label = _normalize_label(cleaned)
+        if not label:
+            continue
+        token_count = len(_label_tokens(label))
+        if 1 <= token_count <= 8:
+            phrases.append(label)
+    return _dedup_labels(phrases, limit=12)
+
+
+def _constraint_filter_labels(constraints: dict) -> set[str]:
+    labels: set[str] = set()
+    for key, value in (constraints or {}).items():
+        key_label = _normalize_label(str(key))
+        value_label = _normalize_label(str(value))
+        if key_label:
+            labels.add(key_label)
+        if value_label:
+            labels.add(value_label)
+            labels.add(f"{key_label}_{value_label}" if key_label else value_label)
+        if key_label == "date_range":
+            labels.update({"date", "time", "period", "year"})
+            if value_label and value_label.isdigit() and len(value_label) == 4:
+                labels.add(f"year_{value_label}")
+    return labels
+
+
+def _overlaps_any(label: str, targets: set[str] | list[str], *, threshold: float = 0.6) -> bool:
+    tokens = _label_tokens(label)
+    if not tokens:
+        return False
+    for target in targets:
+        target_tokens = _label_tokens(target)
+        if not target_tokens:
+            continue
+        if len(tokens & target_tokens) / max(1, len(tokens)) >= threshold:
+            return True
+    return False
+
+
+def split_entity_terms(query: str, entities: list[str], constraints: dict) -> tuple[list[str], list[str], list[str]]:
+    """Split normalized entities into source anchors, outputs, and filters.
+
+    This keeps resolver pins away from filters such as "year" while preserving
+    requested outputs for discovery search variants. It is metadata-agnostic and
+    does not know about any source system or table names.
+    """
+    labels = _dedup_labels(entities, limit=20)
+    output_targets = set(_output_phrases(query))
+    filter_targets = _constraint_filter_labels(constraints)
+
+    source_terms: list[str] = []
+    output_terms: list[str] = []
+    filter_terms: list[str] = []
+
+    for label in labels:
+        tokens = _label_tokens(label)
+        if label in filter_targets or tokens <= _TEMPORAL_FILTER_LABELS or _overlaps_any(label, filter_targets, threshold=0.75):
+            filter_terms.append(label)
+        elif label in output_targets or _overlaps_any(label, output_targets):
+            output_terms.append(label)
+        else:
+            source_terms.append(label)
+
+    for constraint_label in sorted(filter_targets):
+        if constraint_label and constraint_label not in filter_terms:
+            filter_terms.append(constraint_label)
+
+    return (
+        _dedup_labels(source_terms, limit=12),
+        _dedup_labels(output_terms, limit=12),
+        _dedup_labels(filter_terms, limit=12),
+    )
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def build_business_intent_plan(query: str) -> BusinessIntentPlan:
@@ -235,6 +380,7 @@ async def build_business_intent_plan(query: str) -> BusinessIntentPlan:
         behaviors = _collect_behaviors(signals)
         constraints = _extract_constraints(query, signals)
         entities = await extract_entities_for_query(query)
+        source_terms, output_terms, filter_terms = split_entity_terms(query, entities, constraints)
 
         plan = BusinessIntentPlan(
             intent=intent,
@@ -242,6 +388,9 @@ async def build_business_intent_plan(query: str) -> BusinessIntentPlan:
             behaviors=behaviors,
             constraints=constraints,
             confidence=confidence,
+            source_anchor_terms=source_terms,
+            output_terms=output_terms,
+            filter_terms=filter_terms,
         )
 
         chat_logger.info(
@@ -251,6 +400,9 @@ async def build_business_intent_plan(query: str) -> BusinessIntentPlan:
             behaviors=behaviors,
             entity_count=len(entities),
             entities=entities[:10],  # cap log output
+            source_anchor_terms=source_terms[:10],
+            output_terms=output_terms[:10],
+            filter_terms=filter_terms[:10],
             constraints=constraints,
         )
         return plan

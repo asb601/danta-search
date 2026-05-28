@@ -26,6 +26,7 @@ from app.core.config import get_settings
 from app.core.logger import pipeline_logger
 from app.services.file_identity import FileIdentityMap
 from app.services.ingestion_config import configured_tokens
+from app.services.promotion_state import mark_schema_inspected
 
 
 def _execute(sql: str, connection_string: str, container_name: str | None, max_rows: int) -> tuple:
@@ -124,6 +125,7 @@ def build_column_tool(
     connection_string: str,
     field_definitions: dict[str, dict] | None = None,
     file_identities: FileIdentityMap | None = None,
+    state_store: dict | None = None,
 ) -> list:
     """Return the inspect_column tool bound to the request's catalog + DuckDB.
 
@@ -275,6 +277,12 @@ def build_column_tool(
         suggested = _suggest_predicate(column_name, dtype, samples)
 
         identity = file_identities.identity_for_blob(blob_path) if file_identities else None
+        mark_schema_inspected(
+            state_store,
+            file_id=identity.canonical_id if identity else entry.get("file_id"),
+            logical_table=identity.sql_name if identity else blob_path,
+            tool="inspect_column",
+        )
         result = {
             "logical_table": identity.sql_name if identity else blob_path,
             "canonical_id": identity.canonical_id if identity else entry.get("file_id"),

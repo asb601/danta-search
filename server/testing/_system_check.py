@@ -13,6 +13,7 @@ if _server_root not in sys.path:
 
 PASS = 0
 FAIL = 0
+WARN = 0
 
 
 
@@ -28,6 +29,12 @@ def fail(label, reason=""):
     global FAIL
     FAIL += 1
     print(f"  [FAIL] {label}{' — ' + reason if reason else ''}")
+
+
+def warn(label, reason=""):
+    global WARN
+    WARN += 1
+    print(f"  [WARN] {label}{' — ' + reason if reason else ''}")
 
 
 # ── 1. Module imports ─────────────────────────────────────────────────────────
@@ -49,7 +56,7 @@ _modules = [
     "app.models.file_analytics",
     "app.models.conversation",
     "app.models.background_job",
-    "app.models.audit_log",
+    "app.models.server_log",
     "app.retrieval.filters",
     "app.retrieval.temporal",
     "app.retrieval.bm25",
@@ -121,7 +128,7 @@ try:
     from app.models.user import User
     from app.models.folder import Folder
     from app.models.file_metadata import FileMetadata
-    from app.models.audit_log import AuditLog
+    from app.models.server_log import ServerLog
 
     for attr in ("id", "email", "is_admin", "allowed_domains"):
         if hasattr(User, attr):
@@ -141,11 +148,11 @@ try:
         else:
             fail(f"FileMetadata.{attr} missing")
 
-    for attr in ("actor_email", "actor_name", "actor_allowed_domains", "action", "domain_tag"):
-        if hasattr(AuditLog, attr):
-            ok(f"AuditLog.{attr}")
+    for attr in ("actor_email", "actor_role", "event", "log_type", "domain_tag", "details"):
+        if hasattr(ServerLog, attr):
+            ok(f"ServerLog.{attr}")
         else:
-            fail(f"AuditLog.{attr} missing")
+            fail(f"ServerLog.{attr} missing")
 except Exception as e:
     fail("Model check", str(e)[:120])
 
@@ -193,9 +200,19 @@ try:
         else:
             fail(f"{fn.__name__} missing {param}")
 
-    # orchestrator external signatures include optional container scoping.
+    # orchestrator external signatures include optional container scoping and
+    # optional request-time guidance hooks used by the agent graph.
     sig_rws = inspect.signature(retrieve_with_scores)
-    if list(sig_rws.parameters.keys()) == ["query", "user_id", "is_admin", "db", "top_k", "container_id"]:
+    if list(sig_rws.parameters.keys()) == [
+        "query",
+        "user_id",
+        "is_admin",
+        "db",
+        "top_k",
+        "container_id",
+        "anchor_file_ids",
+        "brain_context",
+    ]:
         ok("retrieve_with_scores signature stable")
     else:
         fail("retrieve_with_scores signature changed", str(list(sig_rws.parameters.keys())))
@@ -246,14 +263,19 @@ async def _check_db():
                 else:
                     fail(f"{table}.{col} column MISSING in DB (migration not run yet)")
 
-            # Check pgvector + pg_trgm
+            # Check pgvector + pg_trgm. pg_trgm may be blocked on Azure; fuzzy
+            # retrieval has a metadata fallback, so missing pg_trgm is degraded
+            # search quality rather than a startup failure.
             res = await conn.execute(text("SELECT extname FROM pg_extension WHERE extname IN ('vector','pg_trgm')"))
             exts = {r[0] for r in res.fetchall()}
-            for ext in ("vector", "pg_trgm"):
-                if ext in exts:
-                    ok(f"extension: {ext}")
-                else:
-                    fail(f"extension MISSING: {ext}")
+            if "vector" in exts:
+                ok("extension: vector")
+            else:
+                fail("extension MISSING: vector")
+            if "pg_trgm" in exts:
+                ok("extension: pg_trgm")
+            else:
+                warn("extension MISSING: pg_trgm", "fuzzy retrieval will use metadata-token fallback")
 
         await engine.dispose()
     except Exception as e:
@@ -283,7 +305,7 @@ except Exception as e:
 # ── Summary ───────────────────────────────────────────────────────────────────
 total = PASS + FAIL
 print(f"\n{'='*70}")
-print(f"SYSTEM CHECK: {PASS}/{total} PASS  |  {FAIL} FAIL")
+print(f"SYSTEM CHECK: {PASS}/{total} PASS  |  {FAIL} FAIL  |  {WARN} WARN")
 print(f"{'='*70}")
 if FAIL:
     sys.exit(1)

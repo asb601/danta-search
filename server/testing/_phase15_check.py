@@ -8,7 +8,7 @@ Checks:
 4.  filters.domain_clause returns a ColumnElement for non-empty allowed_domains
 5.  filters.build_base_query accepts allowed_domains kwarg without crash
 6.  bm25_search / fuzzy_search / vector_search / graph_expand signatures accept allowed_domains
-7.  orchestrator.retrieve_with_scores accepts its required args (no domain args needed — loads internally)
+7.  orchestrator retrieval signatures include optional container/guidance hooks
 8.  UserOut schema has allowed_domains field
 9.  FolderOut schema has domain_tag field
 10. admin router has /domains, /users/{user_id}/domains, /folders/{folder_id}/domain routes
@@ -86,14 +86,23 @@ check("graph_expand has allowed_domains param", "allowed_domains" in sig_ge.para
 from app.retrieval.orchestrator import retrieve_with_scores, retrieve
 sig_rws = inspect.signature(retrieve_with_scores)
 sig_r = inspect.signature(retrieve)
-# allowed_domains is loaded inside — check it doesn't require a new mandatory param
+# allowed_domains is loaded inside; optional args are current orchestration hooks.
 check(
-    "retrieve_with_scores signature unchanged (internal domain load)",
-    list(sig_rws.parameters.keys()) == ["query", "user_id", "is_admin", "db", "top_k"],
+    "retrieve_with_scores signature stable",
+    list(sig_rws.parameters.keys()) == [
+        "query",
+        "user_id",
+        "is_admin",
+        "db",
+        "top_k",
+        "container_id",
+        "anchor_file_ids",
+        "brain_context",
+    ],
 )
 check(
-    "retrieve signature unchanged",
-    list(sig_r.parameters.keys()) == ["query", "user_id", "is_admin", "db", "top_k"],
+    "retrieve signature stable",
+    list(sig_r.parameters.keys()) == ["query", "user_id", "is_admin", "db", "top_k", "container_id"],
 )
 
 # ── 8. UserOut schema ─────────────────────────────────────────────────────────

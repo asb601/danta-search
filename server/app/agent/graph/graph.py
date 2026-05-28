@@ -27,6 +27,9 @@ from app.agent.catalog_hydration import hydrate_files, merge_hydrated
 from app.agent.graph.graph_builder import build_graph
 from app.agent.llm import get_llm_mini
 from app.services.business_intent_planner import BusinessIntentPlan, build_business_intent_plan
+from app.services.query_work_order import build_query_work_order
+from app.services.source_evidence_selector import build_discovery_candidate_evidence
+from app.services.promotion_state import build_initial_promotion_state
 from app.services.brain_prompt_slice import render_brain_context_prompt
 from app.services.brain_service import BrainService, record_brain_context_trace
 from app.services.entity_resolver import EntityCandidate, resolve_entities
@@ -42,10 +45,11 @@ from app.services.execution_retrieval_gate import narrow_catalog_for_execution, 
 from app.retrieval.semantic_recovery import semantic_recovery_retrieve
 from app.services.workflow_topology import build_workflow_topology
 from app.retrieval.orchestrator import (
-    retrieve_with_scores,
+    retrieve_discovery_candidates,
     retrieval_channel_map as _retrieval_channel_map,
     retrieval_all_candidate_fids as _retrieval_all_candidate_fids,
     retrieval_stage_errors as _retrieval_stage_errors,
+    retrieval_discovery_evidence as _retrieval_discovery_evidence,
 )
 from app.agent.response_helpers import (
     extract_answer,
@@ -512,6 +516,7 @@ async def _build_agent_context(
     container_name = cached["container_name"]
     parquet_blob_path = cached["parquet_blob_path"]
     all_parquet_paths = cached["parquet_paths_all"]
+    all_authorized_parquet_paths = dict(all_parquet_paths)
 
     # ── STEP 2b: SCHEMA REGISTRY — load field definitions from any uploaded
     # data-dictionary files for this container.  Returns {} if none registered.
@@ -537,6 +542,8 @@ async def _build_agent_context(
     req_id_for_trace = request_trace_id or uuid.uuid4().hex
     trace = OrchestrationTrace(request_id=req_id_for_trace)
     trace.set_planner(intent_plan)
+    query_work_order = build_query_work_order(query, intent_plan)
+    trace.set_query_work_order(query_work_order)
 
     # Canonical request-local file identity map. The LLM sees logical table
     # names; runtime owns file IDs, blob paths, parquet paths, and ACL checks.
@@ -589,8 +596,16 @@ async def _build_agent_context(
     # One batch DB query (column_semantic_roles). No LLM. No schema-wide scans.
     # Phase 2 (future): entity_resolution will constrain retrieve_with_scores()
     # scoring so files matching resolved entities rank higher in the shortlist.
+    resolver_entities = (
+        query_work_order.source_anchor_terms
+        or query_work_order.requested_outputs
+        or [
+            entity for entity in (intent_plan.entities or [])
+            if entity not in set(query_work_order.filter_terms)
+        ]
+    )
     entity_resolution: dict[str, list[EntityCandidate]] = await resolve_entities(
-        intent_plan.entities, full_catalog, db
+        resolver_entities, full_catalog, db
     )
     trace.set_entity_resolver(entity_resolution)
 
@@ -628,8 +643,8 @@ async def _build_agent_context(
     _retrieval_stage_failures: list[dict] = []
     if user_id:
         try:
-            retrieved_with_scores = await retrieve_with_scores(
-                query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K,
+            retrieved_with_scores = await retrieve_discovery_candidates(
+                query_work_order, query, user_id, is_admin, db, top_k=max(_SHORTLIST_TOP_K, min(_SHORTLIST_TOP_K * 2, 30)),
                 container_id=container_id,
                 anchor_file_ids=retrieval_anchor_file_ids or None,
                 brain_context=brain_context,
@@ -935,6 +950,25 @@ async def _build_agent_context(
             pinned=mentioned_file_names,
         )
 
+    # ── Discovery evidence records ─────────────────────────────────────────
+    # Capture why each broad discovery candidate is relevant before the later
+    # execution gate narrows the SQL scope. SQL execution itself is unchanged.
+    _discovery_variant_evidence = dict(_retrieval_discovery_evidence.get() or {})
+    _discovery_candidates = build_discovery_candidate_evidence(
+        work_order=query_work_order,
+        catalog=catalog,
+        retrieved_with_scores=retrieved_with_scores,
+        retrieval_channels=_workflow_retrieval_channels,
+        retrieval_variant_evidence=_discovery_variant_evidence,
+    )
+    trace.set_discovery_candidates(_discovery_candidates)
+    if _discovery_candidates:
+        pipeline_logger.info(
+            "discovery_candidate_evidence",
+            candidates=len(_discovery_candidates),
+            top=[item.to_dict() for item in _discovery_candidates[:8]],
+        )
+
     # ── Top-ranked blobs for focused system-prompt context ───────────────────
     # Top-3 files by RRF retrieval score receive full column_stats context in
     # the prompt. All other shortlisted files get a compact summary to keep
@@ -1061,6 +1095,11 @@ async def _build_agent_context(
         full_catalog,
     )
 
+    # Keep the broad, authorized discovery scope before the execution gate
+    # narrows SQL authorization. Metadata/schema/sample tools use this scope;
+    # run_sql is still controlled by runtime promotion state.
+    _discovery_tool_catalog = list(catalog)
+
     # ── STEP 2.59: EXECUTION RETRIEVAL GATE ─────────────────────────────────
     # Retrieval and semantic expansion may surface a broad relevance set. Before
     # heavy hydration, prompt construction, tools, and SQL authorization, narrow
@@ -1114,6 +1153,19 @@ async def _build_agent_context(
     shortlist_ids = [e["file_id"] for e in catalog if e.get("file_id")]
     heavy_by_file = await hydrate_files(db, shortlist_ids)
     catalog = [merge_hydrated(e, heavy_by_file.get(e.get("file_id"))) for e in catalog]
+    _heavy_by_file = dict(heavy_by_file)
+    _discovery_tool_catalog = [
+        merge_hydrated(e, _heavy_by_file.get(e.get("file_id")))
+        for e in _discovery_tool_catalog
+    ]
+    _discovery_tool_blob_paths = {
+        e.get("blob_path") for e in _discovery_tool_catalog if e.get("blob_path")
+    }
+    _discovery_tool_parquet_paths = {
+        blob_path: parquet_path
+        for blob_path, parquet_path in all_authorized_parquet_paths.items()
+        if blob_path in _discovery_tool_blob_paths
+    }
     # The gated shortlist is what the prompt, discovery tools, schema tools,
     # sample tools, relations, and SQL executor use. The full catalog remains
     # in memory for observability and non-execution diagnostics only.
@@ -1345,6 +1397,15 @@ async def _build_agent_context(
     store: dict = {}
     with _stores_lock:
         _request_stores[req_id] = store
+    promotion_state = build_initial_promotion_state(
+        discovery_file_ids=list(dict.fromkeys(
+            [item.file_id for item in _discovery_candidates[:50] if item.file_id]
+            + [e.get("file_id") for e in _discovery_tool_catalog if e.get("file_id")]
+        )),
+        execution_file_ids=list(allowed_file_ids),
+        must_inspect_before_sql=query_work_order.must_inspect_before_sql,
+    )
+    store["promotion_state"] = promotion_state
 
     # ── Request-local orchestration scratchpad ────────────────────────────────
     # Stores deterministic computations produced during context-build so that
@@ -1357,6 +1418,9 @@ async def _build_agent_context(
         "file_col_text": _file_col_text,        # precomputed per-file column text
         "idf": _idf,                            # query-term IDF weights
         "intent_entities": list(intent_plan.entities) if intent_plan else [],
+        "query_work_order": query_work_order.to_dict(),
+        "discovery_candidates": [item.to_dict() for item in _discovery_candidates[:20]],
+        "promotion_state": promotion_state,
         "confidence_level": confidence.level,
         "confidence_score": confidence.score,
         "brain_memory_ids": [record.id for record in brain_context.records] if brain_context else [],
@@ -1368,38 +1432,41 @@ async def _build_agent_context(
     all_tools = []
     all_tools.extend(build_sql_tools(
         connection_string, container_name, parquet_blob_path, store,
-        allowed_blob_paths=allowed_blob_paths,
+        allowed_blob_paths=file_identity_map.allowed_physical_uris(),
         file_identities=file_identity_map,
-        allowed_file_ids=allowed_file_ids,
+        allowed_file_ids=file_identity_map.allowed_file_ids(),
         sql_ctx=sql_ctx,  # repair layer uses approved joins/columns as constraints
     ))
-    # Catalog/schema tools are scoped to the same execution envelope as SQL.
-    # If retrieval produced the wrong envelope, runtime should fail visibly
-    # instead of letting tools silently escape into unrelated tables.
+    # Discovery/schema tools are scoped to the broad authorized discovery
+    # candidates. run_sql remains gated by promotion_state above.
     all_tools.extend(build_catalog_tools(
-        catalog, parquet_paths_all, container_name, db,
+        _discovery_tool_catalog, _discovery_tool_parquet_paths, container_name, db,
         file_identities=file_identity_map,
+        state_store=store,
     ))
-    # inspect_column is scoped to the execution envelope and may use schema dict
-    # enrichment. Runtime SQL authorization enforces the same file IDs again.
+    # inspect_column is discovery-scoped and may use schema dict enrichment.
+    # Successful inspection promotes the file for SQL when promotion is required.
     # When field_definitions is non-empty, automatically appends business meaning
     # to the output (e.g. SHKZG → "Debit/Credit indicator: S=debit, H=credit").
     all_tools.extend(
         build_column_tool(
-            catalog, parquet_paths_all, container_name, connection_string,
+            _discovery_tool_catalog, _discovery_tool_parquet_paths, container_name, connection_string,
             field_definitions=field_definitions,
             file_identities=file_identity_map,
+            state_store=store,
         )
     )
     # lookup_field_definition — standalone tool for explicit semantic lookups.
     # Uses the same pre-loaded dict as inspect_column — zero extra SQL calls.
     all_tools.extend(build_definition_lookup_tool(field_definitions))
-    all_tools.extend(build_relations_tool(db, catalog, file_identities=file_identity_map))
+    all_tools.extend(build_relations_tool(db, _discovery_tool_catalog, file_identities=file_identity_map))
     all_tools.extend(build_stats_tool(store))
-    # inspect_data_format previews rows for the execution envelope only.
+    # inspect_data_format previews rows for discovery candidates and promotes
+    # successfully inspected files before SQL.
     all_tools.extend(build_sample_tool(
-        catalog, parquet_paths_all, container_name, connection_string,
+        _discovery_tool_catalog, _discovery_tool_parquet_paths, container_name, connection_string,
         file_identities=file_identity_map,
+        state_store=store,
     ))
 
     # Build graph and system prompt concurrently — both are pure CPU computation

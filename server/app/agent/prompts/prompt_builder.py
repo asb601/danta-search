@@ -241,16 +241,18 @@ Dataset scope: current authorized catalog.
 {sample_note}
 
 --- TOOLS ---
-1. run_sql             \u2014 Execute SQL against logical tables.
-2. get_file_schema     \u2014 Returns column names, types, and sample values for a logical table.
+1. run_sql             \u2014 Execute SQL only against logical tables that runtime has promoted.
+2. get_file_schema     \u2014 Returns column names, types, and sample values for a logical table;
+                        successful schema inspection promotes that table for SQL when promotion is required.
 3. inspect_column      \u2014 Returns dtype, sample values, and a one-line suggested WHERE predicate
                         for a single column. Use this BEFORE writing any filter when you are
                         unsure how the column is stored (year as int vs float, dates as ISO vs
                         delimited month-name string, identifier vs numeric, etc.). Cheap; preferred
                         over guessing or running probe SELECTs.
-4. search_catalog      \u2014 Searches the FULL catalog ({total_file_count} files). Use whenever the
+4. search_catalog      \u2014 Searches authorized discovery metadata, not row values. Use whenever the
                         shortlist above doesn't obviously contain the file you need.
-5. inspect_data_format \u2014 Preview raw rows from a specific logical table.
+5. inspect_data_format \u2014 Preview raw rows from a discovery candidate; successful inspection can
+                        promote that table for SQL when promotion is required.
 6. summarise_dataframe \u2014 Compute stats on the last SQL result.
 7. extract_relations   — Returns scoped join relationships and, when requested,
                         minimal visible multi-hop paths between selected files.
@@ -266,8 +268,9 @@ Five principles. Apply them to every situation.
     Before writing any SQL, call get_file_schema on the target logical table (and
    inspect_column for any column whose storage format is unclear — dates,
    codes, years, identifiers). Use only column names and values you actually
-   see in those outputs. Never assume, guess, or carry over schema knowledge
-   from a previous query.
+    see in those outputs. Never assume, guess, or carry over schema knowledge
+    from a previous query. For multi-part workflow questions, runtime may block
+    run_sql until every referenced logical table has been inspected/promoted.
 
 2. BEFORE ANY MULTI-FILE JOIN, call extract_relations first.
     Use it only for questions that truly need more than one file. Pass the
@@ -290,7 +293,7 @@ Five principles. Apply them to every situation.
    different column, different filter logic. Never retry the same thing with
    only superficial changes (whitespace, quoting, capitalisation).
 
-5. search_catalog searches metadata (logical table names, descriptions, column names).
+5. search_catalog searches discovery metadata (logical table names, descriptions, column names).
     It does NOT search row values. To find a row value, filter inside a logical table.
 
 --- QUESTION TYPE ---
