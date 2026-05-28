@@ -272,6 +272,13 @@ Five principles. Apply them to every situation.
     Never create SELECT string literals such as 'Open' AS status or translate
     stored codes into business labels unless a field definition or inspected
     data explicitly supports that mapping.
+    Do not rename a generic count or amount into a business state. A valid join
+    key proves row linkage only; it does not prove approval status, delivery
+    status, matching status, or any other requested concept unless an inspected
+    column/filter/literal directly represents that concept.
+    If the user asks for a year/date but the inspected tables have no usable
+    date, year, fiscal, or period column, do not claim the answer is filtered to
+    that year. State that the temporal filter is unavailable in the checked schema.
      For multi-part workflow questions, runtime may block
     run_sql until every referenced logical table has been inspected/promoted.
 

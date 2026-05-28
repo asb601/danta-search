@@ -37,6 +37,7 @@ def _catalog() -> list[dict]:
             "blob_path": "b03a3fd7_AP_INVOICE_LINES_ALL.csv",
             "columns_info": [
                 {"name": "invoice_id", "type": "int64"},
+                {"name": "po_header_id", "type": "int64"},
                 {"name": "po_line_id", "type": "int64"},
                 {"name": "amount", "type": "float64"},
             ],
@@ -222,6 +223,40 @@ def test_case_literal_label_projection_is_blocked() -> None:
     assert report.errors[0].code == "literal_label_projection"
 
 
+def test_unsupported_aggregate_business_alias_is_blocked() -> None:
+    identities, schema_index = _validator_inputs()
+    report = validate_logical_sql_schema(
+        """
+        SELECT po_header_id, COUNT(*) AS pending_invoices
+        FROM AP_INVOICE_LINES_ALL
+        WHERE po_header_id IS NOT NULL AND amount > 0
+        GROUP BY po_header_id
+        """,
+        identities,
+        schema_index,
+        allowed_file_ids=identities.allowed_file_ids(),
+    )
+    assert not report.ok
+    assert report.errors[0].code == "unsupported_metric_alias"
+    assert "pending" in report.errors[0].details["missing_tokens"]
+
+
+def test_supported_neutral_aggregate_alias_is_allowed() -> None:
+    identities, schema_index = _validator_inputs()
+    report = validate_logical_sql_schema(
+        """
+        SELECT po_header_id, SUM(quantity) AS total_quantity
+        FROM PO_LINES_ALL
+        WHERE po_header_id IS NOT NULL
+        GROUP BY po_header_id
+        """,
+        identities,
+        schema_index,
+        allowed_file_ids=identities.allowed_file_ids(),
+    )
+    assert report.ok, report.to_error_payload()
+
+
 def test_run_sql_uses_schema_validation_before_engine() -> None:
     catalog = _catalog()
     identities = build_file_identity_map(catalog, {}, "container")
@@ -261,6 +296,8 @@ def main() -> None:
         test_approved_join_allows_different_column_names,
         test_literal_label_projection_is_blocked,
         test_case_literal_label_projection_is_blocked,
+        test_unsupported_aggregate_business_alias_is_blocked,
+        test_supported_neutral_aggregate_alias_is_allowed,
         test_run_sql_uses_schema_validation_before_engine,
     ]
     for check in checks:

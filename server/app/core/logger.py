@@ -371,7 +371,7 @@ class _PipelinePrettyFormatter(logging.Formatter):
         return "\n".join(lines)
 
     def _schema(self, ev: dict, ts: str) -> str:
-        blob  = ev.get("blob_path", "")
+        blob  = ev.get("blob_path") or ev.get("resolved_blob_path") or ev.get("logical_table") or "unknown"
         found = ev.get("found", False)
         cols  = ev.get("columns", [])
         types = ev.get("column_types", {})

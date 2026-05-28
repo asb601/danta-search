@@ -76,6 +76,7 @@ _COMPLEXITY_SCORES = {
     "single_joined":        _cp.complexity_single_joined,
     "multi_cluster":        _cp.complexity_multi_cluster,
     "independent_analyses": _cp.complexity_independent,
+    "schema_driven":        1.0,
 }
 
 # ── Scoring formula version ───────────────────────────────────────────────────

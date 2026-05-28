@@ -89,6 +89,8 @@ class ExecutionStrategy:
                                 execute one SQL per cluster, merge narratively.
       "independent_analyses"  — no approved joins between any files;
                                 analyze each file independently.
+    "schema_driven"         — graph execution planning disabled for the request;
+                      runtime schema validation decides joins.
     """
     mode: str
     clusters: list[ClusterPlan] = field(default_factory=list)
@@ -103,7 +105,7 @@ class ExecutionStrategy:
 
         Returns empty string for trivial cases (single file — strategy is obvious).
         """
-        if not self.clusters or self.is_trivial():
+        if not self.clusters or self.mode == "schema_driven" or self.is_trivial():
             return ""
 
         lines: list[str] = ["--- EXECUTION MODE ---"]

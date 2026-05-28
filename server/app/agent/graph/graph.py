@@ -33,8 +33,8 @@ from app.services.promotion_state import build_initial_promotion_state
 from app.services.brain_prompt_slice import render_brain_context_prompt
 from app.services.brain_service import BrainService, record_brain_context_trace
 from app.services.entity_resolver import EntityCandidate, resolve_entities
-from app.services.sql_context_builder import build_sql_context
-from app.services.execution_strategy import plan_execution_strategy
+from app.services.sql_context_builder import SQLContext, build_sql_context
+from app.services.execution_strategy import ExecutionStrategy, plan_execution_strategy
 from app.services.plan_ir import build_plan_ir_from_context, validate_plan_ir
 from app.agent.prompts.prompt_builder import build_system_prompt
 from app.agent.search_normalization import tokenize_search_query
@@ -76,7 +76,7 @@ import structlog as _structlog
 import traceback as _traceback
 from app.retrieval.embeddings import build_search_text
 from app.services.semantic_policy import get_semantic_policy
-from app.services.graph_health import score_graph_health
+from app.services.graph_health import GraphHealthScore, score_graph_health
 from app.services.file_identity import FileIdentityMap, build_file_identity_map
 from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
 from app.services.schema_sql_validator import build_schema_index
@@ -1203,46 +1203,74 @@ async def _build_agent_context(
     # read-only constraint block so the LLM uses validated join paths and
     # column bindings instead of free-form semantic guessing.
     # Non-fatal: an empty SQLContext produces no prompt section.
-    sql_ctx = await build_sql_context(catalog, db, file_identities=file_identity_map)
+    raw_sql_ctx = await build_sql_context(catalog, db, file_identities=file_identity_map)
+
+    # ── STEP 2.72: GRAPH HEALTH GATE ───────────────────────────────────────
+    # Relationship graph data is used only when runtime health says it is
+    # trustworthy. Poor graph health disables graph-derived joins, topology,
+    # and multi-cluster execution planning for this request; schema validation
+    # still permits strong same-name keys such as po_header_id/po_line_id.
+    _meta_list = [m for m, _ in retrieved_with_scores] if retrieved_with_scores else []
+    _gh_loop = asyncio.get_running_loop()
+    graph_health, _avg_ing = await asyncio.gather(
+        _gh_loop.run_in_executor(None, score_graph_health, catalog, raw_sql_ctx),
+        _gh_loop.run_in_executor(None, _avg_ing_conf, _meta_list),
+    )
+    if graph_health.health_level in ("degraded", "poor"):
+        metrics.inc("graph_health_degraded_count")
+        pipeline_logger.warning(
+            "graph_health_issue",
+            health_level=graph_health.health_level,
+            anomaly_flags=graph_health.anomaly_flags,
+            edge_coverage=graph_health.edge_coverage,
+            confidence_p50=graph_health.confidence_p50,
+            weak_edge_ratio=graph_health.weak_edge_ratio,
+        )
+
+    graph_guidance_trustworthy = (
+        graph_health.health_level != "poor"
+        and len(getattr(raw_sql_ctx, "approved_joins", []) or []) > 0
+    )
+    sql_ctx = raw_sql_ctx if graph_guidance_trustworthy else SQLContext()
     base_sql_context_note = sql_ctx.to_prompt_section()
     trace.set_approved_joins(sql_ctx)
 
-    # ── STEP 2.75: WORKFLOW TOPOLOGY ─────────────────────────────────────────
-    # One additional DB query scoped to the shortlist file_ids. Returns:
-    #   - reachable_paths: joins available via non-shortlisted intermediate tables
-    #   - orphaned_tables: shortlisted files with no approved edges
-    # Observability only: full topology/bridge diagnostics are not injected into
-    # the LLM prompt. The agent can still call extract_relations when it needs a
-    # scoped join path.
-    _wf_topology = await build_workflow_topology(
-        catalog,
-        db,
-        full_catalog=full_catalog,
-        file_identities=file_identity_map,
-    )
-    if _wf_topology.topology_note:
-        pipeline_logger.info(
-            "workflow_topology",
-            direct_paths=len(_wf_topology.direct_paths),
-            reachable_paths=len(_wf_topology.reachable_paths),
-            orphaned_tables=len(_wf_topology.orphaned_tables),
+    exec_strategy = ExecutionStrategy(mode="schema_driven", clusters=[])
+    exec_strategy_note = ""
+    if graph_guidance_trustworthy:
+        # ── STEP 2.75: WORKFLOW TOPOLOGY ─────────────────────────────────────
+        # Graph topology is useful only when graph guidance is trustworthy.
+        _wf_topology = await build_workflow_topology(
+            catalog,
+            db,
+            full_catalog=full_catalog,
+            file_identities=file_identity_map,
         )
+        if _wf_topology.topology_note:
+            pipeline_logger.info(
+                "workflow_topology",
+                direct_paths=len(_wf_topology.direct_paths),
+                reachable_paths=len(_wf_topology.reachable_paths),
+                orphaned_tables=len(_wf_topology.orphaned_tables),
+            )
 
-    # ── STEP 2.8: EXECUTION STRATEGY ─────────────────────────────────────────
-    # Pure graph-connectivity analysis — no LLM calls, no DB queries.
-    # Runs Union-Find over approved_joins to find connected components in the
-    # shortlist. Determines whether to execute as a single joined SQL, multiple
-    # per-cluster SQLs, or fully independent analyses.
-    # Prevents the LLM from hallucinating joins between unrelated domains.
-    exec_strategy = plan_execution_strategy(catalog, sql_ctx)
-    exec_strategy_note = exec_strategy.to_prompt_section()
-    pipeline_logger.info(
-        "execution_strategy_planned",
-        mode=exec_strategy.mode,
-        clusters=len(exec_strategy.clusters),
-        cluster_sizes=[len(c.file_ids) for c in exec_strategy.clusters],
-    )
-    trace.set_execution_strategy(exec_strategy)
+        # ── STEP 2.8: EXECUTION STRATEGY ─────────────────────────────────────
+        exec_strategy = plan_execution_strategy(catalog, sql_ctx)
+        exec_strategy_note = exec_strategy.to_prompt_section()
+        pipeline_logger.info(
+            "execution_strategy_planned",
+            mode=exec_strategy.mode,
+            clusters=len(exec_strategy.clusters),
+            cluster_sizes=[len(c.file_ids) for c in exec_strategy.clusters],
+        )
+        trace.set_execution_strategy(exec_strategy)
+    else:
+        pipeline_logger.info(
+            "graph_execution_layers_disabled",
+            reason="graph_guidance_untrusted",
+            health_level=graph_health.health_level,
+            approved_edges=len(getattr(raw_sql_ctx, "approved_joins", []) or []),
+        )
 
     # Bind BrainContext to the final execution envelope and persist a compact
     # trace row. The same bounded slice is then injected with SQL constraints.
@@ -1303,35 +1331,14 @@ async def _build_agent_context(
         plan_ir = None
         pipeline_logger.warning("plan_ir_failed_open", error=str(exc)[:200])
 
-    # ── STEP 2.9: GRAPH HEALTH + ORCHESTRATION CONFIDENCE ───────────────────
-    # graph_health (pure CPU) and _avg_ing_conf (pure math) are independent of
-    # each other — compute concurrently in a thread-pool executor. Both depend
-    # only on data already fetched above. Non-blocking: failures produce neutral
-    # scores and never prevent execution.
-    _meta_list = [m for m, _ in retrieved_with_scores] if retrieved_with_scores else []
-    _gh_loop = asyncio.get_running_loop()
-    graph_health, _avg_ing = await asyncio.gather(
-        _gh_loop.run_in_executor(None, score_graph_health, catalog, sql_ctx),
-        _gh_loop.run_in_executor(None, _avg_ing_conf, _meta_list),
-    )
-    if graph_health.health_level in ("degraded", "poor"):
-        metrics.inc("graph_health_degraded_count")
-        pipeline_logger.warning(
-            "graph_health_issue",
-            health_level=graph_health.health_level,
-            anomaly_flags=graph_health.anomaly_flags,
-            edge_coverage=graph_health.edge_coverage,
-            confidence_p50=graph_health.confidence_p50,
-            weak_edge_ratio=graph_health.weak_edge_ratio,
-        )
-
+    # ── STEP 2.9: ORCHESTRATION CONFIDENCE ──────────────────────────────────
     confidence = compute_confidence(
         retrieved_with_scores=retrieved_with_scores,
         sql_ctx=sql_ctx,
         entity_resolution=entity_resolution,
         exec_strategy=exec_strategy,
         repair_attempts=0,   # initial pre-execution pass; sql.py increments this counter separately
-        graph_health=graph_health,
+        graph_health=graph_health if graph_guidance_trustworthy else GraphHealthScore(health_level="good"),
     )
     if confidence.level == "low":
         metrics.inc("low_confidence_query_count")
@@ -1344,20 +1351,7 @@ async def _build_agent_context(
         graph_health=graph_health.health_level,
     )
 
-    graph_guidance_trustworthy = (
-        graph_health.health_level != "poor"
-        and len(getattr(sql_ctx, "approved_joins", []) or []) > 0
-    )
     exec_strategy_prompt_note = exec_strategy_note if graph_guidance_trustworthy else ""
-    if exec_strategy_note and not graph_guidance_trustworthy:
-        pipeline_logger.info(
-            "execution_strategy_prompt_suppressed",
-            reason="graph_guidance_untrusted",
-            health_level=graph_health.health_level,
-            edge_coverage=graph_health.edge_coverage,
-            approved_edges=len(getattr(sql_ctx, "approved_joins", []) or []),
-            mode=exec_strategy.mode,
-        )
 
     # Constraint sections are injected at the same prompt location
     # (before HOW TO WORK). Graph-derived execution strategy text is included

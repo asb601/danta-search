@@ -15,6 +15,7 @@ and execution safety layers.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -227,6 +228,7 @@ def validate_logical_sql_schema(
                 errors.append(issue)
 
         errors.extend(_validate_literal_label_projections(select_expr))
+        errors.extend(_validate_projection_alias_evidence(select_expr, scope, schema_index))
         errors.extend(_validate_cross_table_eq_contracts(select_expr, scope, schema_index, join_contracts))
         errors.extend(_validate_in_subquery_contracts(
             select_expr,
@@ -596,6 +598,101 @@ def _projection_literal_label_values(expression) -> list[str]:
             values.append(str(default_expr.this))
         return _dedupe_values(values)
     return []
+
+
+_ALIAS_UTILITY_TOKENS = {
+    "avg", "average", "count", "distinct", "max", "min", "num", "number", "per",
+    "pct", "percent", "ratio", "rate", "row", "sum", "total",
+    "amount", "cost", "price", "qty", "quantity", "value",
+    "line", "record", "item",
+}
+_TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+
+
+def _validate_projection_alias_evidence(
+    select_expr,
+    scope: _Scope,
+    schema_index: dict[str, TableSchema],
+) -> list[SchemaSQLIssue]:
+    issues: list[SchemaSQLIssue] = []
+    source_tokens = _select_source_tokens(select_expr, scope, schema_index)
+    for projection in getattr(select_expr, "expressions", []) or []:
+        if not isinstance(projection, exp.Alias):
+            continue
+        alias = getattr(projection, "alias", "") or ""
+        inner_expr = getattr(projection, "this", None)
+        if not alias or inner_expr is None or inner_expr.find(exp.AggFunc) is None:
+            continue
+        alias_tokens = _semantic_alias_tokens(alias)
+        if not alias_tokens:
+            continue
+        missing_tokens = sorted(token for token in alias_tokens if token not in source_tokens)
+        if not missing_tokens:
+            continue
+        issues.append(SchemaSQLIssue(
+            code="unsupported_metric_alias",
+            column=alias,
+            message=(
+                f"Aggregate alias '{alias}' implies concept token(s) {missing_tokens[:6]} "
+                "that are not backed by the referenced columns, filters, literals, or table names."
+            ),
+            details={
+                "missing_tokens": missing_tokens[:12],
+                "source_tokens": sorted(source_tokens)[:40],
+                "fix": (
+                    "Use a neutral aggregate alias such as count/total, or select/filter a real column "
+                    "that proves the requested business concept."
+                ),
+            },
+        ))
+    return issues
+
+
+def _select_source_tokens(select_expr, scope: _Scope, schema_index: dict[str, TableSchema]) -> set[str]:
+    tokens: set[str] = set()
+    for file_id in scope.file_ids:
+        table_schema = schema_index.get(file_id)
+        if table_schema:
+            tokens.update(_name_tokens(table_schema.logical_table))
+
+    source_exprs = [
+        select_expr.args.get("where"),
+        select_expr.args.get("group"),
+        select_expr.args.get("having"),
+    ]
+    for projection in getattr(select_expr, "expressions", []) or []:
+        source_exprs.append(getattr(projection, "this", None) if isinstance(projection, exp.Alias) else projection)
+
+    for expression in source_exprs:
+        if expression is None:
+            continue
+        for column_expr in expression.find_all(exp.Column):
+            tokens.update(_name_tokens(getattr(column_expr, "name", "") or ""))
+        for literal_expr in expression.find_all(exp.Literal):
+            if literal_expr.is_string:
+                tokens.update(_name_tokens(str(literal_expr.this)))
+    return tokens
+
+
+def _semantic_alias_tokens(alias: str) -> set[str]:
+    return {
+        token for token in _name_tokens(alias)
+        if token not in _ALIAS_UTILITY_TOKENS and len(token) > 1
+    }
+
+
+def _name_tokens(value: str) -> set[str]:
+    tokens: set[str] = set()
+    for raw in _TOKEN_RE.findall(str(value or "").casefold()):
+        token = raw.strip("_")
+        if not token or token == "all":
+            continue
+        if token.endswith("ies") and len(token) > 4:
+            token = token[:-3] + "y"
+        elif token.endswith("s") and len(token) > 3:
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
 
 
 def _validate_cross_table_eq_contracts(
