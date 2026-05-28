@@ -123,10 +123,71 @@ def test_po_discovery_evidence_finds_related_tables_without_year_pin() -> None:
     assert evidence_by_file.get("bseg") is None or evidence_by_file["bseg"].source_anchor_match_count == 0
 
 
+def test_partial_evidence_guard_blocks_confident_proxy_answer() -> None:
+    from app.agent.graph.graph import _partial_evidence_payload
+
+    store = {
+        "_scratchpad": {
+            "query_work_order": {
+                "requested_outputs": [
+                    "current_status",
+                    "pending_approvals",
+                    "delivery_status",
+                    "invoice_matching_issues",
+                    "recommended_next_actions",
+                ],
+                "source_anchor_terms": ["po_details"],
+                "filter_terms": ["year 2025"],
+            }
+        },
+        "schema_columns_by_file_id": {
+            "po-lines": [
+                {"name": "po_line_id"},
+                {"name": "po_header_id"},
+                {"name": "quantity"},
+                {"name": "unit_price"},
+            ],
+            "ap-lines": [
+                {"name": "invoice_id"},
+                {"name": "po_line_id"},
+                {"name": "po_header_id"},
+            ],
+            "po-distributions": [
+                {"name": "po_distribution_id"},
+                {"name": "po_line_id"},
+                {"name": "quantity_ordered"},
+            ],
+        },
+        "sql_attempts": [
+            {
+                "status": "schema_validation_error",
+                "schema_issues": [
+                    {"code": "unknown_column", "table": "PO_DISTRIBUTIONS_ALL", "column": "status"}
+                ],
+            },
+            {"status": "success", "logical_sql": "SELECT COUNT(*) AS total_deliveries FROM PO_DISTRIBUTIONS_ALL"},
+        ],
+        "sql_results": [{"total_deliveries": 25763}],
+    }
+
+    payload = _partial_evidence_payload(
+        store,
+        route="agent",
+        tool_calls=8,
+        file_identities=None,
+    )
+
+    assert payload is not None
+    assert payload["partial_evidence"] is True
+    assert "delivery status" in payload["answer"] or "delivery_status" in payload["unresolved_outputs"]
+    assert payload["data"] == []
+
+
 if __name__ == "__main__":
     checks = [
         test_po_work_order_splits_sources_outputs_and_filters,
         test_po_discovery_evidence_finds_related_tables_without_year_pin,
+        test_partial_evidence_guard_blocks_confident_proxy_answer,
     ]
     for check in checks:
         check()

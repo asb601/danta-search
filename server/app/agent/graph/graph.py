@@ -189,6 +189,137 @@ def _execution_failure_payload(
         payload["total_files"] = total_files
     return payload
 
+
+_OUTPUT_MODIFIER_TOKENS = {
+    "current", "pending", "recommended", "recommend", "next", "action", "actions",
+    "issue", "issues", "summary", "summarize", "analyse", "analyze", "detail", "details",
+}
+
+
+def _evidence_tokens(value: object) -> set[str]:
+    tokens: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", str(value or "").casefold()):
+        if len(token) < 2:
+            continue
+        if token.endswith("ies") and len(token) > 4:
+            token = token[:-3] + "y"
+        elif token.endswith("s") and len(token) > 3:
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
+
+
+def _schema_evidence_tokens(store: dict) -> set[str]:
+    tokens: set[str] = set()
+    inspected = store.get("schema_columns_by_file_id") or {}
+    if not isinstance(inspected, dict):
+        return tokens
+    for columns in inspected.values():
+        if not isinstance(columns, list):
+            continue
+        for column in columns:
+            if not isinstance(column, dict):
+                continue
+            tokens.update(_evidence_tokens(column.get("name")))
+    return tokens
+
+
+def _schema_validation_attempts(store: dict) -> list[dict]:
+    return [
+        attempt for attempt in (store.get("sql_attempts") or [])
+        if attempt.get("status") == "schema_validation_error"
+    ]
+
+
+def _unresolved_requested_outputs(store: dict) -> list[str]:
+    work_order = ((store.get("_scratchpad") or {}).get("query_work_order") or {})
+    requested_outputs = work_order.get("requested_outputs") or []
+    if not isinstance(requested_outputs, list):
+        return []
+
+    evidence_tokens = _schema_evidence_tokens(store)
+    context_tokens: set[str] = set()
+    for key in ("source_anchor_terms", "filter_terms"):
+        for item in work_order.get(key) or []:
+            context_tokens.update(_evidence_tokens(item))
+
+    unresolved: list[str] = []
+    for output in requested_outputs:
+        output_text = str(output or "").replace("_", " ").strip()
+        if not output_text:
+            continue
+        required = {
+            token for token in _evidence_tokens(output_text)
+            if token not in _OUTPUT_MODIFIER_TOKENS and token not in context_tokens
+        }
+        if not required:
+            continue
+        if not required.issubset(evidence_tokens):
+            unresolved.append(output_text)
+    return unresolved
+
+
+def _partial_evidence_payload(
+    store: dict,
+    *,
+    route: str,
+    tool_calls: int,
+    file_identities: FileIdentityMap | None,
+    retrieved_files: int | None = None,
+    total_files: int | None = None,
+) -> dict | None:
+    """Return a partial-evidence payload when mixed SQL results cannot satisfy the work order."""
+    schema_failures = _schema_validation_attempts(store)
+    if not schema_failures:
+        return None
+    attempts = store.get("sql_attempts") or []
+    if not any(attempt.get("status") == "success" for attempt in attempts):
+        return None
+
+    unresolved_outputs = _unresolved_requested_outputs(store)
+    if not unresolved_outputs:
+        return None
+
+    checked_tables = sorted({
+        str(issue.get("table"))
+        for attempt in schema_failures
+        for issue in (attempt.get("schema_issues") or [])
+        if isinstance(issue, dict) and issue.get("table")
+    })
+    schema_issues = [
+        issue for attempt in schema_failures
+        for issue in (attempt.get("schema_issues") or [])
+        if isinstance(issue, dict)
+    ]
+    unresolved_text = ", ".join(unresolved_outputs[:6])
+    checked_text = ", ".join(checked_tables[:6]) if checked_tables else "the inspected logical tables"
+    answer = (
+        "I can only provide a partial PO analysis because the inspected evidence does not support "
+        f"these requested output(s): {unresolved_text}. Some aggregate SQL queries returned rows, "
+        "but earlier runtime validation rejected the status/join evidence needed to make a complete "
+        "business conclusion. Do not treat the returned proxy counts as proof that approvals, delivery, "
+        "or matching issues are clean. Checked tables include "
+        f"{checked_text}. Recommended next action: search and inspect the logical tables/columns that "
+        "explicitly contain the missing status, approval, delivery, or matching evidence, then rerun the analysis."
+    )
+    payload = {
+        "answer": answer,
+        "data": [],
+        "chart": None,
+        "route": route,
+        "row_count": 0,
+        "files_used": _files_used_from_store(store, file_identities),
+        "tool_calls": tool_calls,
+        "partial_evidence": True,
+        "unresolved_outputs": unresolved_outputs,
+        "schema_issues": schema_issues[:8],
+    }
+    if retrieved_files is not None:
+        payload["retrieved_files"] = retrieved_files
+    if total_files is not None:
+        payload["total_files"] = total_files
+    return payload
+
 # ── Explicit file-name extractor ─────────────────────────────────────────────
 # When the user writes "on file_a.csv" or "use file_b.csv",
 # we detect that mention and pin the matching catalog entry at the TOP of the
@@ -1698,6 +1829,30 @@ async def run_agent_query(
         )
         return failure_payload
 
+    partial_payload = _partial_evidence_payload(
+        store,
+        route="agent",
+        tool_calls=tool_calls_made,
+        file_identities=ctx.get("file_identity_map"),
+    )
+    if partial_payload:
+        trace.set_execution_outcome(
+            rows=0,
+            total=0,
+            duration_ms=total_ms,
+            error="partial evidence: requested outputs not fully supported",
+        )
+        trace.emit()
+        pipeline_logger.info(
+            "final_answer_partial_evidence",
+            query=query,
+            answer=partial_payload["answer"],
+            unresolved_outputs=partial_payload.get("unresolved_outputs", []),
+            tool_calls=tool_calls_made,
+            total_duration_ms=total_ms,
+        )
+        return partial_payload
+
     # ── FINAL STEP: ANSWER READY ─────────────────────────────────────────────
     pipeline_logger.info(
         "final_answer",
@@ -1889,6 +2044,12 @@ async def run_agent_query_stream(
                         tool_calls=tool_calls_made,
                         file_identities=ctx.get("file_identity_map"),
                     )
+                    and not _partial_evidence_payload(
+                        store,
+                        route="agent",
+                        tool_calls=tool_calls_made,
+                        file_identities=ctx.get("file_identity_map"),
+                    )
                 ):
                     for piece in pending_chunks:
                         answer_tokens.append(piece)
@@ -1978,6 +2139,34 @@ async def run_agent_query_stream(
         )
         yield {"type": "token", "content": failure_payload["answer"]}
         yield {"type": "done", "payload": failure_payload}
+        return
+
+    partial_payload = _partial_evidence_payload(
+        store,
+        route="agent",
+        tool_calls=tool_calls_made,
+        file_identities=ctx.get("file_identity_map"),
+        retrieved_files=ctx["catalog_len"],
+        total_files=ctx["total_files"],
+    )
+    if partial_payload:
+        trace.set_execution_outcome(
+            rows=0,
+            total=0,
+            duration_ms=total_ms,
+            error="partial evidence: requested outputs not fully supported",
+        )
+        trace.emit()
+        pipeline_logger.info(
+            "final_answer_partial_evidence",
+            query=query,
+            answer=partial_payload["answer"],
+            unresolved_outputs=partial_payload.get("unresolved_outputs", []),
+            tool_calls=tool_calls_made,
+            total_duration_ms=total_ms,
+        )
+        yield {"type": "token", "content": partial_payload["answer"]}
+        yield {"type": "done", "payload": partial_payload}
         return
 
     # ── FINAL STEP: ANSWER READY ─────────────────────────────────────────────
