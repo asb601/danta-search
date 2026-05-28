@@ -3,7 +3,7 @@ name: Deploy to VM
 
 on:
   push:
-    branches: [stable-demo-v1]
+    branches: [main]
     paths:
       - "server/**"
       - ".github/workflows/deploy.yml"
@@ -51,10 +51,10 @@ jobs:
 
             cd ~/G-CHAT-
 
-            # Keep VM checkout clean and pinned to stable-demo-v1
+            # Keep VM checkout clean and pinned to main
             git restore client server/uv.lock 2>/dev/null || true
-            git fetch origin stable-demo-v1
-            git checkout -B stable-demo-v1 origin/stable-demo-v1
+            git fetch origin main
+            git checkout -B main origin/main
 
             # ── 3. Write .env from GitHub Secret ─────────────────────────────
             cat > ~/G-CHAT-/server/.env << 'ENVEOF'
