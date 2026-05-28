@@ -21,9 +21,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
         with:
-          host: ${{ secrets.VM_HOST_2 }}
-          username: ${{ secrets.VM_USER_2 }}
-          key: ${{ secrets.VM_SSH_KEY_2 }}
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
           envs: GH_TOKEN
 
           script: |
