@@ -273,7 +273,7 @@ def _check_statement_type(stmt: Any, report: AstValidationReport) -> None:
     t = type(stmt).__name__
     report.statement_type = t
 
-    if isinstance(stmt, sg_exp.Select):
+    if isinstance(stmt, sg_exp.Select) or t in {"Union", "Intersect", "Except"}:
         report.findings.append(AstFinding(check="statement_type", decision="allow"))
         return
 
@@ -282,7 +282,7 @@ def _check_statement_type(stmt: Any, report: AstValidationReport) -> None:
         decision = "deny",
         reason   = (
             f"Non-SELECT statement '{t}' is not permitted. "
-            "Only SELECT queries are allowed."
+            "Only SELECT queries and read-only set operations are allowed."
         ),
         metadata = {"statement_type": t},
     ))

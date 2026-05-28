@@ -19,4 +19,4 @@ class AgentState(TypedDict):
     is_first_turn: bool  # Kept for backward state-shape compat; escalation is now error-driven (always False)
 
 
-MAX_TOOL_CALLS = 8
+MAX_TOOL_CALLS = 16

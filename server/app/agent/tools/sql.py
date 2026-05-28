@@ -130,6 +130,7 @@ def build_sql_tools(
                     file_identities,
                     active_schema_index,
                     allowed_file_ids=allowed_file_ids,
+                    sql_ctx=sql_ctx,
                 )
                 if schema_report.warnings:
                     schema_warnings = [issue.to_dict() for issue in schema_report.warnings[:6]]

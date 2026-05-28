@@ -49,6 +49,7 @@ def _fmt_message(m) -> dict:
 
 _MAX_LLM_RETRIES = 3
 _RETRY_BASE_DELAY = 5  # seconds, doubles each retry
+_MAX_TOOL_CALLS_PER_TURN = 4
 
 
 def _should_escalate_to_primary(messages: list) -> bool:
@@ -126,9 +127,26 @@ def build_agent_node(all_tools: list):
         usage = getattr(response, "usage_metadata", None)
         p_tok = usage.get("input_tokens", 0) if usage else 0
         c_tok = usage.get("output_tokens", 0) if usage else 0
+        tool_calls_out = getattr(response, "tool_calls", None) or []
+        remaining_tool_budget = max(0, MAX_TOOL_CALLS - count)
+        allowed_this_turn = min(remaining_tool_budget, _MAX_TOOL_CALLS_PER_TURN)
+        if len(tool_calls_out) > allowed_this_turn:
+            pipeline_logger.info(
+                "tool_calls_trimmed",
+                iteration=count + 1,
+                requested=len(tool_calls_out),
+                allowed=allowed_this_turn,
+                remaining_budget=remaining_tool_budget,
+            )
+            if allowed_this_turn <= 0:
+                return {"messages": [AIMessage(content="I've gathered enough data. Let me summarise.")]}
+            response = AIMessage(
+                content=response.content or "",
+                tool_calls=tool_calls_out[:allowed_this_turn],
+            )
+            tool_calls_out = getattr(response, "tool_calls", None) or []
 
         # ── Log the full LLM response: content + every tool call with full args ──
-        tool_calls_out = getattr(response, "tool_calls", None) or []
         pipeline_logger.debug(
             "llm_output",
             iteration=count + 1,
@@ -156,7 +174,7 @@ def build_agent_node(all_tools: list):
         n_calls = len(getattr(response, "tool_calls", None) or [])
         return {
             "messages": [response],
-            "tool_call_count": count + (1 if n_calls else 0),
+            "tool_call_count": count + n_calls,
         }
 
     return agent_node

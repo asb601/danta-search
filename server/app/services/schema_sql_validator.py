@@ -87,15 +87,17 @@ class SchemaSQLValidationReport:
 
     def to_error_payload(self) -> dict[str, Any]:
         return {
-            "error": "SQL references columns or filter values that are not supported by the inspected schema.",
+            "error": "SQL references schema, filter values, labels, or join predicates that are not supported by inspected evidence.",
             "fatal_execution_error": True,
             "schema_validation_error": True,
             "issues": [issue.to_dict() for issue in self.errors[:8]],
             "warnings": [issue.to_dict() for issue in self.warnings[:6]],
             "hint": (
-                "Use only columns shown by get_file_schema/inspect_column. "
+                "Use only columns shown by get_file_schema/inspect_column, and only join tables through approved joins "
+                "or strong same-name key columns. Do not project invented string labels as if they came from data. "
                 "If the requested business concept is absent, call search_catalog for another logical table "
-                "or state that the concept is not available in the inspected schema."
+                "or state that the concept is not available in the inspected schema. Do not call get_file_schema again "
+                "for the same tables just to retry the same unsupported SQL."
             ),
         }
 
@@ -172,6 +174,7 @@ def validate_logical_sql_schema(
     schema_index: dict[str, TableSchema] | None,
     *,
     allowed_file_ids: set[str] | None = None,
+    sql_ctx: Any | None = None,
 ) -> SchemaSQLValidationReport:
     """Validate logical SQL against known table schemas.
 
@@ -179,7 +182,9 @@ def validate_logical_sql_schema(
     evidence is clear: an in-scope table has known columns and the SQL references
     a column that is absent, an equality filter uses a value outside an
     exhaustive known value set, or the query contains a logically empty
-    HAVING COUNT(*) = 0 pattern.
+    HAVING COUNT(*) = 0 pattern, unsupported string literal labels, or a
+    cross-table predicate that is not supported by approved join evidence or a
+    strong same-name key.
     """
     if not sql or not file_identities or not schema_index or not _SQLGLOT_AVAILABLE:
         return SchemaSQLValidationReport()
@@ -194,6 +199,7 @@ def validate_logical_sql_schema(
         return SchemaSQLValidationReport()
 
     cte_names = _cte_names(tree)
+    join_contracts = _join_contracts(sql_ctx)
     errors: list[SchemaSQLIssue] = []
     warnings: list[SchemaSQLIssue] = []
 
@@ -219,6 +225,18 @@ def validate_logical_sql_schema(
                 warnings.append(issue)
             else:
                 errors.append(issue)
+
+        errors.extend(_validate_literal_label_projections(select_expr))
+        errors.extend(_validate_cross_table_eq_contracts(select_expr, scope, schema_index, join_contracts))
+        errors.extend(_validate_in_subquery_contracts(
+            select_expr,
+            scope,
+            schema_index,
+            file_identities,
+            cte_names,
+            allowed_file_ids,
+            join_contracts,
+        ))
 
         count_zero_issue = _validate_having_count_star_zero(select_expr)
         if count_zero_issue:
@@ -536,6 +554,197 @@ def _validate_exhaustive_filter_values(
         if issue:
             issues.append(issue)
     return issues
+
+
+def _validate_literal_label_projections(select_expr) -> list[SchemaSQLIssue]:
+    issues: list[SchemaSQLIssue] = []
+    for projection in getattr(select_expr, "expressions", []) or []:
+        alias = getattr(projection, "alias", "") or ""
+        inner_expr = getattr(projection, "this", None) if isinstance(projection, exp.Alias) else projection
+        literal_values = _projection_literal_label_values(inner_expr)
+        if not literal_values:
+            continue
+        literal_preview = literal_values[:4]
+        issues.append(SchemaSQLIssue(
+            code="literal_label_projection",
+            column=alias or None,
+            message=(
+                f"String literal result value(s) {literal_preview} are being projected as labels"
+                + (f" for '{alias}'" if alias else "")
+                + ". This fabricates a category that is not sourced from a column."
+            ),
+            details={
+                "literals": literal_preview,
+                "alias": alias,
+                "fix": "Select the real status/code column or aggregate only; explain labels outside SQL only when supported by field definitions or inspected data.",
+            },
+        ))
+    return issues
+
+
+def _projection_literal_label_values(expression) -> list[str]:
+    if isinstance(expression, exp.Literal) and expression.is_string:
+        return [str(expression.this)]
+    if isinstance(expression, exp.Case):
+        values: list[str] = []
+        for if_expr in expression.args.get("ifs") or []:
+            true_expr = if_expr.args.get("true")
+            if isinstance(true_expr, exp.Literal) and true_expr.is_string:
+                values.append(str(true_expr.this))
+        default_expr = expression.args.get("default")
+        if isinstance(default_expr, exp.Literal) and default_expr.is_string:
+            values.append(str(default_expr.this))
+        return _dedupe_values(values)
+    return []
+
+
+def _validate_cross_table_eq_contracts(
+    select_expr,
+    scope: _Scope,
+    schema_index: dict[str, TableSchema],
+    join_contracts: set[frozenset[tuple[str, str]]],
+) -> list[SchemaSQLIssue]:
+    issues: list[SchemaSQLIssue] = []
+    for comparison_expr in _iter_current_scope(select_expr, exp.EQ):
+        left_expr = getattr(comparison_expr, "this", None)
+        right_expr = getattr(comparison_expr, "expression", None)
+        if not isinstance(left_expr, exp.Column) or not isinstance(right_expr, exp.Column):
+            continue
+        issue = _validate_column_relation(
+            left_expr,
+            right_expr,
+            scope,
+            scope,
+            schema_index,
+            join_contracts,
+        )
+        if issue:
+            issues.append(issue)
+    return issues
+
+
+def _validate_in_subquery_contracts(
+    select_expr,
+    scope: _Scope,
+    schema_index: dict[str, TableSchema],
+    file_identities: FileIdentityMap,
+    cte_names: set[str],
+    allowed_file_ids: set[str] | None,
+    join_contracts: set[frozenset[tuple[str, str]]],
+) -> list[SchemaSQLIssue]:
+    issues: list[SchemaSQLIssue] = []
+    for in_expr in _iter_current_scope(select_expr, exp.In):
+        outer_column = getattr(in_expr, "this", None)
+        query_expr = in_expr.args.get("query")
+        if not isinstance(outer_column, exp.Column) or not isinstance(query_expr, exp.Subquery):
+            continue
+        inner_select = getattr(query_expr, "this", None)
+        if not isinstance(inner_select, exp.Select):
+            continue
+        inner_column = _first_projected_column(inner_select)
+        if inner_column is None:
+            continue
+        inner_scope = _scope_for_select(inner_select, file_identities, cte_names, allowed_file_ids)
+        issue = _validate_column_relation(
+            outer_column,
+            inner_column,
+            scope,
+            inner_scope,
+            schema_index,
+            join_contracts,
+        )
+        if issue:
+            issues.append(issue)
+    return issues
+
+
+def _first_projected_column(select_expr) -> Any | None:
+    projections = list(getattr(select_expr, "expressions", []) or [])
+    if len(projections) != 1:
+        return None
+    projection = projections[0]
+    inner_expr = getattr(projection, "this", None) if isinstance(projection, exp.Alias) else projection
+    return inner_expr if isinstance(inner_expr, exp.Column) else None
+
+
+def _validate_column_relation(
+    left_expr,
+    right_expr,
+    left_scope: _Scope,
+    right_scope: _Scope,
+    schema_index: dict[str, TableSchema],
+    join_contracts: set[frozenset[tuple[str, str]]],
+) -> SchemaSQLIssue | None:
+    left = _resolve_column(left_expr, left_scope, schema_index)
+    right = _resolve_column(right_expr, right_scope, schema_index)
+    if left.status != "resolved" or right.status != "resolved":
+        return None
+    if not left.file_id or not right.file_id or not left.column_schema or not right.column_schema:
+        return None
+    if left.file_id == right.file_id:
+        return None
+
+    relation_key = _relation_key(
+        left.file_id,
+        left.column_schema.name,
+        right.file_id,
+        right.column_schema.name,
+    )
+    if relation_key in join_contracts:
+        return None
+    if _strong_same_name_join(left.column_schema.name, right.column_schema.name):
+        return None
+
+    left_ref = _column_ref(left)
+    right_ref = _column_ref(right)
+    return SchemaSQLIssue(
+        code="unverified_cross_table_relation",
+        message=(
+            f"Cross-table predicate {left_ref} = {right_ref} is not backed by an approved join "
+            "and the columns do not share the same strong key name."
+        ),
+        details={
+            "left": left_ref,
+            "right": right_ref,
+            "fix": "Use extract_relations/search_catalog for an approved relationship, or compare strong same-name keys such as the same *_id column.",
+        },
+    )
+
+
+def _join_contracts(sql_ctx: Any | None) -> set[frozenset[tuple[str, str]]]:
+    contracts: set[frozenset[tuple[str, str]]] = set()
+    for join in list(getattr(sql_ctx, "approved_joins", []) or []):
+        left_file_id = str(getattr(join, "left_file_id", "") or "")
+        right_file_id = str(getattr(join, "right_file_id", "") or "")
+        left_col = str(getattr(join, "left_col", "") or "")
+        right_col = str(getattr(join, "right_col", "") or "")
+        if not left_file_id or not right_file_id or not left_col or not right_col:
+            continue
+        contracts.add(_relation_key(left_file_id, left_col, right_file_id, right_col))
+    return contracts
+
+
+def _relation_key(left_file_id: str, left_col: str, right_file_id: str, right_col: str) -> frozenset[tuple[str, str]]:
+    return frozenset({
+        (str(left_file_id), _column_key(left_col)),
+        (str(right_file_id), _column_key(right_col)),
+    })
+
+
+def _strong_same_name_join(left_col: str, right_col: str) -> bool:
+    left_key = _column_key(left_col)
+    right_key = _column_key(right_col)
+    if left_key != right_key:
+        return False
+    if len(left_key) < 4:
+        return False
+    return left_key.endswith(("_id", "_key", "_code", "_num", "_number")) or "_id_" in left_key
+
+
+def _column_ref(resolution: _ColumnResolution) -> str:
+    table = resolution.table_schema.logical_table if resolution.table_schema else (resolution.file_id or "?")
+    column = resolution.column_schema.name if resolution.column_schema else "?"
+    return f"{table}.{column}"
 
 
 def _dedupe_issues(issues: list[SchemaSQLIssue]) -> list[SchemaSQLIssue]:

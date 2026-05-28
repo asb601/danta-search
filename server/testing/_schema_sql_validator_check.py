@@ -17,6 +17,7 @@ import app.agent.tools.sql as sql_tools
 from app.services.file_identity import build_file_identity_map
 from app.services.promotion_state import build_initial_promotion_state
 from app.services.schema_sql_validator import build_schema_index, validate_logical_sql_schema
+from app.services.sql_context_builder import ApprovedJoin, SQLContext
 
 
 def _catalog() -> list[dict]:
@@ -44,7 +45,7 @@ def _catalog() -> list[dict]:
             "file_id": "gl-headers",
             "blob_path": "e52d207d_GL_JE_HEADERS.csv",
             "columns_info": [
-                {"name": "invoice_id", "type": "int64"},
+                {"name": "je_header_id", "type": "int64"},
                 {"name": "period_name", "type": "string", "top_values": ["JAN-25", "FEB-25"], "distinct_count": 6},
                 {"name": "status", "type": "string", "top_values": ["P"], "distinct_count": 1},
             ],
@@ -135,6 +136,92 @@ def test_having_count_star_zero_is_blocked() -> None:
     assert report.errors[0].code == "unsatisfiable_having_count_star_zero"
 
 
+def test_unverified_in_subquery_key_swap_is_blocked() -> None:
+    identities, schema_index = _validator_inputs()
+    report = validate_logical_sql_schema(
+        """
+        SELECT COUNT(*) AS count
+        FROM AP_INVOICE_LINES_ALL
+        WHERE invoice_id IN (SELECT je_header_id FROM GL_JE_HEADERS)
+        """,
+        identities,
+        schema_index,
+        allowed_file_ids=identities.allowed_file_ids(),
+    )
+    assert not report.ok
+    assert report.errors[0].code == "unverified_cross_table_relation"
+
+
+def test_strong_same_name_in_subquery_key_is_allowed() -> None:
+    identities, schema_index = _validator_inputs()
+    report = validate_logical_sql_schema(
+        """
+        SELECT quantity
+        FROM PO_LINES_ALL
+        WHERE po_line_id IN (SELECT po_line_id FROM AP_INVOICE_LINES_ALL)
+        """,
+        identities,
+        schema_index,
+        allowed_file_ids=identities.allowed_file_ids(),
+    )
+    assert report.ok, report.to_error_payload()
+
+
+def test_approved_join_allows_different_column_names() -> None:
+    identities, schema_index = _validator_inputs()
+    sql_ctx = SQLContext(approved_joins=[ApprovedJoin(
+        left_file_id="invoice-lines",
+        right_file_id="gl-headers",
+        left_table="AP_INVOICE_LINES_ALL",
+        right_table="GL_JE_HEADERS",
+        left_col="invoice_id",
+        right_col="je_header_id",
+        relationship_type="approved_test_join",
+        confidence=0.99,
+    )])
+    report = validate_logical_sql_schema(
+        """
+        SELECT COUNT(*) AS count
+        FROM AP_INVOICE_LINES_ALL
+        WHERE invoice_id IN (SELECT je_header_id FROM GL_JE_HEADERS)
+        """,
+        identities,
+        schema_index,
+        allowed_file_ids=identities.allowed_file_ids(),
+        sql_ctx=sql_ctx,
+    )
+    assert report.ok, report.to_error_payload()
+
+
+def test_literal_label_projection_is_blocked() -> None:
+    identities, schema_index = _validator_inputs()
+    report = validate_logical_sql_schema(
+        "SELECT 'Pending Delivery' AS delivery_status, COUNT(*) AS count FROM PO_LINES_ALL",
+        identities,
+        schema_index,
+        allowed_file_ids=identities.allowed_file_ids(),
+    )
+    assert not report.ok
+    assert report.errors[0].code == "literal_label_projection"
+
+
+def test_case_literal_label_projection_is_blocked() -> None:
+    identities, schema_index = _validator_inputs()
+    report = validate_logical_sql_schema(
+        """
+        SELECT CASE WHEN status = 'P' THEN 'Pending Approval' ELSE 'Other' END AS status_label,
+               COUNT(*) AS count
+        FROM GL_JE_HEADERS
+        GROUP BY status_label
+        """,
+        identities,
+        schema_index,
+        allowed_file_ids=identities.allowed_file_ids(),
+    )
+    assert not report.ok
+    assert report.errors[0].code == "literal_label_projection"
+
+
 def test_run_sql_uses_schema_validation_before_engine() -> None:
     catalog = _catalog()
     identities = build_file_identity_map(catalog, {}, "container")
@@ -169,6 +256,11 @@ def main() -> None:
         test_exhaustive_unknown_filter_value_is_blocked,
         test_partially_unknown_filter_values_warn_only,
         test_having_count_star_zero_is_blocked,
+        test_unverified_in_subquery_key_swap_is_blocked,
+        test_strong_same_name_in_subquery_key_is_allowed,
+        test_approved_join_allows_different_column_names,
+        test_literal_label_projection_is_blocked,
+        test_case_literal_label_projection_is_blocked,
         test_run_sql_uses_schema_validation_before_engine,
     ]
     for check in checks:
