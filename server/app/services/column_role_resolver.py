@@ -51,6 +51,7 @@ import time
 from typing import Any
 
 from app.core.config import get_settings
+from app.core import metrics
 from app.core.logger import ingest_logger
 from app.services.ingestion_config import null_tokens_lower
 from app.services.semantic_roles import (
@@ -90,6 +91,7 @@ async def resolve_column_roles(
 
     settings = get_settings()
     preview_items = max(0, int(settings.INGEST_ROLE_RESOLVER_PREVIEW_ITEMS))
+    metrics.inc("ingestion_llm_call_count")
     roles, evidence = await _call_llm(columns_info, filename, glossary, semantic_config)
     source = "llm_dynamic" if any(is_dynamic_role(role) for role in roles.values()) else "llm"
 

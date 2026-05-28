@@ -38,6 +38,7 @@ from app.agent.search_normalization import tokenize_search_query
 from app.services.workflow_capability_resolver import resolve_workflow_requirements
 from app.services.semantic_expansion import decide_expansion, render_workflow_continuity_note
 from app.services.workflow_cognition import assemble_workflow_cognition, render_workflow_assembly_note
+from app.services.execution_retrieval_gate import narrow_catalog_for_execution, render_execution_gate_note
 from app.retrieval.semantic_recovery import semantic_recovery_retrieve
 from app.services.workflow_topology import build_workflow_topology
 from app.retrieval.orchestrator import (
@@ -62,6 +63,7 @@ from app.agent.tools.relations import build_relations_tool
 from app.agent.tools.sql import build_sql_tools, _execute as _sql_execute
 from app.agent.tools.sql_safety import validate_and_normalise
 from app.agent.tools.stats import build_stats_tool
+from app.core.config import get_settings
 from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
 from app.core.orchestration_trace import OrchestrationTrace
@@ -78,6 +80,22 @@ from app.services.query_confidence import compute_confidence
 
 # Lazy import — planner is only loaded when first query arrives (avoids circular
 # import at module level; semantic_planner imports FileMetadata / FileRelationship).
+
+
+def _execution_scope_for_catalog(
+    catalog: list[dict],
+    file_identity_map: FileIdentityMap,
+) -> tuple[set[str], set[str]]:
+    file_ids = {str(e.get("file_id")) for e in catalog if e.get("file_id")}
+    physical_uris: set[str] = set()
+    for file_id in file_ids:
+        identity = file_identity_map.by_id.get(file_id)
+        if not identity:
+            continue
+        physical_uris.add(identity.source_uri)
+        if identity.parquet_uri:
+            physical_uris.add(identity.parquet_uri)
+    return file_ids, physical_uris
 _semantic_plan = None
 
 def _get_planner():
@@ -1043,6 +1061,51 @@ async def _build_agent_context(
         full_catalog,
     )
 
+    # ── STEP 2.59: EXECUTION RETRIEVAL GATE ─────────────────────────────────
+    # Retrieval and semantic expansion may surface a broad relevance set. Before
+    # heavy hydration, prompt construction, tools, and SQL authorization, narrow
+    # that set to a deterministic execution envelope: operational/source-like
+    # tables first, references as support, transformed extracts suppressed unless
+    # the user asks for a reporting artifact.
+    _retrieval_gate_note = ""
+    try:
+        settings = get_settings()
+        _execution_gate = narrow_catalog_for_execution(
+            query=query,
+            intent_plan=intent_plan,
+            catalog=catalog,
+            max_tables=settings.EXECUTION_RETRIEVAL_MAX_TABLES,
+            deep_workflow_max_tables=settings.EXECUTION_RETRIEVAL_DEEP_WORKFLOW_MAX_TABLES,
+            multi_domain_max_tables=settings.EXECUTION_RETRIEVAL_MULTI_DOMAIN_MAX_TABLES,
+            suppress_transformed=settings.EXECUTION_RETRIEVAL_SUPPRESS_TRANSFORMED,
+        )
+        catalog = _execution_gate.selected_catalog
+        catalog_blob_paths = {e.get("blob_path") for e in catalog if e.get("blob_path")}
+        parquet_paths_all = {
+            k: v for k, v in all_parquet_paths.items()
+            if k in catalog_blob_paths
+        }
+        top_blob_paths = {bp for bp in top_blob_paths if bp in catalog_blob_paths}
+        if len(top_blob_paths) < min(3, len(catalog)):
+            top_blob_paths.update(
+                e.get("blob_path") for e in catalog[:3] if e.get("blob_path")
+            )
+
+        metrics.inc("execution_retrieval_gate_applied_count")
+        metrics.inc("execution_retrieval_gate_suppressed_count", _execution_gate.suppressed_count)
+        metrics.inc(
+            "execution_retrieval_gate_transformed_suppressed_count",
+            _execution_gate.transformed_suppressed_count,
+        )
+        metrics.inc("planner_context_pruned_file_count", _execution_gate.suppressed_count)
+        if _execution_gate.cap_hit:
+            metrics.inc("planner_context_cap_hit_count")
+
+        pipeline_logger.info("execution_retrieval_gate", **_execution_gate.to_dict())
+        _retrieval_gate_note = render_execution_gate_note(_execution_gate)
+    except Exception as exc:
+        pipeline_logger.warning("execution_retrieval_gate_failed_open", error=str(exc)[:200])
+
     # ── STEP 2.6: HYDRATE HEAVY FIELDS for the shortlist only ───────────────
     # The cached catalog is intentionally lean (no columns_info samples,
     # sample_rows, or column_stats). We now load those heavy fields ONLY for
@@ -1051,13 +1114,13 @@ async def _build_agent_context(
     shortlist_ids = [e["file_id"] for e in catalog if e.get("file_id")]
     heavy_by_file = await hydrate_files(db, shortlist_ids)
     catalog = [merge_hydrated(e, heavy_by_file.get(e.get("file_id"))) for e in catalog]
-    # The shortlist is what the system prompt shows the LLM. The FULL catalog
-    # (with hydrated heavy fields where available) is what discovery tools
-    # bind to, so the LLM can inspect any file it surfaces via search_catalog
-    # without "File not found in catalog" failures.
+    # The gated shortlist is what the prompt, discovery tools, schema tools,
+    # sample tools, relations, and SQL executor use. The full catalog remains
+    # in memory for observability and non-execution diagnostics only.
     full_catalog = [
         merge_hydrated(e, heavy_by_file.get(e.get("file_id"))) for e in full_catalog
     ]
+    allowed_file_ids, allowed_blob_paths = _execution_scope_for_catalog(catalog, file_identity_map)
     sample_rows_by_blob = {
         e["blob_path"]: e.get("sample_rows") or []
         for e in catalog
@@ -1310,21 +1373,20 @@ async def _build_agent_context(
         allowed_file_ids=allowed_file_ids,
         sql_ctx=sql_ctx,  # repair layer uses approved joins/columns as constraints
     ))
-    # search_catalog uses the lean full catalog so it can find any file
-    # without paying the heavy-field cost.
-    # db is passed so get_file_schema can fetch real column types from Postgres
-    # when the lean catalog entry lacks them (i.e. file not in hydration shortlist).
+    # Catalog/schema tools are scoped to the same execution envelope as SQL.
+    # If retrieval produced the wrong envelope, runtime should fail visibly
+    # instead of letting tools silently escape into unrelated tables.
     all_tools.extend(build_catalog_tools(
-        full_catalog, all_parquet_paths, container_name, db,
+        catalog, parquet_paths_all, container_name, db,
         file_identities=file_identity_map,
     ))
-    # inspect_column — bound to full catalog with optional schema dict enrichment.
-    # For non-hydrated files, falls back to a bounded SQL probe.
+    # inspect_column is scoped to the execution envelope and may use schema dict
+    # enrichment. Runtime SQL authorization enforces the same file IDs again.
     # When field_definitions is non-empty, automatically appends business meaning
     # to the output (e.g. SHKZG → "Debit/Credit indicator: S=debit, H=credit").
     all_tools.extend(
         build_column_tool(
-            full_catalog, all_parquet_paths, container_name, connection_string,
+            catalog, parquet_paths_all, container_name, connection_string,
             field_definitions=field_definitions,
             file_identities=file_identity_map,
         )
@@ -1332,13 +1394,11 @@ async def _build_agent_context(
     # lookup_field_definition — standalone tool for explicit semantic lookups.
     # Uses the same pre-loaded dict as inspect_column — zero extra SQL calls.
     all_tools.extend(build_definition_lookup_tool(field_definitions))
-    all_tools.extend(build_relations_tool(db, full_catalog, file_identities=file_identity_map))
+    all_tools.extend(build_relations_tool(db, catalog, file_identities=file_identity_map))
     all_tools.extend(build_stats_tool(store))
-    # inspect_data_format previews rows. Same full-catalog binding as
-    # inspect_column; cached sample_rows for shortlist files, SQL probe
-    # fallback for the rest.
+    # inspect_data_format previews rows for the execution envelope only.
     all_tools.extend(build_sample_tool(
-        full_catalog, all_parquet_paths, container_name, connection_string,
+        catalog, parquet_paths_all, container_name, connection_string,
         file_identities=file_identity_map,
     ))
 
@@ -1361,6 +1421,7 @@ async def _build_agent_context(
                 sql_context_note=sql_context_note,
                 top_blob_paths=top_blob_paths,
                 workflow_topology_note="\n\n".join(filter(None, [
+                    _retrieval_gate_note,
                     _workflow_assembly_note,
                     _workflow_continuity_note,
                 ])),

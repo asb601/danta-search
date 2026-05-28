@@ -47,6 +47,18 @@ _counters: dict[str, int | float] = {
     # Ingestion
     "parquet_conversions":      0,
     "parquet_conversion_errors": 0,
+    "ingestion_stage_attempt_count": 0,
+    "ingestion_queue_handoff_count": 0,
+    "ingestion_stage_retry_count": 0,
+    "ingestion_stage_nonfatal_error_count": 0,
+    "ingestion_stage_fatal_error_count": 0,
+    "ingestion_blob_sdk_call_count": 0,
+    "ingestion_llm_call_count": 0,
+    "ingestion_embedding_call_count": 0,
+    "ingestion_index_call_count": 0,
+    "ingestion_relationship_stage_count": 0,
+    "ingestion_analytics_stage_count": 0,
+    "ingestion_db_commit_count": 0,
     # SQL repair telemetry
     "sql_repair_tier1_count":      0,   # deterministic Tier-1 repair applied
     "sql_repair_tier2_count":      0,   # LLM Tier-2 repair applied
@@ -59,6 +71,11 @@ _counters: dict[str, int | float] = {
     # Retrieval telemetry
     "retrieval_miss_count":        0,   # retrieval returned 0 results
     "resolver_miss_count":         0,   # entity resolver returned 0 candidates
+    "execution_retrieval_gate_applied_count": 0,
+    "execution_retrieval_gate_suppressed_count": 0,
+    "execution_retrieval_gate_transformed_suppressed_count": 0,
+    "planner_context_cap_hit_count": 0,
+    "planner_context_pruned_file_count": 0,
     # Execution infrastructure
     "execution_timeout_count":     0,   # query_executor timeout fired
     "execution_guard_rejection":   0,   # execution guard hard pre-execution rejection

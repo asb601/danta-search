@@ -15,6 +15,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ai_client import generate_file_description
+from app.core.config import get_settings
 from app.core.database import async_session as _async_session
 from app.core.db_logger import log_ingest_event as _db_log
 from app.core.duckdb_client import sample_file
@@ -45,6 +46,11 @@ def _ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 2)
 
 
+async def _commit(db: AsyncSession) -> None:
+    await db.commit()
+    metrics.inc("ingestion_db_commit_count")
+
+
 def _file_ext(file: File) -> str:
     return Path(file.name).suffix.lower()
 
@@ -56,9 +62,13 @@ def _next(payload: Payload, *, stage: str, **extra: Any) -> Payload:
     return merged
 
 
-async def _load_file_and_container(db: AsyncSession, file_id: str) -> tuple[File, ContainerConfig]:
+async def _load_file_and_container(
+    db: AsyncSession, file_id: str, *, require_blob: bool = True
+) -> tuple[File, ContainerConfig]:
     file = await db.get(File, file_id)
-    if not file or not file.blob_path:
+    if not file:
+        raise RuntimeError("file not found")
+    if require_blob and not file.blob_path:
         raise RuntimeError("file or blob_path missing")
 
     container = await db.get(ContainerConfig, file.container_id)
@@ -69,6 +79,8 @@ async def _load_file_and_container(db: AsyncSession, file_id: str) -> tuple[File
 
 
 async def _blob_exists(connection_string: str, container_name: str, blob_path: str) -> bool:
+    metrics.inc("ingestion_blob_sdk_call_count")
+
     def _check() -> bool:
         try:
             from azure.storage.blob import BlobServiceClient  # noqa: PLC0415
@@ -103,7 +115,7 @@ async def prepare_pipeline(file_id: str) -> Payload:
         actor: User | None = await db.get(User, owner_id) if owner_id else None
 
         file.ingest_status = IngestStatus.RUNNING.value
-        await db.commit()
+        await _commit(db)
 
         payload_out = {
             "file_id": file_id,
@@ -144,8 +156,9 @@ async def clean_file_stage(payload: Payload) -> Payload:
             if analytics_row and analytics_row.parquet_blob_path:
                 analytics_row.parquet_blob_path = None
                 analytics_row.parquet_size_bytes = None
-                await db.commit()
+                await _commit(db)
 
+            metrics.inc("ingestion_blob_sdk_call_count", 2)
             prep = await preprocess_file(
                 blob_path=file.blob_path,
                 file_name=file.name,
@@ -166,7 +179,7 @@ async def clean_file_stage(payload: Payload) -> Payload:
             analytics_row.quarantine_count = prep.quarantine_count
             analytics_row.quarantine_sample = prep.quarantine_sample
             analytics_row.cleaning_audit = prep.cleaning_audit
-            await db.commit()
+            await _commit(db)
 
             dur = _ms(start)
             ingest_logger.info(
@@ -202,7 +215,7 @@ async def clean_file_stage(payload: Payload) -> Payload:
 
         if not await _blob_exists(container.connection_string, container.container_name, file.blob_path):
             file.ingest_status = IngestStatus.NOT_INGESTED.value
-            await db.commit()
+            await _commit(db)
             raise RuntimeError(f"source blob missing in Azure: {file.blob_path}")
 
         dur = _ms(start)
@@ -265,6 +278,7 @@ async def parquet_stage(payload: Payload) -> Payload:
             )
             return _next(payload, stage=stage, parquet_blob_path=None)
 
+    metrics.inc("ingestion_blob_sdk_call_count", 2)
     await trigger_parquet_conversion(
         file_id=file_id,
         blob_path=blob_path,
@@ -310,6 +324,7 @@ async def metadata_stage(payload: Payload) -> Payload:
         file, container = await _load_file_and_container(db, file_id)
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
 
+        metrics.inc("ingestion_blob_sdk_call_count")
         sample = await sample_file(
             blob_path=file.blob_path,
             connection_string=container.connection_string,
@@ -330,7 +345,7 @@ async def metadata_stage(payload: Payload) -> Payload:
         metadata.sample_rows = sample["sample_rows"]
         metadata.ingest_error = None
         metadata.ingested_at = datetime.now(timezone.utc)
-        await db.commit()
+        await _commit(db)
 
         column_types = {
             str(col.get("name")): col.get("type")
@@ -383,7 +398,7 @@ async def ai_description_stage(payload: Payload) -> Payload:
     stage = StageName.AI_DESCRIPTION.value
 
     async with _async_session() as db:
-        file, container = await _load_file_and_container(db, file_id)
+        file, container = await _load_file_and_container(db, file_id, require_blob=False)
         metadata = (
             await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
         ).scalar_one_or_none()
@@ -405,6 +420,7 @@ async def ai_description_stage(payload: Payload) -> Payload:
                     )
 
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
+        metrics.inc("ingestion_llm_call_count")
         description = await generate_file_description(
             columns_info=metadata.columns_info or [],
             sample_rows=metadata.sample_rows or [],
@@ -429,11 +445,11 @@ async def ai_description_stage(payload: Payload) -> Payload:
             except (ValueError, TypeError):
                 pass
 
-        await db.commit()
+        await _commit(db)
 
         file.ingest_status = IngestStatus.INGESTED.value
         metadata.ingest_error = None
-        await db.commit()
+        await _commit(db)
 
         dur = _ms(start)
         ingest_logger.info(
@@ -467,7 +483,7 @@ async def ontology_stage(payload: Payload) -> Payload:
     stage = StageName.ONTOLOGY.value
 
     async with _async_session() as db:
-        file, container = await _load_file_and_container(db, file_id)
+        file, container = await _load_file_and_container(db, file_id, require_blob=False)
         metadata = (
             await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
         ).scalar_one_or_none()
@@ -495,7 +511,7 @@ async def ontology_stage(payload: Payload) -> Payload:
         metadata.column_semantic_roles = col_roles or None
         metadata.role_source = role_src
         metadata.column_role_evidence = role_evidence or None
-        await db.commit()
+        await _commit(db)
 
         dur = _ms(start)
         ingest_logger.info(
@@ -531,8 +547,9 @@ async def embedding_stage(payload: Payload) -> Payload:
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         search_text = build_search_text(metadata)
         metadata.search_text = search_text
+        metrics.inc("ingestion_embedding_call_count")
         metadata.description_embedding = await embed_text(search_text)
-        await db.commit()
+        await _commit(db)
 
         dur = _ms(start)
         ingest_logger.info(
@@ -567,6 +584,7 @@ async def opensearch_stage(payload: Payload) -> Payload:
         from app.retrieval.opensearch_indexer import index_metadata_document  # noqa: PLC0415
 
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
+        metrics.inc("ingestion_index_call_count")
         await index_metadata_document(metadata, db)
 
     dur = _ms(start)
@@ -600,6 +618,8 @@ async def analytics_stage(payload: Payload) -> Payload:
             raise RuntimeError("metadata missing before analytics stage")
 
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
+        metrics.inc("ingestion_analytics_stage_count")
+        metrics.inc("ingestion_blob_sdk_call_count")
         analytics = await compute_and_store_analytics(
             file_id=file_id,
             blob_path=file.blob_path,
@@ -653,7 +673,7 @@ async def relationship_stage(payload: Payload) -> Payload:
                 (FileRelationship.file_a_id == file_id) | (FileRelationship.file_b_id == file_id)
             ))
             await db.execute(delete(ColumnKeyRegistry).where(ColumnKeyRegistry.file_id == file_id))
-            await db.commit()
+            await _commit(db)
 
             dur = _ms(start)
             ingest_logger.info(
@@ -675,6 +695,7 @@ async def relationship_stage(payload: Payload) -> Payload:
         from app.services.relationship_detector import detect_relationships  # noqa: PLC0415
 
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
+        metrics.inc("ingestion_relationship_stage_count")
         relationship_count = await detect_relationships(
             file_id=file_id,
             blob_path=file.blob_path or metadata.blob_path,
@@ -780,7 +801,7 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
         file = await db.get(File, file_id)
         if file:
             file.ingest_status = IngestStatus.INGESTED.value
-            await db.commit()
+            await _commit(db)
 
         # ── Compute and persist ingestion confidence score ────────────────────────
         # Runs after all stages so both role evidence and relationships are present.
@@ -804,7 +825,7 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
                 ing_conf = compute_ingestion_confidence(meta, list(rels))
                 meta.ingestion_confidence_score = ing_conf.overall
                 meta.ingestion_confidence_signals = ing_conf.signals
-                await db.commit()
+                await _commit(db)
                 ingest_logger.info(
                     "ingestion_confidence",
                     file_id=file_id,
@@ -822,12 +843,14 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
         # enrichment, relationships, and confidence are available as evidence.
         try:
             from app.services.semantic_memory_extractor import upsert_semantic_memory_for_file  # noqa: PLC0415
-            from app.services.semantic_domain_consolidator import consolidate_semantic_domains_for_container  # noqa: PLC0415
 
+            settings = get_settings()
             memory_result = await upsert_semantic_memory_for_file(file_id, db)
             metrics.inc("semantic_memory_records_upserted", int(memory_result.get("records") or 0))
             domain_result = None
-            if file and file.container_id:
+            if settings.SEMANTIC_DOMAIN_CONSOLIDATION_ON_INGEST and file and file.container_id:
+                from app.services.semantic_domain_consolidator import consolidate_semantic_domains_for_container  # noqa: PLC0415
+
                 domain_result = await consolidate_semantic_domains_for_container(file.container_id, db)
                 metrics.inc("semantic_domain_clusters_upserted", int(domain_result.get("clusters") or 0))
                 metrics.inc("semantic_domain_conflict_count", int(domain_result.get("conflicts") or 0))
@@ -838,6 +861,7 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
                 deprecated=memory_result.get("deprecated", 0),
                 domain_clusters=(domain_result or {}).get("clusters", 0),
                 domain_conflicts=(domain_result or {}).get("conflicts", 0),
+                domain_consolidation_on_ingest=settings.SEMANTIC_DOMAIN_CONSOLIDATION_ON_INGEST,
                 duration_ms=memory_result.get("duration_ms"),
             )
         except Exception as exc:
@@ -885,7 +909,7 @@ async def mark_ingestion_failed(file_id: str, stage: str, exc: BaseException) ->
                 ingest_error=error,
             ))
 
-        await db.commit()
+    await _commit(db)
 
     await _db_log(
         event="ingest_failed",

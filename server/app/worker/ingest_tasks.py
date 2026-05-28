@@ -18,6 +18,7 @@ from celery import chain
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.core.config import get_settings
+from app.core import metrics
 from app.services.ingestion_config import (
     INGEST_PIPELINE_TASK_NAME,
     INGEST_STAGE_SPECS,
@@ -89,6 +90,10 @@ def _run_stage(
 
     file_id = _file_id_from_payload(payload)
     stage_payload: Payload = payload if isinstance(payload, dict) else {"file_id": file_id}
+    attempt = int(getattr(task.request, "retries", 0) or 0) + 1
+    metrics.inc("ingestion_stage_attempt_count")
+    if attempt > 1:
+        metrics.inc("ingestion_stage_retry_count")
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
@@ -109,6 +114,7 @@ def _run_stage(
             from app.core.db_logger import log_ingest_event as _db_log_ev
 
             error = str(exc)[:500]
+            metrics.inc("ingestion_stage_nonfatal_error_count")
             ingest_logger.warning(
                 "ingest_stage_nonfatal_failed",
                 stage=stage_value,
@@ -139,6 +145,7 @@ def _run_stage(
 
         error_str = str(exc)[:500]
         exc_type = type(exc).__name__
+        metrics.inc("ingestion_stage_fatal_error_count")
         ingest_logger.warning(
             "ingest_stage_fatal_error",
             stage=stage_value,
@@ -180,6 +187,7 @@ def _run_stage(
             )
             _run_async(mark_ingestion_failed(file_id, stage_value, exc))
             return _failed_payload(file_id, stage_value, exc, task.request.retries)
+        metrics.inc("ingestion_queue_handoff_count")
         raise task.retry(exc=exc)
     finally:
         structlog.contextvars.clear_contextvars()
@@ -222,6 +230,7 @@ def run_ingest_pipeline(self, file_id: str) -> Payload:
         ordered_tasks[0].s(initial_payload),
         *(task.s() for task in ordered_tasks[1:]),
     ).apply_async()
+    metrics.inc("ingestion_queue_handoff_count", len(ordered_tasks))
 
     return {
         "file_id": file_id,
