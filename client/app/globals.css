@@ -9,8 +9,11 @@
   --card-foreground: oklch(0.2686 0 0);
   --popover: oklch(1.0000 0 0);
   --popover-foreground: oklch(0.2686 0 0);
-  --primary: oklch(0.7115 0.1539 236.9968);
-  --primary-foreground: oklch(0 0 0);
+  /* Primary aligned to the brand accent (orange, hue ~70) so it matches the
+     chart/ring/sidebar palette — was a stray blue (hue ~237) that clashed with
+     the orange data-viz on every surface. */
+  --primary: oklch(0.7686 0.1647 70.0804);
+  --primary-foreground: oklch(0.2050 0 0);
   --secondary: oklch(0.9851 0 0);
   --secondary-foreground: oklch(0.4461 0.0263 256.8018);
   --muted: oklch(0.9600 0.0058 258);

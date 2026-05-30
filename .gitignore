@@ -49,6 +49,7 @@ server/uploads/
 *.duckdb
 *.duckdb.wal
 
+
 # Test data (large files)
 server/testing/*.csv
 server/testing/*.parquet

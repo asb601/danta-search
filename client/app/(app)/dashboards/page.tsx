@@ -8,6 +8,9 @@ import {
 } from "lucide-react";
 import { useDashboards } from "./_hooks/useDashboards";
 import { DashboardSummary } from "@/components/analytics-catalog/types";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge, BadgeVariant } from "@/components/ui/badge";
 
 export default function DashboardsWorkspace() {
   const router = useRouter();
@@ -70,13 +73,9 @@ export default function DashboardsWorkspace() {
                 Create dashboards from natural-language prompts.
               </p>
             </div>
-            <button
-              onClick={handleCreate}
-              disabled={creating}
-              className="flex items-center gap-2 px-3 py-2 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-            >
+            <Button onClick={handleCreate} disabled={creating}>
               <Plus className="w-4 h-4" /> New dashboard
-            </button>
+            </Button>
           </div>
 
           <div className="relative mb-5">
@@ -136,8 +135,10 @@ function DashboardCard({
   onDelete: () => void;
 }) {
   const [menu, setMenu] = useState(false);
+  const statusVariant: BadgeVariant =
+    d.status === "ready" ? "success" : d.status === "error" ? "danger" : "muted";
   return (
-    <div className="group relative bg-surface border border-border rounded-lg p-4 hover:border-primary/40 transition-colors">
+    <Card className="group relative p-4 transition-colors hover:border-primary/40">
       <div className="flex items-start justify-between gap-2">
         <button onClick={onOpen} className="text-left min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
@@ -168,9 +169,9 @@ function DashboardCard({
       </div>
       <button onClick={onOpen} className="mt-3 flex w-full items-center justify-between text-[11px] text-muted-foreground">
         <span>{d.widget_count} widget{d.widget_count === 1 ? "" : "s"}</span>
-        <span className="capitalize">{d.status}</span>
+        <Badge variant={statusVariant} className="capitalize">{d.status}</Badge>
       </button>
-    </div>
+    </Card>
   );
 }
 
@@ -182,7 +183,7 @@ function MenuItem({
   return (
     <button
       onClick={onClick}
-      className={`flex w-full items-center gap-2 px-3 py-1.5 hover:bg-surface-raised ${danger ? "text-red-500" : "text-foreground"}`}
+      className={`flex w-full items-center gap-2 px-3 py-1.5 hover:bg-surface-raised ${danger ? "text-danger" : "text-foreground"}`}
     >
       <Icon className="w-3.5 h-3.5" /> {label}
     </button>

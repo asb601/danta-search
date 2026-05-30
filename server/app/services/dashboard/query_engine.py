@@ -141,9 +141,23 @@ async def decompose_prompt(
             "widget. Each question must be self-contained and answerable as a single "
             "analytical query against the available tables. Honor any explicitly "
             "requested chart type. Prefer 3-6 widgets for broad requests; use 1 for a "
-            "single-question request. Never exceed the cap."
+            "single-question request. Never exceed the cap.\n\n"
+            "GROUNDING RULES (critical — the catalog below is authoritative):\n"
+            "- Prefer SINGLE-TABLE widgets. Only span two tables when a join between "
+            "them is listed under KNOWN JOINS; never invent a join or join across "
+            "unrelated business domains.\n"
+            "- Reference ONLY columns shown for a table. Do NOT invent columns.\n"
+            "- Use ONLY the categorical values shown under 'values:' for a column. "
+            "Never invent a status/category literal (e.g. do not assume a status "
+            "'Shipped' exists if the listed values are 'Open, In Process').\n"
+            "- DATE WINDOWS: each temporal column shows its real 'date coverage'. If "
+            "the user's requested period falls OUTSIDE that coverage, do NOT emit an "
+            "impossible filter — either omit the time filter or use the covered range, "
+            "so the widget returns data. Phrase the query against the data that exists.\n"
+            "- For each widget also return the 'table' you intend to use and the "
+            "'columns' it needs, drawn strictly from the catalog."
         )
-        user = f"""Available tables (name [domain] rows: description; measures; dimensions):
+        user = f"""Available tables (real columns, date coverage, observed values, and known joins):
 {grounding_text or '(catalog unavailable - infer reasonable widgets from the prompt)'}
 
 Dashboard request:
@@ -152,7 +166,9 @@ Dashboard request:
 Return ONLY JSON of this shape (max {max_widgets} widgets):
 {{"widgets": [
   {{"title": "short title",
-    "query": "a single natural-language analytical question",
+    "query": "a single natural-language analytical question grounded in the tables above",
+    "table": "the primary table name from the catalog (or null)",
+    "columns": ["column names this widget needs, from the catalog"],
     "viz": "kpi_card|metric_tile|table|line_chart|bar_chart|pie_chart|area_chart|heatmap|funnel|null"}}
 ]}}"""
 
@@ -191,11 +207,21 @@ Return ONLY JSON of this shape (max {max_widgets} widgets):
         # If the model didn't tag a viz but the user clearly named one, capture it.
         if not viz:
             viz = _detect_requested_viz(nl)
+        # Capture the grounded table/columns the planner intends to use so
+        # run_widget can build a per-widget grounding block for the agent.
+        hints: dict = {}
+        tbl = w.get("table")
+        if tbl and str(tbl).lower() != "null":
+            hints["table"] = str(tbl)
+        cols = w.get("columns")
+        if isinstance(cols, list):
+            hints["columns"] = [str(c) for c in cols if c][:24]
         intents.append(
             WidgetIntent(
                 title=str(w.get("title") or nl)[:120],
                 nl_query=nl,
                 requested_viz=viz,
+                hints=hints,
             )
         )
 
@@ -215,7 +241,59 @@ Return ONLY JSON of this shape (max {max_widgets} widgets):
 # 2. Run a widget through the existing agent
 # --------------------------------------------------------------------------
 
-async def run_widget(intent: WidgetIntent, *, db, scope: dict) -> dict:
+def _build_widget_grounding(intent: WidgetIntent, catalog: list | None) -> str:
+    """
+    Build a short, agent-facing grounding block for ONE widget from the planner's
+    hinted table + the matching catalog row. Passed via conversation_context
+    (the only free-text channel into the agent's system prompt) so the agent does
+    not hallucinate columns/joins/date windows. Kept compact and placed so it
+    survives the prompt builder's tail truncation. No agent code changes.
+    """
+    if not catalog:
+        return ""
+    table = (intent.hints or {}).get("table")
+    if not table:
+        return ""
+    match = None
+    for t in catalog:
+        if getattr(t, "table_name", None) == table:
+            match = t
+            break
+    if match is None:
+        return ""
+
+    lines = [
+        "DASHBOARD WIDGET DATA GROUNDING (authoritative — obey strictly):",
+        f"- Primary table: {match.table_name}.",
+    ]
+    cols = [c.name for c in getattr(match, "columns", [])][:30]
+    if cols:
+        lines.append(f"- Valid columns (use ONLY these): {', '.join(cols)}.")
+    coverage = match.date_coverage() if hasattr(match, "date_coverage") else []
+    if coverage:
+        lines.append(
+            "- Date coverage: " + "; ".join(coverage)
+            + ". If the question's period is outside this, query the covered range "
+            "instead of returning no data."
+        )
+    # Real categorical values so the agent never invents a status literal.
+    val_bits = []
+    dims = set(getattr(match, "dimensions", []))
+    for c in getattr(match, "columns", []):
+        if c.name in dims and getattr(c, "top_values", None) and (c.cardinality or 99) <= 20:
+            val_bits.append(f"{c.name} ∈ {{{', '.join(str(v) for v in c.top_values[:8])}}}")
+    if val_bits:
+        lines.append("- Real values (never invent others): " + " | ".join(val_bits[:6]) + ".")
+    lines.append(
+        "- Prefer this single table. Do not join to a different business domain. "
+        "Do not invent columns or filter values."
+    )
+    return "\n".join(lines)
+
+
+async def run_widget(
+    intent: WidgetIntent, *, db, scope: dict, catalog: list | None = None
+) -> dict:
     """
     Execute one widget intent by REUSING the existing agent. Returns the agent
     result dict ({answer,data,chart,row_count,files_used,...}); never raises.
@@ -223,11 +301,13 @@ async def run_widget(intent: WidgetIntent, *, db, scope: dict) -> dict:
     """
     from app.agent import run_agent_query
 
+    grounding = _build_widget_grounding(intent, catalog)
+
     try:
         result = await run_agent_query(
             intent.nl_query,
             db,
-            conversation_context="",
+            conversation_context=grounding,
             user_id=scope.get("user_id", ""),
             is_admin=scope.get("is_admin", False),
             allowed_domains=scope.get("allowed_domains"),

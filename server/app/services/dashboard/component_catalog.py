@@ -82,7 +82,7 @@ _CATALOG: list[ComponentDefinition] = [
         rendering_metadata={
             "frontend_component": "KpiCard",
             "icon": "Hash",
-            "default_size": {"w": 3, "h": 3},
+            "default_size": {"w": 3, "h": 2},
             "palette": "chart",
         },
         priority=90,
@@ -109,7 +109,7 @@ _CATALOG: list[ComponentDefinition] = [
         rendering_metadata={
             "frontend_component": "MetricTile",
             "icon": "Gauge",
-            "default_size": {"w": 3, "h": 3},
+            "default_size": {"w": 3, "h": 2},
             "palette": "chart",
         },
         priority=70,
@@ -136,7 +136,7 @@ _CATALOG: list[ComponentDefinition] = [
         rendering_metadata={
             "frontend_component": "LineChart",
             "icon": "TrendingUp",
-            "default_size": {"w": 6, "h": 4},
+            "default_size": {"w": 8, "h": 4},
             "palette": "chart",
             "supports_legend": True,
         },
@@ -164,7 +164,7 @@ _CATALOG: list[ComponentDefinition] = [
         rendering_metadata={
             "frontend_component": "AreaChart",
             "icon": "AreaChart",
-            "default_size": {"w": 6, "h": 4},
+            "default_size": {"w": 8, "h": 4},
             "palette": "chart",
             "supports_legend": True,
         },

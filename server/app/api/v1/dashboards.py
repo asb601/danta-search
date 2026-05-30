@@ -367,7 +367,20 @@ async def generate_dashboard(
     except Exception as exc:
         chat_logger.warning("dashboard_catalog_error", error=str(exc)[:200])
         catalog = []
-    grounding = data_catalog.catalog_grounding_text(catalog)
+
+    # Load the validated join graph for the catalog's files so the decomposer
+    # keeps widgets within genuinely joinable tables (no fabricated joins).
+    relationships: list[dict] = []
+    try:
+        relationships = await data_catalog.build_relationship_map(
+            [t.file_id for t in catalog], db
+        )
+    except Exception as exc:
+        chat_logger.warning("dashboard_relationship_error", error=str(exc)[:200])
+
+    grounding = data_catalog.catalog_grounding_text(
+        catalog, detailed=True, relationships=relationships
+    )
 
     # 2. Decompose the prompt into widget intents.
     intents = await query_engine.decompose_prompt(
@@ -383,8 +396,11 @@ async def generate_dashboard(
     resolved = []
     source_file_ids: set[str] = set()
     widget_ids: list[str] = []
+    empty_titles: list[str] = []
     for intent in intents:
-        result = await query_engine.run_widget(intent, db=db, scope=scope)
+        result = await query_engine.run_widget(
+            intent, db=db, scope=scope, catalog=catalog
+        )
         rows = result.get("data") or []
         shape = query_engine.profile_dataset(rows, result.get("chart"))
         provenance = {
@@ -394,11 +410,24 @@ async def generate_dashboard(
             "answer": result.get("answer", ""),
             "query": intent.nl_query,
         }
+        if result.get("error"):
+            provenance["error"] = str(result["error"])[:300]
         for f in provenance["files_used"]:
             source_file_ids.add(str(f))
+        if not rows:
+            empty_titles.append(intent.title)
         widget = recommend(shape, intent, rows, provenance=provenance)
         widget_ids.append(widget.widget_id)
         resolved.append(widget)
+
+    # Surface empty widgets at the dashboard level so failures aren't silent.
+    if empty_titles:
+        shown = ", ".join(empty_titles[:5])
+        more = f" (+{len(empty_titles) - 5} more)" if len(empty_titles) > 5 else ""
+        warnings.append(
+            f"{len(empty_titles)} widget(s) returned no data: {shown}{more}. "
+            "The requested values or time period may not exist in the available data."
+        )
 
     # 6. Assemble the dashboard config.
     generated_at = datetime.now(timezone.utc).isoformat()

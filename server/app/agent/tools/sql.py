@@ -458,6 +458,29 @@ def build_sql_tools(
                 f"Results truncated: showing {len(rows)} of {total} total rows. "
                 "Add a LIMIT, WHERE, or GROUP BY to get complete results."
             )
+        # 0-row diagnostic: when an aggregation/filter returns nothing, point the
+        # model back at its OWN filters on the SAME tables before it abandons them
+        # for a different (often wrong-domain) table. The most common cause is an
+        # out-of-range date window or a guessed status/category literal that does
+        # not exist in the data — both fixable here, not by switching tables.
+        if total == 0 and not rows:
+            _has_date_filter = "BETWEEN" in sql_upper or bool(
+                re.search(r"(>=|<=|>|<)\s*'?\d{4}-\d{2}-\d{2}", current_sql)
+            )
+            _has_literal_eq = bool(re.search(r"=\s*'[^']+'", current_sql))
+            if _has_date_filter or _has_literal_eq:
+                resp["zero_row_diagnostic"] = (
+                    "0 rows. Before switching to a different table or domain, diagnose "
+                    "your OWN query on the SAME table(s): "
+                    "(1) if you filtered a date range, run SELECT MIN(<datecol>), MAX(<datecol>) "
+                    "to confirm the window overlaps the data — the data may simply not cover "
+                    "that period; "
+                    "(2) if you equated a column to a text literal, SELECT DISTINCT that column "
+                    "to confirm the value exists (never invent values like 'Shipped'); "
+                    "(3) drop your most specific filter and re-run. "
+                    "A 0-row aggregation is NOT permission to join to an unrelated business domain."
+                )
+
         # Detect failed join: SQL has JOIN but joined columns came back entirely null
         if rows and "JOIN" in sql_upper:
             all_null_cols = [

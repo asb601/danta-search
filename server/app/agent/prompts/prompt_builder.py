@@ -103,9 +103,17 @@ relationship exists, request a bounded multi-hop path; if none is returned, join
 manually and flag it as unverified in your response.
 
 PHASE 4 \u2014 EXECUTE AND ADAPT
-Write SQL using only column names verified in Phase 2.
-\u2022 0 rows returned \u2192 inspect the filter column values, check date/code format, probe
-  with MIN/MAX before concluding "no data".
+Write SQL using only column names verified in Phase 2, and only filter VALUES you
+have actually observed (via inspect_column / get_file_schema). Never invent a
+status/category literal (e.g. do not assume a value 'Shipped' exists).
+\u2022 0 rows on an aggregation/filter is NOT permission to switch tables or domains.
+  First, on the SAME table(s): (a) drop your most specific filter and re-run;
+  (b) probe the date column with SELECT MIN(col), MAX(col) to confirm your window
+  overlaps the data \u2014 the data may simply not cover the requested period; (c)
+  SELECT DISTINCT the status/category column you filtered to confirm the literal
+  exists. Only after these may you conclude the value/period is genuinely absent.
+\u2022 Switching to a table from a DIFFERENT business domain after a 0-row aggregation
+  is almost always wrong \u2014 do not join across unrelated domains to manufacture rows.
 \u2022 JOIN fails \u2192 re-examine the join column with inspect_column.
 \u2022 Column missing \u2192 search_catalog for an alternative table.
 Never retry the same query with only cosmetic changes \u2014 change the approach.

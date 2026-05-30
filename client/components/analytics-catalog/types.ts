@@ -27,6 +27,7 @@ export interface WidgetProvenance {
   answer?: string;
   query?: string;
   empty?: boolean;
+  error?: string;
 }
 
 export interface WidgetConfig {
