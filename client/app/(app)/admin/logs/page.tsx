@@ -361,6 +361,12 @@ const PIPELINE_STEPS: Record<string, StepConfig> = {
   confidence_degradation:      { num: "2", label: "Conf Degraded",  color: "bg-orange-50 text-orange-800 border-orange-200",   short: "conf_deg" },
   graph_health_issue:          { num: "2", label: "Graph Health ⚠", color: "bg-red-50 text-red-700 border-red-200",            short: "graph_health" },
   broaden_nudge_injected:      { num: "4", label: "Broaden Nudge",  color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "nudge" },
+
+  // ── Intent + Entity Resolution ─────────────────────────────────────────────
+  business_intent_planned:     { num: "2", label: "Intent Plan",    color: "bg-teal-50 text-teal-800 border-teal-200",          short: "intent" },
+  entity_resolution_done:      { num: "2", label: "Entity Resolve", color: "bg-teal-50 text-teal-800 border-teal-200",          short: "entity_res" },
+  agent_start:                 { num: "4", label: "Agent Start",    color: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200", short: "agent_start" },
+  agent_complete:              { num: "✓", label: "Agent Done",     color: "bg-emerald-50 text-emerald-800 border-emerald-200", short: "agent_done" },
 };
 
 function pipelineSummary(ev: LogEntry): string {
@@ -423,6 +429,15 @@ function pipelineSummary(ev: LogEntry): string {
       return `${ev.health_level} · coverage=${ev.edge_coverage} · p50=${ev.confidence_p50}`;
     case "broaden_nudge_injected":
       return `reason: ${ev.reason} · after ${ev.tool_call_count} tool calls`;
+
+    case "business_intent_planned":
+      return `intent=${ev.intent} · conf=${ev.confidence} · entities=${Array.isArray(ev.entities) ? (ev.entities as string[]).join(", ") : "?"} · behaviors=${Array.isArray(ev.behaviors) ? (ev.behaviors as string[]).join(", ") : "?"}`;
+    case "entity_resolution_done":
+      return `${ev.resolved_count}/${ev.entity_count} entities resolved`;
+    case "agent_start":
+      return `${ev.file_count} files · container=${ev.container}`;
+    case "agent_complete":
+      return `${ev.tool_calls} tool calls · ${ev.row_count} rows · ${ev.total_duration_ms} ms`;
 
     default:                    return "";
   }
@@ -911,6 +926,72 @@ function PipelineEventDetail({ ev }: { ev: LogEntry }) {
       <div className="grid grid-cols-2 gap-2 text-[11px]">
         <div><span className="text-muted-foreground">Reason:</span> <span className="font-mono text-fuchsia-700">{String(ev.reason ?? "")}</span></div>
         <div><span className="text-muted-foreground">Tool calls used:</span> <span className="font-mono">{String(ev.tool_call_count)}</span></div>
+      </div>
+    );
+  }
+
+  if (e === "business_intent_planned") {
+    const entities = (ev.entities as string[]) || [];
+    const behaviors = (ev.behaviors as string[]) || [];
+    const constraints = (ev.constraints as Record<string, unknown>) || {};
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Intent:</span> <span className="font-mono text-foreground">{String(ev.intent ?? "")}</span></div>
+          <div><span className="text-muted-foreground">Confidence:</span> <span className="font-mono text-foreground">{String(ev.confidence ?? "")}</span></div>
+          <div><span className="text-muted-foreground">Behaviors:</span> <span className="font-mono text-foreground">{behaviors.join(", ") || "(none)"}</span></div>
+          <div><span className="text-muted-foreground">Constraints:</span> <span className="font-mono text-foreground">{JSON.stringify(constraints)}</span></div>
+        </div>
+        {entities.length > 0 && (
+          <>
+            <div className="text-[11px] text-muted-foreground">Entities extracted ({entities.length}):</div>
+            <div className="border border-border rounded p-2 bg-[#0d1117]">
+              {entities.map((ent, i) => <div key={i} className="text-[11px] font-mono text-zinc-200">&bull; {ent}</div>)}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "entity_resolution_done") {
+    const topCandidates = (ev.top_candidates as Record<string, [string, number, string][]>) || {};
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px]">
+          <span className="text-muted-foreground">Resolved:</span>{" "}
+          <span className="font-mono text-emerald-700">{String(ev.resolved_count)}/{String(ev.entity_count)} entities</span>
+        </div>
+        {Object.entries(topCandidates).map(([entity, candidates]) => (
+          <div key={entity} className="border border-border rounded p-2">
+            <div className="text-[11px] font-medium text-foreground mb-1">{entity}</div>
+            {(candidates as [string, number, string][]).map(([table, conf, reason], i) => (
+              <div key={i} className="text-[10px] font-mono text-muted-foreground">
+                {table} &middot; conf={conf} &middot; {reason}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (e === "agent_start") {
+    return (
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div><span className="text-muted-foreground">Container:</span> <span className="font-mono text-foreground">{String(ev.container ?? "")}</span></div>
+        <div><span className="text-muted-foreground">File count:</span> <span className="font-mono">{String(ev.file_count ?? "")}</span></div>
+        <div><span className="text-muted-foreground">Has parquet:</span> <span className="font-mono">{ev.has_parquet ? "yes" : "no"}</span></div>
+      </div>
+    );
+  }
+
+  if (e === "agent_complete") {
+    return (
+      <div className="grid grid-cols-3 gap-2 text-[11px]">
+        <div><span className="text-muted-foreground">Tool calls:</span> <span className="font-mono">{String(ev.tool_calls ?? "")}</span></div>
+        <div><span className="text-muted-foreground">Rows:</span> <span className="font-mono">{String(ev.row_count ?? "")}</span></div>
+        <div><span className="text-muted-foreground">Total time:</span> <span className="font-mono text-emerald-700">{String(ev.total_duration_ms ?? "")} ms</span></div>
       </div>
     );
   }

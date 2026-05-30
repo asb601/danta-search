@@ -279,38 +279,129 @@ Sample rows: {json.dumps(sample_rows[:description_sample_rows], default=str)}"""
     return result
 
 
-async def extract_entities_for_query(query: str) -> list[str]:
-    """Extract business entity nouns from a user query using GPT-4o-mini.
-
-    Prompt is sourced from prompt_builder (local import to keep core→agent
-    dependency at function level, not module level).
-    Uses the shared AzureOpenAI client; mini deployment for low cost.
-    Never raises; returns [] on any error.
+async def classify_query(query: str) -> dict:
     """
-    def _run() -> list[str]:
-        from app.agent.prompts.prompt_builder import build_entity_extraction_prompt  # noqa: PLC0415
+    Single LLM call for:
+      - intent
+      - entities
+      - behaviors
+
+    Returns:
+    {
+        "intent": str,
+        "entities": list[str],
+        "behaviors": list[str],
+        "confidence": float,
+    }
+
+    Never raises.
+    """
+
+    def _run() -> dict:
         client, _ = get_client()
         deployment = get_settings().AZURE_OPENAI_DEPLOYMENT_MINI
-        prompt = build_entity_extraction_prompt(query)
+
+        prompt = f"""
+        You are a business query classifier.
+
+        Allowed intents:
+        - aggregation
+        - aggregation_time_filtered
+        - open_items
+        - open_items_time_filtered
+        - top_n_lookup
+        - detail_lookup
+        - complex_multi_step
+        - unknown
+
+        Allowed behaviors:
+        - aggregation
+        - time_filtered
+        - open_items
+        - top_n
+        - detail_rows
+        - summary
+        - multi_step
+
+        Return ONLY valid JSON.
+
+        Schema:
+        {{
+        "intent": "one_allowed_intent",
+        "entities": ["entity1", "entity2"],
+        "behaviors": ["behavior1", "behavior2"]
+        }}
+
+        Rules:
+        - entities must be business nouns.
+        - normalize entity names.
+        - do not return explanations.
+        - do not return markdown.
+        - intent MUST come from the allowed list.
+        - behaviors MUST come from the allowed list.
+
+        Query:
+        {query}
+        """
+
         resp = client.chat.completions.create(
             model=deployment,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
             response_format={"type": "json_object"},
-            max_completion_tokens=80,
             temperature=0,
+            max_completion_tokens=150,
         )
+
         raw = (resp.choices[0].message.content or "{}").strip()
         parsed = safe_parse_json(raw)
-        entities = parsed.get("entities", [])
-        if isinstance(entities, list):
-            return _clean_extracted_entities(entities, query)
-        return []
+
+        intent = str(parsed.get("intent", "unknown")).strip()
+
+        entities = _clean_extracted_entities(
+            parsed.get("entities", []),
+            query,
+        )
+
+        behaviors = [
+            str(x).strip().lower()
+            for x in parsed.get("behaviors", [])
+            if str(x).strip()
+        ]
+
+        if intent == "unknown":
+            confidence = 0.30
+        else:
+            confidence = 0.80
+
+        return {
+            "intent": intent,
+            "entities": entities,
+            "behaviors": behaviors,
+            "confidence": confidence,
+        }
 
     try:
         return await asyncio.to_thread(_run)
+
     except Exception as exc:
-        chat_logger.warning("entity_extraction_error", error=str(exc)[:200])
-        return []
+        chat_logger.warning(
+            "query_classification_error",
+            error=str(exc)[:200],
+        )
+
+        return {
+            "intent": "unknown",
+            "entities": [],
+            "behaviors": [],
+            "confidence": 0.0,
+        }
+ 
+
 
 
 async def enrich_semantic_description(

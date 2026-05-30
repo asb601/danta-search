@@ -31,51 +31,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.core.llm_tasks import extract_entities_for_query
+from app.core.llm_tasks import classify_query
 from app.core.logger import chat_logger
 
 
 # ── Behavior signal patterns ───────────────────────────────────────────────────
 
-_AGG_RE = re.compile(
-    r"\btotal\b|\bsum\b|\bcount\b|\bhow many\b|\bnumber of\b"
-    r"|\baverage\b|\bavg\b|\bmaximum\b|\bmax\b|\bminimum\b|\bmin\b"
-    r"|\bhighest\b|\blowest\b|\blargest\b|\bsmallest\b"
-    r"|\bsummari[sz]e\b|\bsummary\b",
-    re.I,
-)
 
-_SUMMARY_RE = re.compile(r"\banaly[sz]e\b|\bsummari[sz]e\b|\bsummary\b", re.I)
-
-_TIME_RE = re.compile(
-    r"\blast\s+\d+\s+days?\b|\blast\s+\d+\s+months?\b|\blast\s+month\b"
-    r"|\blast\s+year\b|\bthis\s+month\b|\bthis\s+year\b|\bprevious\s+year\b"
-    r"|\bQ[1-4]\s*20\d{2}\b|\b20\d{2}\b"
-    r"|\bjanuary\b|\bfebruary\b|\bmarch\b|\bapril\b|\bjune\b|\bjuly\b"
-    r"|\baugust\b|\bseptember\b|\boctober\b|\bnovember\b|\bdecember\b",
-    re.I,
-)
-
-_OPEN_ITEM_RE = re.compile(
-    r"\bopen\b|\bpending\b|\buncleared\b|\boverdue\b"
-    r"|\boutstanding\b|\bnot cleared\b|\bnot paid\b|\bunpaid\b",
-    re.I,
-)
-
-_DETAIL_RE = re.compile(
-    r"\bshow\b|\blist\b|\bdisplay\b|\bfetch\b|\bgive me\b"
-    r"|\brows\b|\brecords\b|\bdetails?\b|\bline items?\b",
-    re.I,
-)
 
 _TOP_N_RE = re.compile(r"\btop\s+(\d+)\b|\bfirst\s+(\d+)\b", re.I)
 
-_COMPLEX_RE = re.compile(
-    r"\bcompare\b|\btrend\b|\bforecast\b|\bcorrelation\b"
-    r"|\bversus\b|\bvs\.?\b|\byoy\b|\bmom\b|\bchange.+over\b"
-    r"|\bgrowth\b|\brank.+against\b|\bbenchmark\b",
-    re.I,
-)
 
 # ── Time constraint extraction ─────────────────────────────────────────────────
 
@@ -116,154 +81,84 @@ class BusinessIntentPlan:
         }
 
 
-# ── Signal detection ──────────────────────────────────────────────────────────
-
-def _detect_signals(query: str) -> dict:
-    top_n_match = _TOP_N_RE.search(query)
-    has_summary_request = bool(_SUMMARY_RE.search(query))
-    return {
-        "has_aggregation": bool(_AGG_RE.search(query)),
-        "has_time_filter": bool(_TIME_RE.search(query)),
-        "has_open_item": bool(_OPEN_ITEM_RE.search(query)),
-        "has_detail_request": bool(_DETAIL_RE.search(query)) and not has_summary_request,
-        "has_top_n": bool(top_n_match),
-        "top_n_value": int(top_n_match.group(1) or top_n_match.group(2)) if top_n_match else None,
-        "is_complex": bool(_COMPLEX_RE.search(query)),
-        "has_summary_request": has_summary_request,
-    }
-
-
-# ── Intent classification ─────────────────────────────────────────────────────
-
-def _classify_intent(signals: dict) -> tuple[str, float]:
-    """Return (intent_slug, confidence). Confidence is additive, capped at 0.95."""
-    if signals["is_complex"]:
-        return "complex_multi_step", 0.50
-
-    conf = 0.30
-
-    if signals["has_open_item"]:
-        if signals["has_time_filter"]:
-            return "open_items_time_filtered", min(conf + 0.45, 0.95)
-        return "open_items", min(conf + 0.30, 0.95)
-
-    if signals["has_top_n"]:
-        bonus = 0.25 + (0.15 if signals["has_aggregation"] else 0.0)
-        return "top_n_lookup", min(conf + bonus, 0.95)
-
-    if signals["has_aggregation"] and signals["has_time_filter"]:
-        return "aggregation_time_filtered", min(conf + 0.40, 0.95)
-
-    if signals["has_aggregation"]:
-        return "aggregation", min(conf + 0.30, 0.95)
-
-    if signals["has_detail_request"]:
-        return "detail_lookup", min(conf + 0.20, 0.95)
-
-    return "unknown", 0.30
-
-
-# ── Behavior list ─────────────────────────────────────────────────────────────
-
-def _collect_behaviors(signals: dict) -> list[str]:
-    """Map signal flags to a stable behavior vocabulary list."""
-    behaviors: list[str] = []
-    if signals["has_aggregation"]:
-        behaviors.append("aggregation")
-    if signals["has_time_filter"]:
-        behaviors.append("time_filtered")
-    if signals["has_open_item"]:
-        behaviors.append("open_items")
-    if signals["has_top_n"]:
-        behaviors.append("top_n")
-    if signals["has_detail_request"] and not signals["has_aggregation"]:
-        behaviors.append("detail_rows")
-    if signals.get("has_summary_request"):
-        behaviors.append("summary")
-    if signals["is_complex"]:
-        behaviors.append("multi_step")
-    return behaviors
 
 
 # ── Constraint extraction ─────────────────────────────────────────────────────
 
-def _extract_constraints(query: str, signals: dict) -> dict:
+def _extract_constraints(query: str) -> dict:
     """
     Pull concrete constraint values out of the query text.
-    Only emits keys that were actually found — no null padding.
+    Only emits keys that were actually found.
     """
+
     constraints: dict = {}
 
-    if signals["has_top_n"] and signals["top_n_value"] is not None:
-        constraints["top_n"] = signals["top_n_value"]
+    top_match = _TOP_N_RE.search(query)
+    if top_match:
+        constraints["top_n"] = int(
+            top_match.group(1) or top_match.group(2)
+        )
 
-    if signals["has_time_filter"]:
-        m_days = _LAST_N_DAYS_RE.search(query)
-        m_months = _LAST_N_MONTHS_RE.search(query)
-        m_year = _YEAR_RE.search(query)
+    m_days = _LAST_N_DAYS_RE.search(query)
+    m_months = _LAST_N_MONTHS_RE.search(query)
+    m_year = _YEAR_RE.search(query)
 
-        if m_days:
-            constraints["date_range"] = f"last_{m_days.group(1)}_days"
-        elif m_months:
-            constraints["date_range"] = f"last_{m_months.group(1)}_months"
-        elif re.search(r"\blast\s+month\b", query, re.I):
-            constraints["date_range"] = "last_month"
-        elif re.search(r"\blast\s+year\b|\bprevious\s+year\b", query, re.I):
-            constraints["date_range"] = "last_year"
-        elif re.search(r"\bthis\s+month\b|\bcurrent\s+month\b", query, re.I):
-            constraints["date_range"] = "this_month"
-        elif re.search(r"\bthis\s+year\b|\bcurrent\s+year\b", query, re.I):
-            constraints["date_range"] = "this_year"
-        elif m_year:
-            constraints["date_range"] = m_year.group(1)
+    if m_days:
+        constraints["date_range"] = f"last_{m_days.group(1)}_days"
+
+    elif m_months:
+        constraints["date_range"] = f"last_{m_months.group(1)}_months"
+
+    elif re.search(r"\blast\s+month\b", query, re.I):
+        constraints["date_range"] = "last_month"
+
+    elif re.search(r"\blast\s+year\b|\bprevious\s+year\b", query, re.I):
+        constraints["date_range"] = "last_year"
+
+    elif re.search(r"\bthis\s+month\b|\bcurrent\s+month\b", query, re.I):
+        constraints["date_range"] = "this_month"
+
+    elif re.search(r"\bthis\s+year\b|\bcurrent\s+year\b", query, re.I):
+        constraints["date_range"] = "this_year"
+
+    elif m_year:
+        constraints["date_range"] = m_year.group(1)
 
     return constraints
 
-
 # ── Public API ────────────────────────────────────────────────────────────────
-
 async def build_business_intent_plan(query: str) -> BusinessIntentPlan:
-    """
-    Classify the user query into a structured BusinessIntentPlan.
-
-    Signal detection (behaviors/constraints/intent) is deterministic regex — no LLM cost.
-    Entity extraction uses one tiny GPT-4o-mini call for semantic normalization.
-    Never raises.
-
-    Args:
-        query: Raw user query string.
-
-    Returns:
-        BusinessIntentPlan with intent, entities, behaviors, constraints.
-    """
     try:
-        signals = _detect_signals(query)
-        intent, confidence = _classify_intent(signals)
-        behaviors = _collect_behaviors(signals)
-        constraints = _extract_constraints(query, signals)
-        entities = await extract_entities_for_query(query)
+        constraints = _extract_constraints(query)
+
+        llm_result = await classify_query(query)
 
         plan = BusinessIntentPlan(
-            intent=intent,
-            entities=entities,
-            behaviors=behaviors,
+            intent=llm_result["intent"],
+            entities=llm_result["entities"],
+            behaviors=llm_result["behaviors"],
             constraints=constraints,
-            confidence=confidence,
+            confidence=llm_result["confidence"],
         )
 
         chat_logger.info(
             "business_intent_planned",
-            intent=intent,
-            confidence=round(confidence, 2),
-            behaviors=behaviors,
-            entity_count=len(entities),
-            entities=entities[:10],  # cap log output
-            constraints=constraints,
+            intent=plan.intent,
+            confidence=round(plan.confidence, 2),
+            behaviors=plan.behaviors,
+            entity_count=len(plan.entities),
+            entities=plan.entities[:10],
+            constraints=plan.constraints,
         )
+
         return plan
 
     except Exception as exc:
-        chat_logger.warning("business_intent_plan_error", error=str(exc)[:300])
+        chat_logger.warning(
+            "business_intent_plan_error",
+            error=str(exc)[:300],
+        )
+
         return BusinessIntentPlan(
             intent="unknown",
             entities=[],
