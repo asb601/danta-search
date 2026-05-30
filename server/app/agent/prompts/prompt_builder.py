@@ -436,14 +436,19 @@ def build_entity_extraction_prompt(query: str) -> str:
 
     No system message — the instruction is embedded directly in the user turn
     to keep the call minimal (matches the llm_tasks single-message convention).
-    Output contract: strict JSON {"entities": ["snake_case_noun", ...]}.
+    Output contract: strict JSON {"entities": ["snake_case_concept", ...]}.
     """
     return (
-        "Extract only the primary durable business object nouns from the following query.\n"
-        'Return ONLY valid JSON: {"entities": ["entity_1", "entity_2"]}.\n'
-        "Normalize to snake_case. Prefer 1-3 entities. No prose, no SQL, no schema names.\n"
-        "Keep subjects like customer, invoice, sales_order, purchase_order, material.\n"
-        "Exclude dates, years, metrics, actions, recommendations, and requested output facets such as status, pending approval, delivery status, or issue summaries.\n"
-        "If the query asks to summarize sections after a colon, treat those sections as output facets unless they are the only business object.\n\n"
+        "Extract the business objects, processes, workflow states, exceptions, and "
+        "relationships that a data agent needs to find the right tables for this query.\n"
+        'Return ONLY valid JSON: {"entities": ["snake_case_concept"]}.\n'
+        "Rules:\n"
+        "1. Expand abbreviations (PO → purchase_order, SO → sales_order, etc.).\n"
+        "2. Include workflow states, exceptions, matching/reconciliation, holds, and "
+        "lifecycle events from colon sections and bullet lists when they need their own data.\n"
+        "3. Anchor generic labels to their owner: po_approval_status not approval_status.\n"
+        "4. Exclude: time ranges, metrics/values, display fields, recommendations, "
+        "next actions, and output instructions.\n"
+        "5. Return up to 10 concise singular snake_case entities.\n\n"
         f"Query: {query}"
     )

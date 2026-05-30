@@ -13,104 +13,69 @@ from app.core.token_counter import count_tokens, elapsed_ms, track_and_log
 
 
 _ENTITY_TOKEN_RE = re.compile(r"[^a-z0-9]+")
-_ENTITY_DETAIL_TOKENS = frozenset({"detail", "details", "record", "records", "row", "rows"})
-_ENTITY_NOISE_TOKENS = frozenset({
-    "action",
-    "actions",
-    "approval",
-    "approvals",
-    "count",
-    "current",
-    "date",
-    "issue",
-    "issues",
-    "matching",
-    "month",
-    "next",
-    "pending",
-    "problem",
-    "problems",
-    "quarter",
-    "recommendation",
-    "recommendations",
-    "recommended",
-    "status",
-    "statuses",
+_MAX_EXTRACTED_ENTITIES = 10
+_ALLOWED_INTENTS = frozenset({
+    "aggregation",
+    "aggregation_time_filtered",
+    "open_items",
+    "open_items_time_filtered",
+    "top_n_lookup",
+    "detail_lookup",
+    "complex_multi_step",
+    "unknown",
+})
+_ALLOWED_BEHAVIORS = frozenset({
+    "aggregation",
+    "time_filtered",
+    "open_items",
+    "top_n",
+    "detail_rows",
     "summary",
-    "time",
-    "total",
-    "value",
-    "year",
+    "multi_step",
 })
-_ENTITY_FACET_SUFFIXES = frozenset({
-    "action",
-    "actions",
-    "approval",
-    "approvals",
-    "issue",
-    "issues",
-    "problem",
-    "problems",
-    "recommendation",
-    "recommendations",
-    "status",
-    "statuses",
-})
-_SUMMARY_SECTION_RE = re.compile(r"\b(?:summari[sz]e|including|include|covering|with)\b\s*[:\-]", re.I)
-
-
 def _entity_tokens(text: str) -> list[str]:
     return [t for t in _ENTITY_TOKEN_RE.split(text.lower()) if t]
 
 
-def _entity_acronym(tokens: list[str]) -> str:
-    return "".join(t[0] for t in tokens if t)
+def _entity_text(raw: object) -> str:
+    if isinstance(raw, dict):
+        for key in ("name", "entity", "concept", "label", "source_phrase"):
+            value = raw.get(key)
+            if str(value or "").strip():
+                return str(value)
+        return ""
+    return str(raw or "")
 
 
-def _primary_query_segment(query: str) -> tuple[str, bool]:
-    marker = _SUMMARY_SECTION_RE.search(query)
-    if marker:
-        return query[:marker.start()], True
-    if ":" in query:
-        return query.split(":", 1)[0], True
-    return query, False
+def _bounded_confidence(value: object, fallback: float) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = fallback
+    return max(0.0, min(1.0, confidence))
 
 
-def _mentioned_in_primary_segment(tokens: list[str], primary_text: str) -> bool:
-    primary_tokens = set(_entity_tokens(primary_text))
-    if not primary_tokens:
-        return False
-    acronym = _entity_acronym(tokens) if len(tokens) > 1 else ""
-    return all(t in primary_tokens for t in tokens) or bool(acronym and acronym in primary_tokens)
+def _as_list(value: object) -> list:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
 
 
 def _clean_extracted_entities(entities: list, query: str = "") -> list[str]:
-    """Keep only durable business objects; drop output facets and time terms."""
+    """Normalize LLM-selected concepts without semantic filtering."""
     cleaned: list[str] = []
     seen: set[str] = set()
-    primary_text, has_summary_sections = _primary_query_segment(query or "")
-    primary_subject_tokens = {
-        t for t in _entity_tokens(primary_text)
-        if t not in _ENTITY_NOISE_TOKENS and t not in _ENTITY_DETAIL_TOKENS
-    }
-    enforce_primary_segment = has_summary_sections and bool(primary_subject_tokens)
     for raw in entities:
-        tokens = _entity_tokens(str(raw))
-        while tokens and tokens[-1] in _ENTITY_DETAIL_TOKENS:
-            tokens.pop()
+        tokens = _entity_tokens(_entity_text(raw))
         if not tokens:
-            continue
-        if enforce_primary_segment and not _mentioned_in_primary_segment(tokens, primary_text):
-            continue
-        if all(t in _ENTITY_NOISE_TOKENS for t in tokens):
-            continue
-        if len(tokens) > 1 and tokens[-1] in _ENTITY_FACET_SUFFIXES:
             continue
         entity = "_".join(tokens)
         if entity and entity not in seen:
             cleaned.append(entity)
             seen.add(entity)
-    return cleaned[:4]
+    return cleaned[:_MAX_EXTRACTED_ENTITIES]
 
 
 def safe_parse_json(text: str) -> dict:
@@ -302,46 +267,44 @@ async def classify_query(query: str) -> dict:
         deployment = get_settings().AZURE_OPENAI_DEPLOYMENT_MINI
 
         prompt = f"""
-        You are a business query classifier.
+        You are the query decomposition stage of a business analytics agent.
+        Your output drives table retrieval and query planning — choose entities that
+        tell the planner WHAT data objects to look for, not HOW to present results.
 
-        Allowed intents:
-        - aggregation
-        - aggregation_time_filtered
-        - open_items
-        - open_items_time_filtered
-        - top_n_lookup
-        - detail_lookup
-        - complex_multi_step
-        - unknown
+        Entities are business objects, processes, workflow/lifecycle states, exceptions,
+        and relationships that require distinct data access (different tables, joins,
+        filters, or exception records). They are NOT display fields, time ranges,
+        metrics, output instructions, or narrative requests.
 
-        Allowed behaviors:
-        - aggregation
-        - time_filtered
-        - open_items
-        - top_n
-        - detail_rows
-        - summary
-        - multi_step
+        Allowed intents: aggregation, aggregation_time_filtered, open_items,
+        open_items_time_filtered, top_n_lookup, detail_lookup, complex_multi_step, unknown
 
-        Return ONLY valid JSON.
+        Allowed behaviors: aggregation, time_filtered, open_items, top_n,
+        detail_rows, summary, multi_step
 
-        Schema:
+        Return ONLY valid JSON:
         {{
-        "intent": "one_allowed_intent",
-        "entities": ["entity1", "entity2"],
-        "behaviors": ["behavior1", "behavior2"]
+          "intent": "one_allowed_intent",
+          "entities": ["snake_case_concept"],
+          "behaviors": ["behavior"],
+          "confidence": 0.0
         }}
 
         Rules:
-        - entities must be business nouns.
-        - normalize entity names.
-        - do not return explanations.
-        - do not return markdown.
-        - intent MUST come from the allowed list.
-        - behaviors MUST come from the allowed list.
+        1. Expand abbreviations (PO → purchase_order, SO → sales_order, etc.).
+        2. Include the primary object plus any workflow states, exceptions, lifecycle
+           events, matching/reconciliation concepts, or holds that need separate data.
+        3. Bullet lists and sections after "summarize:", "including:", etc. are
+           analysis components — judge each one: keep if it needs its own data,
+           skip if it's just a display field or a requested answer section.
+        4. Generic labels (status, approval, issue, hold, delay) must be anchored:
+           write po_approval_status not approval_status, invoice_mismatch not mismatch.
+        5. Exclude: time ranges, metrics/values, display-only attributes, recommendations,
+           next actions, narratives, and summaries.
+        6. Prefer breadth — do not collapse a multi-component query to one entity.
+        7. Add time_filtered to behaviors when the query mentions any time period.
 
-        Query:
-        {query}
+        Query: {query}
         """
 
         resp = client.chat.completions.create(
@@ -354,29 +317,31 @@ async def classify_query(query: str) -> dict:
             ],
             response_format={"type": "json_object"},
             temperature=0,
-            max_completion_tokens=150,
+            max_completion_tokens=500,
         )
 
         raw = (resp.choices[0].message.content or "{}").strip()
         parsed = safe_parse_json(raw)
 
-        intent = str(parsed.get("intent", "unknown")).strip()
+        intent = str(parsed.get("intent", "unknown")).strip().lower()
+        if intent not in _ALLOWED_INTENTS:
+            intent = "unknown"
 
         entities = _clean_extracted_entities(
-            parsed.get("entities", []),
+            _as_list(parsed.get("entities")),
             query,
         )
 
         behaviors = [
             str(x).strip().lower()
-            for x in parsed.get("behaviors", [])
-            if str(x).strip()
+            for x in _as_list(parsed.get("behaviors"))
+            if str(x).strip().lower() in _ALLOWED_BEHAVIORS
         ]
 
+        fallback_confidence = 0.30 if intent == "unknown" else (0.75 if entities else 0.50)
+        confidence = _bounded_confidence(parsed.get("confidence"), fallback_confidence)
         if intent == "unknown":
-            confidence = 0.30
-        else:
-            confidence = 0.80
+            confidence = min(confidence, 0.45)
 
         return {
             "intent": intent,
