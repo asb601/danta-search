@@ -24,10 +24,13 @@ export function downloadCsv(data: Record<string, unknown>[], filename = "query_r
 }
 
 export function blobToLabel(blob: string): string {
-  const base = blob
-    .replace(/\.[^.]+$/, "")
-    .replace(/^[0-9a-f]{8}_/, "")
-    .replace(/\.sample$/, "");
+  // Strip az://container/ URI prefix if present, then take only the filename part
+  const stripped = blob.replace(/^az:\/\/[^/]+\//, "");
+  const filename = stripped.split("/").pop() || stripped;
+  const base = filename
+    .replace(/\.[^.]+$/, "")        // strip extension
+    .replace(/^[0-9a-f]{8}_/i, "") // strip upload hash prefix
+    .replace(/\.sample$/, "");      // strip .sample suffix
   return base
     .split("_")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())

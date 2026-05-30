@@ -335,7 +335,7 @@ def build_catalog_tools(
         pipeline_logger.info(
             "get_file_schema",
             file_ref=file_ref,
-            resolved_blob_path=match["blob_path"],
+            blob_path=match["blob_path"],
             logical_table=_logical_table(match),
             found=True,
             column_count=len(cols),
