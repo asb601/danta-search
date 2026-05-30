@@ -29,6 +29,7 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -94,15 +95,15 @@ class Dashboard(Base):
 
     # DashboardConfig — the versioned, render-ready JSON (response.txt 8.3).
     config: Mapped[dict] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="'{}'::jsonb"
+        JSONB, nullable=False, default=dict, server_default=sa_text("'{}'::jsonb")
     )
     # [{prompt, created_at, widget_ids}] — enables regeneration / audit.
     prompt_history: Mapped[list] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+        JSONB, nullable=False, default=list, server_default=sa_text("'[]'::jsonb")
     )
     # File/blob ids the dashboard draws from (for provenance + invalidation).
     source_file_ids: Mapped[list] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+        JSONB, nullable=False, default=list, server_default=sa_text("'[]'::jsonb")
     )
 
     is_pinned: Mapped[bool] = mapped_column(
