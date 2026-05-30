@@ -111,6 +111,7 @@ class ConfidencePolicy:
     repair_penalty_per_attempt: float = 0.20
     low_confidence_threshold:   float = 0.50
     resolver_pin_threshold:     float = 0.85
+    resolver_seed_threshold:    float = 0.18   # min confidence to seed graph expansion and append to shortlist
 
     # Complexity level scores
     complexity_single_joined:   float = 1.00

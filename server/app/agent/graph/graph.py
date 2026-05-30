@@ -444,26 +444,41 @@ async def _build_agent_context(
     )
     trace.set_entity_resolver(entity_resolution)
 
-    # ── Resolver pins: files that MUST survive retrieval pruning ─────────────
-    # Threshold governed by ConfidencePolicy.resolver_pin_threshold (0.85).
-    # Only "semantic_role_match" and strong dimension matches qualify.
-    # Below this, results are probabilistic overlaps that shouldn't override
-    # retrieval ranking (avoids false positives from partial matches).
-    _RESOLVER_PIN_THRESHOLD = _get_confidence_policy().resolver_pin_threshold
+    # ── Resolver pins and seeds ───────────────────────────────────────────────
+    _policy = _get_confidence_policy()
+    _RESOLVER_PIN_THRESHOLD  = _policy.resolver_pin_threshold
+    _RESOLVER_SEED_THRESHOLD = _policy.resolver_seed_threshold
+
+    # Hard pins (≥ pin_threshold=0.85): directly injected into the catalog
+    # shortlist after retrieval so retrieval ranking cannot prune them.
     resolver_pinned_blobs: set[str] = {
         c.table
         for candidates in entity_resolution.values()
         for c in candidates
         if c.confidence >= _RESOLVER_PIN_THRESHOLD
     }
-    # file_ids for the same anchors — passed to retrieve_with_scores so
-    # graph_expand uses them as extra seeds and their relationship neighbors
-    # enter RRF fusion (depth-1 expansion via SemanticRelationship).
     resolver_pinned_file_ids: list[str] = [
         e["file_id"]
         for e in full_catalog
         if e.get("blob_path") in resolver_pinned_blobs and e.get("file_id")
     ] if resolver_pinned_blobs else []
+
+    # Soft seeds: all resolver candidates ≥ seed_threshold. Their file_ids are
+    # passed as anchor_file_ids so graph_expand includes their semantic neighbors
+    # in RRF fusion. Whether a sub-entity concept is already covered as a column
+    # in a pinned file is determined later by the LLM after schema inspection
+    # (see principle 8 in the system prompt — schema-first for multi-facet queries).
+    _resolver_seed_blobs: set[str] = {
+        c.table
+        for candidates in entity_resolution.values()
+        for c in candidates
+        if c.confidence >= _RESOLVER_SEED_THRESHOLD
+    }
+    resolver_seed_file_ids: list[str] = [
+        e["file_id"]
+        for e in full_catalog
+        if e.get("blob_path") in _resolver_seed_blobs and e.get("file_id")
+    ] if _resolver_seed_blobs else []
 
     # ── STEP 2.5: RETRIEVAL — filter catalog to top-K relevant files ─────────
     # Run the 9-stage retrieval pipeline (temporal → BM25 → fuzzy → vector →
@@ -479,7 +494,7 @@ async def _build_agent_context(
             retrieved_with_scores = await retrieve_with_scores(
                 query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K,
                 container_id=container_id,
-                anchor_file_ids=resolver_pinned_file_ids or None,
+                anchor_file_ids=resolver_seed_file_ids or None,
             )
         except Exception as exc:
             retrieval_error = str(exc)[:200]
@@ -578,6 +593,30 @@ async def _build_agent_context(
                     "resolver_pins_injected",
                     pinned=[e.get("blob_path") for e in _resolver_injected],
                     entities=list(entity_resolution.keys()),
+                    path="retrieval",
+                )
+
+        # ── Append medium-confidence resolver candidates ───────────────────────
+        # Resolver candidates above seed_threshold but below pin_threshold are
+        # semantically relevant files the entity resolver found but text retrieval
+        # may have missed (e.g. WSH_DELIVERY_DETAILS at 0.21 for po_delivery_status,
+        # PO_RELEASES_ALL at 0.21 for po_pending_approval). Appended after the
+        # retrieval shortlist so they don't override retrieval ranking — the LLM
+        # sees them with compact metadata and can query them if needed.
+        _medium_blobs = _resolver_seed_blobs - resolver_pinned_blobs
+        if _medium_blobs:
+            _current_ids = {e.get("file_id") for e in catalog}
+            _medium_injected = [
+                e for e in full_catalog
+                if e.get("blob_path") in _medium_blobs
+                and e.get("file_id") not in _current_ids
+            ]
+            if _medium_injected:
+                catalog = catalog + _medium_injected
+                pipeline_logger.info(
+                    "resolver_seeds_appended",
+                    appended=[e.get("blob_path") for e in _medium_injected],
+                    seed_threshold=_RESOLVER_SEED_THRESHOLD,
                     path="retrieval",
                 )
 

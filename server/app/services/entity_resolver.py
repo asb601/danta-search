@@ -320,6 +320,17 @@ def _score_entry(
         if reason == "no_match":
             reason = _REASON_KEY_METRIC
 
+    # No structural anchor (no semantic role, no table name match): only weak
+    # metadata signals fired. Generic attribute columns like 'status', 'type',
+    # or 'code' appear in hundreds of unrelated tables — a dimension or column
+    # hit without any ownership signal is unreliable. Cap to prevent false
+    # positives from attribute bleed-through (e.g. MTL_SERIAL_NUMBERS scoring
+    # high for 'po_current_status' because it has a STATUS key_dimension).
+    if (entity_key_overlap < _MIN_OVERLAP
+            and ref_key_overlap < _MIN_OVERLAP
+            and table_overlap < _MIN_OVERLAP):
+        score = min(score, 0.35)
+
     if entity_key_overlap >= _MIN_OVERLAP and table_overlap < _MIN_OVERLAP:
         score = min(score, 0.74)
         if reason == _REASON_ENTITY_KEY:
