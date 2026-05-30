@@ -2,7 +2,7 @@
 
 import { useRouter, usePathname } from "next/navigation";
 import { useState, useEffect, useCallback } from "react";
-import { MessageSquare, FolderOpen, LogOut, PanelLeftClose, PanelLeft, Database, UserCircle, ScrollText } from "lucide-react";
+import { MessageSquare, FolderOpen, LogOut, PanelLeftClose, PanelLeft, Database, UserCircle, ScrollText, LayoutDashboard } from "lucide-react";
 import { NavLink, MobileNavLink } from "@/components/nav-link";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { useIdleTimeout } from "@/hooks/use-idle-timeout";
@@ -67,6 +67,7 @@ if (hideNav) {
   const navItems: NavItem[] = [
     { href: "/chat", icon: MessageSquare, label: "Chat" },
     { href: "/folders", icon: FolderOpen, label: "Folders" },
+    { href: "/dashboards", icon: LayoutDashboard, label: "Dashboards" },
     ...(user.is_admin || user.role === "developer"
       ? [{ href: "/admin/containers", icon: Database, label: "Containers" }]
       : []),

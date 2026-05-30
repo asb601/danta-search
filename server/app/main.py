@@ -28,6 +28,7 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.logs import router as logs_router
 from app.api.v1.access import router as access_router
 from app.api.v1.organizations import router as organizations_router
+from app.api.v1.dashboards import router as dashboards_router
 import app.models.file  # ensure File table is created
 import app.models.access_request  # ensure AccessRequest table is created
 import app.models.container  # ensure ContainerConfig table is created
@@ -40,6 +41,7 @@ import app.models.conversation  # ensure Conversation + Message tables are creat
 import app.models.organization  # ensure Organization table is created
 import app.models.schema_dictionary  # ensure SchemaDictionary table is created
 import app.models.server_log  # ensure ServerLog table is created
+import app.models.dashboard  # ensure Dashboard + DashboardFolder tables are created
 
 
 async def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
@@ -146,6 +148,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("semantic_layer_migration_failed", error=str(exc)[:300])
 
+    # Dashboard layer: dashboards + dashboard_folders (metadata-driven dashboards)
+    from app.migrations.dashboard_upgrade import migrate as _dashboard_migrate
+    try:
+        await _dashboard_migrate()
+    except Exception as exc:
+        chat_logger.warning("dashboard_migration_failed", error=str(exc)[:300])
+
     # Drop legacy audit_logs table — all audit events now go to server_logs
     from app.migrations.drop_audit_logs import migrate as _drop_audit_logs
     try:
@@ -241,6 +250,7 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(logs_router, prefix="/api")
 app.include_router(access_router, prefix="/api")
 app.include_router(organizations_router, prefix="/api")
+app.include_router(dashboards_router, prefix="/api")
 
 
 @app.get("/api/health")
