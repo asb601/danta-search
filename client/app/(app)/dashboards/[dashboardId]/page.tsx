@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useCallback, use } from "react";
-import { ArrowLeft, Sparkles, Loader2, Clock } from "lucide-react";
+import { ArrowLeft, Sparkles, Loader2, RefreshCw, LayoutDashboard } from "lucide-react";
 import { apiFetch } from "@/lib/auth";
 import { DashboardFull, DashboardConfig } from "@/components/analytics-catalog/types";
 import { DashboardRenderer } from "@/components/analytics-catalog/DashboardRenderer";
@@ -27,9 +27,13 @@ export default function DashboardDetailPage({
     setLoading(false);
   }, [dashboardId, router]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
+
+  const config = dashboard?.config && "widgets" in dashboard.config
+    ? (dashboard.config as DashboardConfig)
+    : null;
+
+  const widgetCount = config?.widgets?.length ?? 0;
 
   const generate = async () => {
     const p = prompt.trim();
@@ -40,17 +44,14 @@ export default function DashboardDetailPage({
       const res = await apiFetch(`/api/dashboards/${dashboardId}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: p,
-          append: !!(dashboard?.config && (dashboard.config as DashboardConfig).widgets?.length),
-        }),
+        body: JSON.stringify({ prompt: p, append: widgetCount > 0 }),
       });
       if (res.ok) {
         setDashboard(await res.json());
         setPrompt("");
       } else {
         const body = await res.json().catch(() => ({}));
-        setError(body.detail || "Generation failed.");
+        setError(body.detail || "Generation failed — check your data files are ingested.");
       }
     } catch {
       setError("Network error during generation.");
@@ -60,64 +61,117 @@ export default function DashboardDetailPage({
   };
 
   if (loading) {
-    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading…</div>;
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">Loading dashboard…</p>
+        </div>
+      </div>
+    );
   }
   if (!dashboard) return null;
 
-  const config = (dashboard.config && "widgets" in dashboard.config
-    ? (dashboard.config as DashboardConfig)
-    : null);
-
   return (
-    <div className="flex h-full flex-col">
-      {/* Header */}
-      <div className="shrink-0 border-b border-border px-6 py-4 flex items-center gap-3">
-        <button onClick={() => router.push("/dashboards")} className="text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="w-4 h-4" />
-        </button>
-        <div className="min-w-0">
-          <input
-            defaultValue={dashboard.title}
-            onBlur={async (e) => {
-              const t = e.target.value.trim();
-              if (t && t !== dashboard.title) {
-                await apiFetch(`/api/dashboards/${dashboardId}`, {
-                  method: "PATCH",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ title: t }),
-                });
-              }
-            }}
-            className="bg-transparent text-lg font-semibold text-foreground focus:outline-none w-full"
-          />
-          {config?.generated_at && (
-            <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
-              <Clock className="w-3 h-3" /> Generated {new Date(config.generated_at).toLocaleString()}
-            </p>
-          )}
-        </div>
-      </div>
+    <div className="flex h-full flex-col bg-background">
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <header className="shrink-0 border-b border-border/60 bg-card/40 backdrop-blur-sm px-5 py-3">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push("/dashboards")}
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
+            aria-label="Back to dashboards"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
 
-      {/* Canvas */}
-      <div className="flex-1 overflow-y-auto px-6 py-5">
-        <div className="max-w-7xl mx-auto">
+          {/* Title */}
+          <div className="flex-1 min-w-0 flex items-center gap-2">
+            <LayoutDashboard className="w-4 h-4 text-muted-foreground shrink-0" />
+            <input
+              defaultValue={dashboard.title}
+              onBlur={async (e) => {
+                const t = e.target.value.trim();
+                if (t && t !== dashboard.title) {
+                  await apiFetch(`/api/dashboards/${dashboardId}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ title: t }),
+                  });
+                }
+              }}
+              className="bg-transparent text-base font-semibold text-foreground focus:outline-none min-w-0 flex-1"
+              placeholder="Untitled dashboard"
+            />
+          </div>
+
+          {/* Meta chips */}
+          <div className="flex items-center gap-2 shrink-0">
+            {widgetCount > 0 && (
+              <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-muted-foreground bg-muted/40 px-2 py-1 rounded-md">
+                {widgetCount} widget{widgetCount !== 1 ? "s" : ""}
+              </span>
+            )}
+            <StatusBadge status={dashboard.status} generating={generating} />
+            {config?.generated_at && (
+              <span className="hidden md:inline text-[11px] text-muted-foreground/60">
+                {new Date(config.generated_at).toLocaleDateString(undefined, {
+                  month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+                })}
+              </span>
+            )}
+            {widgetCount > 0 && !generating && (
+              <button
+                onClick={load}
+                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
+                title="Refresh dashboard"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* ── Canvas ─────────────────────────────────────────────────────── */}
+      <main className="flex-1 overflow-y-auto">
+        <div className="max-w-[1400px] mx-auto px-5 py-6">
+
+          {/* Generating overlay */}
           {generating && (
-            <div className="mb-4 flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm text-muted-foreground">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Analyzing data, planning widgets, and generating analytics…
+            <div className="mb-5 flex items-center gap-3 rounded-xl border border-primary/20 bg-primary/[0.04] px-4 py-3 text-sm">
+              <div className="relative shrink-0">
+                <Loader2 className="w-4 h-4 animate-spin text-primary" />
+              </div>
+              <div>
+                <p className="font-medium text-foreground">Generating dashboard…</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Retrieving data, planning widgets, and running analytics. This may take 30–90 seconds.
+                </p>
+              </div>
             </div>
           )}
+
           <DashboardRenderer config={config} />
         </div>
-      </div>
+      </main>
 
-      {/* Composer */}
-      <div className="shrink-0 border-t border-border bg-background px-6 py-4">
-        <div className="max-w-7xl mx-auto">
-          {error && <p className="mb-2 text-xs text-red-500">{error}</p>}
-          <div className="flex items-end gap-2">
+      {/* ── Composer ───────────────────────────────────────────────────── */}
+      <footer className="shrink-0 border-t border-border/60 bg-card/40 backdrop-blur-sm px-5 py-4">
+        <div className="max-w-[1400px] mx-auto">
+          {error && (
+            <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-xs text-red-500">
+              <span className="mt-0.5 shrink-0">✕</span>
+              <span>{error}</span>
+            </div>
+          )}
+
+          <div className="flex items-end gap-3">
+            {/* Input area */}
             <div className="flex-1 relative">
-              <Sparkles className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
+              <div className="absolute left-3 top-2.5 pointer-events-none">
+                <Sparkles className="w-4 h-4 text-muted-foreground/60" />
+              </div>
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
@@ -125,24 +179,50 @@ export default function DashboardDetailPage({
                   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) generate();
                 }}
                 rows={2}
-                placeholder='Describe the dashboard, e.g. "Sales overview: total revenue KPI, monthly revenue trend, revenue by region as a bar chart, and top 10 products"'
-                className="w-full resize-none rounded-md border border-border bg-surface pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                disabled={generating}
+                placeholder='e.g. "Total revenue KPI, monthly trend as area chart, top 10 customers by revenue as bar chart"'
+                className="w-full resize-none rounded-xl border border-border bg-muted/20 pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary/60 focus:bg-card transition-colors disabled:opacity-60"
               />
             </div>
+
+            {/* Generate button */}
             <button
               onClick={generate}
               disabled={generating || !prompt.trim()}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:opacity-90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
             >
-              {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              {config?.widgets?.length ? "Add widgets" : "Generate"}
+              {generating ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Sparkles className="w-4 h-4" />
+              )}
+              {widgetCount > 0 ? "Add widgets" : "Generate"}
             </button>
           </div>
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Cmd/Ctrl + Enter to generate. Analytics are persisted — you can return anytime without regenerating.
+
+          <p className="mt-2 text-[11px] text-muted-foreground/50">
+            ⌘+Enter to generate · Analytics are persisted — return anytime without regenerating
           </p>
         </div>
-      </div>
+      </footer>
     </div>
+  );
+}
+
+function StatusBadge({ status, generating }: { status: string; generating: boolean }) {
+  const s = generating ? "generating" : status;
+  const map: Record<string, { label: string; cls: string }> = {
+    ready:      { label: "Ready",      cls: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20" },
+    generating: { label: "Generating", cls: "bg-primary/10 text-primary border-primary/20" },
+    draft:      { label: "Draft",      cls: "bg-muted/60 text-muted-foreground border-border" },
+    error:      { label: "Error",      cls: "bg-red-500/10 text-red-500 border-red-500/20" },
+  };
+  const { label, cls } = map[s] ?? map.draft;
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-medium ${cls}`}>
+      {s === "generating" && <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />}
+      {s === "ready" && <span className="w-1.5 h-1.5 rounded-full bg-current" />}
+      {label}
+    </span>
   );
 }
