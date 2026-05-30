@@ -58,7 +58,7 @@ def extract_blob_paths(content: str | Any) -> list[str]:
         data = json.loads(content)
         files = data.get("files", [])
         if isinstance(files, list):
-            return [f.get("blob_path", "") for f in files if isinstance(f, dict)]
+            return [p for f in files if isinstance(f, dict) for p in [f.get("blob_path") or ""] if p]
     except Exception:
         pass
     return []
