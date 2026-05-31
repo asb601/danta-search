@@ -183,6 +183,7 @@ def build_sql_tools(
     file_identities: FileIdentityMap | None = None,
     allowed_file_ids: set[str] | None = None,
     sql_ctx=None,  # SQLContext | None — passed to repair layer
+    contract: dict | None = None,  # Danta Semantic Contract — GATE B dry-plan
 ) -> list:
     """Return SQL tools bound to connection context.
 
@@ -215,6 +216,32 @@ def build_sql_tools(
             "referenced_file_ids": [],
         }
         state_store.setdefault("sql_attempts", []).append(_attempt)
+
+        # ── GATE B: dry-plan against the contract (logical SQL, pre-rewrite) ──
+        # Validates declared joins / exposed columns BEFORE execution. Default
+        # OFF; enable with SEMANTIC_CONTRACT_DRY_PLAN_ENABLED=true. Never raises.
+        if contract:
+            try:
+                from app.core.config import get_settings as _gs  # noqa: PLC0415
+                if bool(getattr(_gs(), "SEMANTIC_CONTRACT_DRY_PLAN_ENABLED", False)):
+                    from app.services.contract.dry_plan import dry_plan_sql  # noqa: PLC0415
+
+                    def _resolve_fid(name: str):
+                        if file_identities is None:
+                            return None
+                        try:
+                            return file_identities.resolve_table(name).canonical_id
+                        except Exception:
+                            return None
+
+                    _verdict = dry_plan_sql(sql, contract, resolve_file_id=_resolve_fid)
+                    if not _verdict.ok:
+                        _payload = _verdict.to_error_payload()
+                        _attempt.update({"status": "dry_plan_rejected", "error": _payload["error"]})
+                        pipeline_logger.info("gate_b_dry_plan_reject", violations=_verdict.violations)
+                        return json.dumps(_payload)
+            except Exception as _dp_exc:
+                pipeline_logger.warning("gate_b_dry_plan_error", error=str(_dp_exc)[:200])
 
         if file_identities is not None:
             try:

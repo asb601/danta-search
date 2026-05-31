@@ -1106,6 +1106,17 @@ async def _build_agent_context(
         "confidence_score": confidence.score,
     }
 
+    # Load the Danta Semantic Contract (governed surface) for GATE B dry-plan.
+    # Non-fatal: None when not yet compiled → dry-plan degrades to a no-op.
+    _contract = None
+    try:
+        if resolved_container_id:
+            from app.services.contract.builder import load_contract  # noqa: PLC0415
+
+            _contract = await load_contract(db, resolved_container_id)
+    except Exception as exc:
+        pipeline_logger.warning("contract_load_in_context_error", error=str(exc)[:200])
+
     # Build tools
     all_tools = []
     all_tools.extend(build_sql_tools(
@@ -1114,6 +1125,7 @@ async def _build_agent_context(
         file_identities=file_identity_map,
         allowed_file_ids=allowed_file_ids,
         sql_ctx=sql_ctx,  # repair layer uses approved joins/columns as constraints
+        contract=_contract,  # GATE B dry-plan validates against declared joins
     ))
     # search_catalog uses the lean full catalog so it can find any file
     # without paying the heavy-field cost.
@@ -1148,6 +1160,28 @@ async def _build_agent_context(
         file_identities=file_identity_map,
     ))
 
+    # ── GATE A: BUSINESS FEASIBILITY (the BA reflex) ─────────────────────────
+    # Deterministic, in-memory check over the finalized shortlist. The temporal
+    # check can short-circuit (exact date math); polarity/completeness produce
+    # advisory notes injected into the prompt. Defaults to shadow mode and never
+    # raises — any failure degrades to today's behaviour.
+    _feasibility = None
+    _advisory_block = ""
+    try:
+        from app.services.erp.feasibility_gate import evaluate_feasibility  # noqa: PLC0415
+
+        _feasibility = evaluate_feasibility(
+            query=query,
+            constraints=getattr(intent_plan, "constraints", None),
+            catalog=catalog,
+        )
+        if _feasibility.advisory_notes:
+            _advisory_block = "--- FEASIBILITY ADVISORIES ---\n" + "\n".join(
+                f"• {n}" for n in _feasibility.advisory_notes
+            )
+    except Exception as exc:
+        pipeline_logger.warning("feasibility_gate_error", error=str(exc)[:200])
+
     # Build graph and system prompt concurrently — both are pure CPU computation
     # with no shared mutable state. Overlapping them hides whichever is slower.
     _build_loop = asyncio.get_running_loop()
@@ -1169,6 +1203,7 @@ async def _build_agent_context(
                 workflow_topology_note="\n\n".join(filter(None, [
                     _workflow_continuity_note,
                     _wf_topology.topology_note,
+                    _advisory_block,
                 ])),
                 file_identities=file_identity_map,
             ),
@@ -1218,6 +1253,7 @@ async def _build_agent_context(
         "entity_resolution": entity_resolution,
         "graph_health": graph_health,
         "confidence": confidence,
+        "feasibility": _feasibility,
     }
 
 
@@ -1445,6 +1481,38 @@ async def run_agent_query_stream(
     initial_state = ctx["initial_state"]
     store = ctx["store"]
     trace: OrchestrationTrace = ctx["trace"]
+
+    # ── GATE A short-circuit ─────────────────────────────────────────────────
+    # When the BA feasibility gate (enforced mode) proves the question cannot be
+    # answered from the available data (e.g. the period is not covered), answer
+    # in business language WITHOUT running the agent/SQL loop. Shadow mode never
+    # sets feasible=False, so this only fires once explicitly enabled.
+    _feasibility = ctx.get("feasibility")
+    if _feasibility is not None and not _feasibility.feasible and _feasibility.short_circuit_answer:
+        with _stores_lock:
+            _request_stores.pop(req_id, None)
+        answer = _feasibility.short_circuit_answer
+        trace.set_execution_outcome(rows=0, total=0, duration_ms=0.0)
+        trace.emit()
+        pipeline_logger.info(
+            "gate_a_short_circuit",
+            query=query[:200],
+            signals=getattr(_feasibility, "signals", {}),
+        )
+        yield {"type": "token", "content": answer}
+        yield {
+            "type": "done",
+            "payload": {
+                "answer": answer,
+                "data": [], "chart": None, "route": "feasibility_gate",
+                "row_count": 0,
+                "files_used": [],
+                "tool_calls": 0,
+                "retrieved_files": ctx["catalog_len"],
+                "total_files": ctx["total_files"],
+            },
+        }
+        return
 
     chat_logger.info("agent_stream_start", query=query[:200], file_count=ctx["catalog_len"])
 

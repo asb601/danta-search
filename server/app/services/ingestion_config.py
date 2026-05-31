@@ -31,6 +31,7 @@ class StageName(StrEnum):
     METADATA = "metadata"
     AI_DESCRIPTION = "ai_description"
     ONTOLOGY = "ontology"
+    ERP_CLASSIFICATION = "erp_classification"
     EMBEDDING = "embedding"
     OPENSEARCH = "opensearch"
     ANALYTICS = "analytics"
@@ -54,6 +55,7 @@ INGEST_STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(StageName.METADATA, "gchat.ingest.metadata"),
     StageSpec(StageName.AI_DESCRIPTION, "gchat.ingest.ai_description"),
     StageSpec(StageName.ONTOLOGY, "gchat.ingest.ontology"),
+    StageSpec(StageName.ERP_CLASSIFICATION, "gchat.ingest.erp_classification"),
     StageSpec(StageName.EMBEDDING, "gchat.ingest.embedding"),
     StageSpec(StageName.OPENSEARCH, "gchat.ingest.opensearch"),
     StageSpec(StageName.PARQUET, "gchat.ingest.parquet"),

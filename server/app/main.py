@@ -42,6 +42,8 @@ import app.models.organization  # ensure Organization table is created
 import app.models.schema_dictionary  # ensure SchemaDictionary table is created
 import app.models.server_log  # ensure ServerLog table is created
 import app.models.dashboard  # ensure Dashboard + DashboardFolder tables are created
+import app.models.erp_classification  # ensure ErpClassification table is created
+import app.models.semantic_contract  # ensure SemanticContract table is created
 
 
 async def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
@@ -154,6 +156,22 @@ async def lifespan(app: FastAPI):
         await _dashboard_migrate()
     except Exception as exc:
         chat_logger.warning("dashboard_migration_failed", error=str(exc)[:300])
+
+    # ERP business-context layer — per-file classification (source system,
+    # module, polarity, process role). Powers GATE A + the semantic contract.
+    from app.migrations.erp_classification_upgrade import migrate as _erp_classification_migrate
+    try:
+        await _erp_classification_migrate()
+    except Exception as exc:
+        chat_logger.warning("erp_classification_migration_failed", error=str(exc)[:300])
+
+    # Danta Semantic Contract — the governed per-container surface the planner
+    # and dry-plan gate reason against (declared joins, exposed columns).
+    from app.migrations.semantic_contract_upgrade import migrate as _semantic_contract_migrate
+    try:
+        await _semantic_contract_migrate()
+    except Exception as exc:
+        chat_logger.warning("semantic_contract_migration_failed", error=str(exc)[:300])
 
     # Drop legacy audit_logs table — all audit events now go to server_logs
     from app.migrations.drop_audit_logs import migrate as _drop_audit_logs

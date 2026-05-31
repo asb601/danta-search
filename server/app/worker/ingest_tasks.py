@@ -37,6 +37,7 @@ _INGEST_TASK_OPTIONS = celery_ingest_task_options()
 _SEMANTIC_REBUILD_TASK_OPTIONS = celery_semantic_rebuild_task_options()
 _NON_FATAL_STAGES = {
     StageName.ONTOLOGY.value,
+    StageName.ERP_CLASSIFICATION.value,
     StageName.EMBEDDING.value,
     StageName.OPENSEARCH.value,
     StageName.PARQUET.value,
@@ -288,6 +289,17 @@ def ontology_task(self, payload: Payload) -> Payload:
 
 @celery_app.task(
     bind=True,
+    name=stage_task_name(StageName.ERP_CLASSIFICATION),
+    **_INGEST_TASK_OPTIONS,
+)
+def erp_classification_task(self, payload: Payload) -> Payload:
+    from app.services.ingestion_stages import erp_classification_stage
+
+    return _run_stage(self, StageName.ERP_CLASSIFICATION, payload, erp_classification_stage)
+
+
+@celery_app.task(
+    bind=True,
     name=stage_task_name(StageName.EMBEDDING),
     **_INGEST_TASK_OPTIONS,
 )
@@ -369,6 +381,7 @@ _TASK_BY_STAGE = {
     StageName.METADATA: metadata_task,
     StageName.AI_DESCRIPTION: ai_description_task,
     StageName.ONTOLOGY: ontology_task,
+    StageName.ERP_CLASSIFICATION: erp_classification_task,
     StageName.EMBEDDING: embedding_task,
     StageName.OPENSEARCH: opensearch_index_task,
     StageName.ANALYTICS: analytics_task,

@@ -515,6 +515,92 @@ async def ontology_stage(payload: Payload) -> Payload:
         return _next(payload, stage=stage)
 
 
+async def erp_classification_stage(payload: Payload) -> Payload:
+    """Classify a file's business context (source system / module / polarity /
+    process role) from evidence already produced upstream. Data-driven (LLM +
+    semantic-role corroboration), never hardcoded. Non-fatal: any failure or
+    low confidence persists an 'unknown' row and the pipeline continues."""
+    file_id = payload["file_id"]
+    start = time.perf_counter()
+    stage = StageName.ERP_CLASSIFICATION.value
+
+    # Feature flag — default ON, but never blocks ingestion if disabled.
+    from app.core.config import get_settings as _get_settings  # noqa: PLC0415
+    if not bool(getattr(_get_settings(), "ERP_CLASSIFICATION_ENABLED", True)):
+        return _next(payload, stage=stage)
+
+    async with _async_session() as db:
+        file, container = await _load_file_and_container(db, file_id)
+        metadata = (
+            await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+        ).scalar_one_or_none()
+        if not metadata:
+            raise RuntimeError("metadata missing before erp_classification stage")
+
+        ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
+
+        from app.services.erp.classifier import classify_file  # noqa: PLC0415
+        from app.models.erp_classification import ErpClassification as ErpRow  # noqa: PLC0415
+
+        clf = await classify_file(
+            filename=file.name,
+            columns_info=metadata.columns_info or [],
+            sample_rows=metadata.sample_rows or [],
+            ai_description=metadata.ai_description,
+            column_semantic_roles=metadata.column_semantic_roles or {},
+        )
+
+        # Upsert one row per file (re-ingest replaces it).
+        existing = (
+            await db.execute(select(ErpRow).where(ErpRow.file_id == file_id))
+        ).scalar_one_or_none()
+        if existing:
+            existing.container_id = metadata.container_id or container.id
+            existing.source_system = clf.source_system
+            existing.erp_module = clf.erp_module
+            existing.domain_polarity = clf.domain_polarity
+            existing.process_role = clf.process_role
+            existing.grain = clf.grain or None
+            existing.confidence = clf.confidence
+            existing.evidence = clf.evidence or []
+            existing.source = clf.source
+            existing.model_version = clf.model_version or None
+            existing.computed_at = datetime.now(timezone.utc)
+        else:
+            db.add(ErpRow(
+                container_id=metadata.container_id or container.id,
+                file_id=file_id,
+                source_system=clf.source_system,
+                erp_module=clf.erp_module,
+                domain_polarity=clf.domain_polarity,
+                process_role=clf.process_role,
+                grain=clf.grain or None,
+                confidence=clf.confidence,
+                evidence=clf.evidence or [],
+                source=clf.source,
+                model_version=clf.model_version or None,
+            ))
+        await db.commit()
+
+        dur = _ms(start)
+        ingest_logger.info(
+            "ingest_stage", stage=stage, status="done", file_id=file_id,
+            source_system=clf.source_system, polarity=clf.domain_polarity,
+            confidence=clf.confidence, reliable=clf.is_reliable, duration_ms=dur,
+        )
+        await _db_log(
+            event="ingest_stage", level="info", trace_id=file_id, file_id=file_id,
+            file_name=file.name, duration_ms=dur, actor_user_id=payload.get("actor_user_id"),
+            actor_email=payload.get("actor_email"), actor_role=payload.get("actor_role"),
+            details={
+                "stage": stage, "status": "done", "source_system": clf.source_system,
+                "module": clf.erp_module, "polarity": clf.domain_polarity,
+                "process_role": clf.process_role, "confidence": clf.confidence,
+            },
+        )
+        return _next(payload, stage=stage)
+
+
 async def embedding_stage(payload: Payload) -> Payload:
     file_id = payload["file_id"]
     start = time.perf_counter()
@@ -822,6 +908,23 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
         invalidate_catalog_cache()
     except Exception as exc:
         ingest_logger.warning("catalog_invalidate_failed", file_id=file_id, error=str(exc)[:200])
+
+    # ── Recompile the Danta Semantic Contract for this container ──────────────
+    # Hash-guarded: writes only when the inputs actually changed, so per-file
+    # recompiles are cheap. Non-fatal — a contract failure never fails ingestion.
+    try:
+        from app.core.config import get_settings as _get_settings  # noqa: PLC0415
+        if bool(getattr(_get_settings(), "SEMANTIC_CONTRACT_ENABLED", True)):
+            from app.services.contract.builder import compile_and_store_contract  # noqa: PLC0415
+
+            _cid = None
+            async with _async_session() as _cdb:
+                _f = await _cdb.get(File, file_id)
+                _cid = _f.container_id if _f else None
+                if _cid:
+                    await compile_and_store_contract(_cdb, _cid)
+    except Exception as exc:
+        ingest_logger.warning("contract_compile_failed", file_id=file_id, error=str(exc)[:200])
 
     ingest_logger.info("ingest_stage", stage=stage, status="done", file_id=file_id)
     await _db_log(
