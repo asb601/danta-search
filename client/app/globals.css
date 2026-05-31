@@ -669,6 +669,16 @@
     font-weight: 600;
   }
 
+  /* ── SCROLLBAR (thin, subtle) ── */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
   /* input-focus compat */
   .input-focus {
     outline: none;

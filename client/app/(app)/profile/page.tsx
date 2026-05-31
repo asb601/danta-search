@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import useSWR from "swr";
+import { motion, AnimatePresence } from "framer-motion";
 import { UserCircle, Users, Shield, ShieldOff, Loader2, Database, RefreshCw, CheckCircle2, AlertTriangle, Tag, X, Plus, Sparkles, FolderOpen, FileText, ChevronDown, ChevronRight, Trash2, Clock, UserCheck, UserX, Mail } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { apiFetch } from "@/lib/auth";
@@ -102,40 +103,63 @@ export default function ProfilePage() {
   const visibleTabs = tabs.filter((t) => !t.adminOnly || user.is_admin);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full bg-white">
       {/* Header */}
-      <div className="shrink-0 px-6 py-4 border-b border-border">
-        <div className="flex items-center gap-3">
-          <UserCircle className="w-5 h-5 text-foreground" />
-          <h1 className="text-lg font-semibold text-foreground">Profile</h1>
+      <div className="shrink-0 px-6 pt-6 pb-0 border-b border-[#e5e5e5]">
+        <div className="flex items-center gap-2.5 mb-5">
+          <div className="w-7 h-7 rounded-lg bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center">
+            <UserCircle className="w-4 h-4 text-[#737373]" />
+          </div>
+          <h1
+            className="text-[17px] font-bold text-[#0a0a0a]"
+            style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}
+          >
+            Profile
+          </h1>
         </div>
 
-        {/* Tab bar */}
-        <div className="flex gap-4 mt-4">
+        {/* Animated tab bar */}
+        <div className="flex gap-0.5">
           {visibleTabs.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
               className={cn(
-                "flex items-center gap-2 pb-2 text-sm border-b-2 transition-colors",
-                tab === t.id
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
+                "relative flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors rounded-t-lg",
+                tab === t.id ? "text-[#0a0a0a]" : "text-[#a3a3a3] hover:text-[#737373]"
               )}
             >
-              <t.icon className="w-4 h-4" />
+              <t.icon className="w-3.5 h-3.5" />
               {t.label}
+              {tab === t.id && (
+                <motion.div
+                  layoutId="profile-tab-indicator"
+                  className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0a0a0a] rounded-full"
+                  transition={{ type: "spring", stiffness: 400, damping: 36 }}
+                />
+              )}
             </button>
           ))}
         </div>
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6">
-        {tab === "profile" && <ProfileTab />}
-        {tab === "users" && user.is_admin && <UsersTab currentUserId={user.id} />}
-        {tab === "domains" && user.is_admin && <DomainsTab />}
-        {tab === "parquet" && user.is_admin && <ParquetTab />}
+      <div className="flex-1 overflow-y-auto">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={tab}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.22, ease: "easeOut" }}
+            className="p-6"
+          >
+            {tab === "profile" && <ProfileTab />}
+            {tab === "users" && user.is_admin && <UsersTab currentUserId={user.id} />}
+            {tab === "domains" && user.is_admin && <DomainsTab />}
+            {tab === "parquet" && user.is_admin && <ParquetTab />}
+          </motion.div>
+        </AnimatePresence>
       </div>
     </div>
   );
@@ -149,46 +173,92 @@ function ProfileTab() {
 
   if (!user) return null;
 
+  const roleLabel = user.is_admin ? "Admin" : user.role === "developer" ? "Developer" : user.role === "manager" ? "Manager" : "Member";
+  const roleCls = user.is_admin
+    ? "bg-[#0a0a0a] text-white"
+    : user.role === "developer"
+    ? "bg-violet-100 text-violet-700"
+    : user.role === "manager"
+    ? "bg-cyan-100 text-cyan-700"
+    : "bg-[#f4f4f4] text-[#737373]";
+
   return (
-    <div className="max-w-md space-y-6">
-      <div className="flex items-center gap-4">
-        {user.picture ? (
-          <img
-            src={user.picture}
-            alt=""
-            className="w-16 h-16 rounded-full border border-border"
-            referrerPolicy="no-referrer"
-          />
-        ) : (
-          <div className="w-16 h-16 rounded-full bg-surface-raised border border-border flex items-center justify-center">
-            <UserCircle className="w-8 h-8 text-muted-foreground" />
-          </div>
-        )}
-        <div>
-          <p className="text-base font-medium text-foreground">{user.name || "—"}</p>
-          <p className="text-sm text-muted-foreground">{user.email}</p>
-          {user.is_admin && (
-            <span className="inline-block mt-1 px-2 py-0.5 text-[10px] font-medium rounded bg-primary/15 text-primary">
-              Admin
+    <div className="max-w-lg space-y-6">
+      {/* Profile hero card */}
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: "easeOut" }}
+        className="relative overflow-hidden rounded-2xl border border-[#e5e5e5] bg-[#f9f9f9] p-6"
+      >
+        {/* Subtle grid background */}
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            backgroundImage: "linear-gradient(to right, #e5e5e5 1px, transparent 1px), linear-gradient(to bottom, #e5e5e5 1px, transparent 1px)",
+            backgroundSize: "28px 28px",
+            opacity: 0.4,
+            maskImage: "radial-gradient(ellipse 80% 80% at 50% 0%, black, transparent)",
+          }}
+        />
+        <div className="relative flex items-center gap-5">
+          {/* Avatar */}
+          <div className="relative shrink-0">
+            {user.picture ? (
+              <img
+                src={user.picture}
+                alt=""
+                className="w-16 h-16 rounded-2xl border-2 border-white shadow-md"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-16 h-16 rounded-2xl bg-[#ebebeb] border-2 border-white shadow-md flex items-center justify-center">
+                <UserCircle className="w-8 h-8 text-[#a3a3a3]" />
+              </div>
+            )}
+            <span className={cn("absolute -bottom-1 -right-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white", roleCls)}>
+              {roleLabel}
             </span>
-          )}
+          </div>
+
+          <div className="min-w-0">
+            <p
+              className="text-[18px] font-bold text-[#0a0a0a] truncate"
+              style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}
+            >
+              {user.name || "—"}
+            </p>
+            <p className="text-[13px] text-[#737373] truncate mt-0.5">{user.email}</p>
+          </div>
         </div>
-      </div>
+      </motion.div>
 
-      <div className="space-y-3">
-        <Field label="Name" value={user.name || "—"} />
-        <Field label="Email" value={user.email} />
-        <Field label="Role" value={user.is_admin ? "Admin" : user.role === "developer" ? "Developer" : user.role === "manager" ? "Manager" : "Member"} />
-      </div>
+      {/* Info fields */}
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.08, duration: 0.32 }}
+        className="space-y-2"
+      >
+        <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest mb-3">Account details</p>
+        <Field label="Full name" value={user.name || "—"} />
+        <Field label="Email address" value={user.email} />
+        <Field label="Role" value={roleLabel} />
+      </motion.div>
 
-      {/* Departments section (non-admin users) */}
+      {/* Departments (non-admin) */}
       {!user.is_admin && (
-        <div className="space-y-2">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.14, duration: 0.32 }}
+          className="space-y-3"
+        >
           <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">My Departments</span>
+            <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest">My departments</p>
             <button
               onClick={() => setEditingDomains(true)}
-              className="text-xs text-primary hover:underline"
+              className="text-[12px] font-medium text-[#0a0a0a] hover:text-[#525252] transition-colors underline underline-offset-2"
             >
               Edit
             </button>
@@ -198,17 +268,17 @@ function ProfileTab() {
               {user.allowed_domains.map((d) => (
                 <span
                   key={d}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary border border-primary/20"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-medium bg-[#f4f4f4] text-[#0a0a0a] border border-[#e5e5e5]"
                 >
-                  <Tag className="w-3 h-3" />
+                  <Tag className="w-3 h-3 text-[#a3a3a3]" />
                   {d}
                 </span>
               ))}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">No departments set.</p>
+            <p className="text-[13px] text-[#a3a3a3]">No departments assigned.</p>
           )}
-        </div>
+        </motion.div>
       )}
 
       {editingDomains && (
@@ -263,10 +333,16 @@ function DomainPickerModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-sm bg-surface border border-border rounded-2xl shadow-xl p-6 space-y-4">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96, y: 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 4 }}
+        transition={{ duration: 0.2, ease: "easeOut" }}
+        className="w-full max-w-sm bg-white border border-[#e5e5e5] rounded-2xl shadow-xl p-6 space-y-4"
+      >
         <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold text-foreground">Edit Departments</h2>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+          <h2 className="text-[15px] font-bold text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}>Edit Departments</h2>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-[#a3a3a3] hover:text-[#0a0a0a] hover:bg-[#f4f4f4] transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -278,13 +354,13 @@ function DomainPickerModal({
                 key={d}
                 onClick={() => toggle(d)}
                 className={cn(
-                  "flex items-center gap-2 px-3 py-2 rounded-lg border text-sm text-left transition-all",
+                  "flex items-center gap-2 px-3 py-2 rounded-lg border text-[13px] text-left transition-all",
                   active
-                    ? "border-primary bg-primary/10 text-foreground"
-                    : "border-border text-muted-foreground hover:text-foreground"
+                    ? "border-[#0a0a0a] bg-[#0a0a0a]/5 text-[#0a0a0a] font-medium"
+                    : "border-[#e5e5e5] text-[#737373] hover:text-[#0a0a0a] hover:border-[#a3a3a3]"
                 )}
               >
-                {active && <CheckCircle2 className="w-3.5 h-3.5 text-primary shrink-0" />}
+                {active && <CheckCircle2 className="w-3.5 h-3.5 text-[#0a0a0a] shrink-0" />}
                 <span className="truncate">{d}</span>
               </button>
             );
@@ -293,20 +369,21 @@ function DomainPickerModal({
         <div className="flex gap-2 pt-1">
           <button
             onClick={onClose}
-            className="flex-1 py-2 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground transition-colors"
+            className="flex-1 py-2 rounded-lg border border-[#e5e5e5] text-[13px] text-[#737373] hover:text-[#0a0a0a] hover:border-[#a3a3a3] transition-colors"
           >
             Cancel
           </button>
           <button
             onClick={handleSave}
             disabled={saving}
-            className="flex-1 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50 hover:opacity-90 transition-opacity flex items-center justify-center gap-1.5"
+            className="flex-1 py-2 rounded-lg text-[13px] font-medium text-white disabled:opacity-50 hover:opacity-90 transition-opacity flex items-center justify-center gap-1.5"
+            style={{ background: "linear-gradient(180deg, #1f1f1f 0%, #080808 100%)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12)" }}
           >
             {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             Save
           </button>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -314,8 +391,8 @@ function DomainPickerModal({
 function Field({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span className="text-sm text-foreground px-3 py-2 rounded-md bg-surface border border-border">
+      <span className="text-[11px] text-[#a3a3a3]">{label}</span>
+      <span className="text-[13px] text-[#0a0a0a] px-3 py-2 rounded-lg bg-[#f9f9f9] border border-[#e5e5e5]">
         {value}
       </span>
     </div>
@@ -361,11 +438,11 @@ function RoleDropdown({
         disabled={disabled}
         onClick={() => setOpen((p) => !p)}
         className={cn(
-          "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] font-medium rounded border transition-colors",
-          currentRole === "admin"     ? "bg-primary/15 border-primary/30 text-primary" :
-          currentRole === "developer" ? "bg-violet-500/15 border-violet-500/30 text-violet-400" :
-          currentRole === "manager"   ? "bg-cyan-500/15 border-cyan-500/30 text-cyan-400" :
-          "bg-surface-raised border-border text-muted-foreground",
+          "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] font-medium rounded-full border transition-colors",
+          currentRole === "admin"     ? "bg-[#0a0a0a]/8 border-[#0a0a0a]/20 text-[#0a0a0a]" :
+          currentRole === "developer" ? "bg-violet-500/10 border-violet-500/25 text-violet-600" :
+          currentRole === "manager"   ? "bg-cyan-500/10 border-cyan-500/25 text-cyan-600" :
+          "bg-[#f4f4f4] border-[#e5e5e5] text-[#737373]",
           disabled && "opacity-50 cursor-not-allowed"
         )}
       >
@@ -379,7 +456,7 @@ function RoleDropdown({
       </button>
 
       {open && (
-        <div className="absolute z-30 mt-1 right-0 w-36 rounded-md border border-border bg-surface shadow-lg overflow-hidden">
+        <div className="absolute z-30 mt-1 right-0 w-36 rounded-xl border border-[#e5e5e5] bg-white shadow-[0_4px_20px_rgba(0,0,0,0.1)] overflow-hidden">
           {ROLES.map((r) => (
             <button
               key={r.value}
@@ -389,8 +466,11 @@ function RoleDropdown({
                 setOpen(false);
               }}
               className={cn(
-                "w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-surface-raised transition-colors",
-                r.color,
+                "w-full flex items-center justify-between px-3 py-2 text-[12px] hover:bg-[#f4f4f4] transition-colors",
+                r.value === "admin" ? "text-[#0a0a0a]" :
+                r.value === "developer" ? "text-violet-600" :
+                r.value === "manager" ? "text-cyan-600" :
+                "text-[#737373]",
                 r.value === currentRole && "font-semibold"
               )}
             >
@@ -481,54 +561,56 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
   if (!users) {
     return (
       <div className="flex items-center justify-center h-40">
-        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
+        <Loader2 className="w-5 h-5 text-[#a3a3a3] animate-spin" />
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-xl">
 
       {/* ── Pending access requests ── */}
       {pendingRequests && pendingRequests.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center gap-2">
-            <Clock className="w-4 h-4 text-yellow-500" />
-            <h3 className="text-sm font-semibold text-foreground">
-              Pending Access Requests
-              <span className="ml-2 px-1.5 py-0.5 text-[10px] font-medium rounded-full bg-yellow-500/15 text-yellow-600">
-                {pendingRequests.length}
-              </span>
-            </h3>
+            <Clock className="w-3.5 h-3.5 text-amber-500" />
+            <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest">
+              Pending requests
+            </p>
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-amber-500/12 text-amber-600">
+              {pendingRequests.length}
+            </span>
           </div>
 
           {pendingRequests.map((req) => {
             const reviewing = reviewingId === req.id;
             return (
-              <div
+              <motion.div
                 key={req.id}
-                className="flex items-start justify-between gap-4 px-4 py-3 rounded-xl border border-yellow-500/20 bg-yellow-500/5"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-start justify-between gap-4 px-4 py-3 rounded-xl border border-amber-200 bg-amber-50/60"
               >
                 <div className="flex items-start gap-3 min-w-0">
                   {req.user_picture ? (
                     <img
                       src={req.user_picture}
                       alt=""
-                      className="w-9 h-9 rounded-full border border-border mt-0.5 shrink-0"
+                      className="w-9 h-9 rounded-full border border-[#e5e5e5] mt-0.5 shrink-0"
                       referrerPolicy="no-referrer"
                     />
                   ) : (
-                    <div className="w-9 h-9 rounded-full bg-surface-raised border border-border flex items-center justify-center shrink-0 mt-0.5">
-                      <UserCircle className="w-5 h-5 text-muted-foreground" />
+                    <div className="w-9 h-9 rounded-full bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center shrink-0 mt-0.5">
+                      <UserCircle className="w-5 h-5 text-[#a3a3a3]" />
                     </div>
                   )}
                   <div className="min-w-0">
-                    <p className="text-sm font-medium text-foreground truncate">
+                    <p className="text-[13px] font-medium text-[#0a0a0a] truncate">
                       {req.user_name || req.user_email}
                     </p>
-                    <p className="text-xs text-muted-foreground truncate">{req.user_email}</p>
+                    <p className="text-[11px] text-[#737373] truncate">{req.user_email}</p>
                     {req.message && (
-                      <p className="text-xs text-muted-foreground mt-1 italic">
+                      <p className="text-[11px] text-[#737373] mt-1 italic">
                         &ldquo;{req.message}&rdquo;
                       </p>
                     )}
@@ -540,7 +622,7 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
                     onClick={() => handleReview(req.id, "approve")}
                     disabled={reviewing}
                     title="Approve"
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-500/10 text-green-600 hover:bg-green-500/20 transition-colors disabled:opacity-40"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-green-500/10 text-green-700 hover:bg-green-500/18 transition-colors disabled:opacity-40"
                   >
                     {reviewing ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -553,13 +635,13 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
                     onClick={() => handleReview(req.id, "decline")}
                     disabled={reviewing}
                     title="Decline"
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors disabled:opacity-40"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-[#dc2626]/8 text-[#dc2626] hover:bg-[#dc2626]/15 transition-colors disabled:opacity-40"
                   >
                     <UserX className="w-3.5 h-3.5" />
                     Decline
                   </button>
                 </div>
-              </div>
+              </motion.div>
             );
           })}
         </div>
@@ -568,52 +650,54 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
       {/* ── Existing users ── */}
       <div className="space-y-3">
         {pendingRequests && pendingRequests.length > 0 && (
-          <h3 className="text-sm font-semibold text-foreground">Members</h3>
+          <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest">Members</p>
         )}
-      {users.map((u) => {
+      {users.map((u, idx) => {
         const isCurrent = u.id === currentUserId;
         const changing = changingRoleId === u.id;
         const roleLabel = u.role === "admin" ? "Admin" : u.role === "developer" ? "Developer" : u.role === "manager" ? "Manager" : "Member";
 
         return (
-          <div
+          <motion.div
             key={u.id}
-            className="flex items-center justify-between gap-4 px-4 py-3 rounded-xl border border-border bg-surface"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: idx * 0.04, duration: 0.22 }}
+            className="flex items-center justify-between gap-4 px-4 py-3 rounded-xl border border-[#e5e5e5] bg-[#f9f9f9]"
           >
             <div className="flex items-center gap-3 min-w-0">
               {u.picture ? (
                 <img
                   src={u.picture}
                   alt=""
-                  className="w-9 h-9 rounded-full border border-border"
+                  className="w-9 h-9 rounded-full border-2 border-white shadow-sm"
                   referrerPolicy="no-referrer"
                 />
               ) : (
-                <div className="w-9 h-9 rounded-full bg-surface-raised border border-border flex items-center justify-center">
-                  <UserCircle className="w-5 h-5 text-muted-foreground" />
+                <div className="w-9 h-9 rounded-full bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center">
+                  <UserCircle className="w-5 h-5 text-[#a3a3a3]" />
                 </div>
               )}
               <div className="min-w-0">
-                <p className="text-sm font-medium text-foreground truncate">
+                <p className="text-[13px] font-medium text-[#0a0a0a] truncate">
                   {u.name || u.email}
                 </p>
-                <p className="text-xs text-muted-foreground truncate">{u.email}</p>
+                <p className="text-[11px] text-[#737373] truncate">{u.email}</p>
               </div>
             </div>
 
             <div className="flex items-center gap-3 shrink-0">
-              <span className="text-xs text-muted-foreground">
+              <span className="text-[11px] text-[#a3a3a3]">
                 {u.file_count} file{u.file_count !== 1 && "s"}
               </span>
 
-              {/* Role badge / dropdown */}
               {isCurrent ? (
                 <span className={cn(
-                  "inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded",
-                  u.role === "admin" ? "bg-primary/15 text-primary" :
-                  u.role === "developer" ? "bg-violet-500/15 text-violet-400" :
-                  u.role === "manager" ? "bg-cyan-500/15 text-cyan-400" :
-                  "bg-surface-raised text-muted-foreground"
+                  "inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full border",
+                  u.role === "admin" ? "bg-[#0a0a0a]/8 border-[#0a0a0a]/15 text-[#0a0a0a]" :
+                  u.role === "developer" ? "bg-violet-500/10 border-violet-500/20 text-violet-600" :
+                  u.role === "manager" ? "bg-cyan-500/10 border-cyan-500/20 text-cyan-600" :
+                  "bg-[#f4f4f4] border-[#e5e5e5] text-[#737373]"
                 )}>
                   {u.role === "admin" && <Shield className="w-3 h-3" />}
                   {roleLabel}
@@ -629,17 +713,17 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
               {!isCurrent && (
                 confirmDeleteId === u.id ? (
                   <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] text-destructive font-medium">Delete?</span>
+                    <span className="text-[11px] text-[#dc2626] font-medium">Delete?</span>
                     <button
                       onClick={() => handleDeleteUser(u.id)}
                       disabled={deletingId === u.id}
-                      className="px-2 py-0.5 text-[11px] rounded bg-destructive text-white hover:bg-destructive/80 transition-colors disabled:opacity-50"
+                      className="px-2 py-0.5 text-[11px] rounded-lg bg-[#dc2626] text-white hover:bg-[#b91c1c] transition-colors disabled:opacity-50"
                     >
                       {deletingId === u.id ? <Loader2 className="w-3 h-3 animate-spin" /> : "Yes"}
                     </button>
                     <button
                       onClick={() => setConfirmDeleteId(null)}
-                      className="px-2 py-0.5 text-[11px] rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors"
+                      className="px-2 py-0.5 text-[11px] rounded-lg bg-[#f4f4f4] text-[#737373] hover:text-[#0a0a0a] transition-colors"
                     >
                       No
                     </button>
@@ -648,17 +732,17 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
                   <button
                     onClick={() => setConfirmDeleteId(u.id)}
                     title="Delete user"
-                    className="p-1.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                    className="p-1.5 rounded-lg text-[#a3a3a3] hover:text-[#dc2626] hover:bg-[#dc2626]/8 transition-colors"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
                 )
               )}
             </div>
-          </div>
+          </motion.div>
         );
       })}
-      </div>  {/* end members list */}
+      </div>
     </div>
   );
 }
@@ -709,23 +793,24 @@ function ParquetTab() {
     }
   }, [mutate]);
 
-  if (isLoading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-muted-foreground" /></div>;
-  if (error) return <p className="text-destructive p-4">Failed to load parquet status.</p>;
+  if (isLoading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#a3a3a3]" /></div>;
+  if (error) return <p className="text-[#dc2626] p-4 text-[13px]">Failed to load parquet status.</p>;
 
   const files = data?.files ?? [];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 max-w-xl">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold text-foreground">Missing Parquet Conversions</h3>
-          <p className="text-sm text-muted-foreground">{files.length} file(s) without parquet</p>
+          <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest mb-1">Parquet status</p>
+          <p className="text-[13px] text-[#737373]">{files.length} file{files.length !== 1 ? "s" : ""} without parquet</p>
         </div>
         {files.length > 0 && (
           <button
             onClick={retryAll}
             disabled={retrying}
-            className="flex items-center gap-2 px-4 py-2 bg-primary hover:opacity-90 disabled:opacity-50 rounded-lg text-sm font-medium text-primary-foreground transition-opacity"
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] font-medium text-white disabled:opacity-50 hover:opacity-90 transition-opacity"
+            style={{ background: "linear-gradient(180deg, #1f1f1f 0%, #080808 100%)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12)" }}
           >
             {retrying ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Retry All
@@ -734,28 +819,28 @@ function ParquetTab() {
       </div>
 
       {result && (
-        <div className="flex items-center gap-2 p-3 bg-primary/10 border border-primary/20 rounded-lg text-sm text-primary">
+        <div className="flex items-center gap-2 p-3 bg-[#0a0a0a]/5 border border-[#0a0a0a]/10 rounded-xl text-[13px] text-[#0a0a0a]">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
           {result}
         </div>
       )}
 
       {files.length === 0 ? (
-        <div className="flex flex-col items-center py-12 text-muted-foreground">
-          <CheckCircle2 className="w-8 h-8 mb-2 text-success" />
-          <p>All files have parquet conversions.</p>
+        <div className="flex flex-col items-center py-12 text-[#a3a3a3]">
+          <CheckCircle2 className="w-8 h-8 mb-2 text-green-500" />
+          <p className="text-[13px]">All files have parquet conversions.</p>
         </div>
       ) : (
         <div className="space-y-2">
           {files.map((f) => (
-            <div key={f.file_id} className="p-3 bg-surface rounded-lg border border-border space-y-1">
+            <div key={f.file_id} className="p-3 bg-[#f9f9f9] rounded-xl border border-[#e5e5e5] space-y-1">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-medium text-foreground truncate min-w-0">{f.name}</p>
+                <p className="text-[13px] font-medium text-[#0a0a0a] truncate min-w-0">{f.name}</p>
                 {f.job_status === "failed" && (
-                  <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded bg-destructive/10 text-destructive border border-destructive/20">failed</span>
+                  <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-[#dc2626]/8 text-[#dc2626] border border-[#dc2626]/15">failed</span>
                 )}
                 {f.job_status === "running" && (
-                  <span className="shrink-0 flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 border border-amber-500/20">
+                  <span className="shrink-0 flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-600 border border-amber-500/20">
                     <Loader2 className="w-2.5 h-2.5 animate-spin" />running
                   </span>
                 )}
@@ -763,9 +848,9 @@ function ParquetTab() {
                   <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
                 )}
               </div>
-              <p className="text-xs text-muted-foreground truncate">{f.blob_path}</p>
+              <p className="text-[11px] text-[#737373] truncate">{f.blob_path}</p>
               {f.job_error && (
-                <p className="text-xs text-destructive break-all">{f.job_error}</p>
+                <p className="text-[11px] text-[#dc2626] break-all">{f.job_error}</p>
               )}
             </div>
           ))}
@@ -862,7 +947,7 @@ function DomainsTab() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-40">
-        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
+        <Loader2 className="w-5 h-5 text-[#a3a3a3] animate-spin" />
       </div>
     );
   }
@@ -872,8 +957,8 @@ function DomainsTab() {
 
       {/* ── Create domain ── */}
       <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-foreground">Create Department</h2>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest">Create Department</p>
+        <p className="text-[12px] text-[#737373] leading-relaxed">
           Adding a department creates a top-level folder tagged with that name. Users can then be assigned to it.
         </p>
         <div className="flex gap-2">
@@ -883,28 +968,28 @@ function DomainsTab() {
             onChange={(e) => setNewDomain(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleCreateDomain()}
             placeholder="e.g. Finance, HR, Engineering"
-            className="flex-1 px-3 py-2 text-sm rounded-lg border border-border bg-surface text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+            className="flex-1 px-3 py-2 text-[13px] rounded-xl border border-[#e5e5e5] bg-[#f9f9f9] text-[#0a0a0a] placeholder:text-[#a3a3a3] focus:outline-none focus:ring-2 focus:ring-[#0a0a0a]/10 focus:border-[#a3a3a3] transition-colors"
           />
           <button
             onClick={handleCreateDomain}
             disabled={!newDomain.trim() || creating}
-            className="flex items-center gap-1.5 px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg disabled:opacity-40 hover:opacity-90 transition-opacity"
+            className="flex items-center gap-1.5 px-4 py-2 text-[13px] font-medium text-white rounded-xl disabled:opacity-40 hover:opacity-90 transition-opacity"
+            style={{ background: "linear-gradient(180deg, #1f1f1f 0%, #080808 100%)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12)" }}
           >
             {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
             Add
           </button>
         </div>
-        {createError && <p className="text-xs text-destructive">{createError}</p>}
+        {createError && <p className="text-[12px] text-[#dc2626]">{createError}</p>}
 
-        {/* Existing domains */}
         {domains.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
             {domains.map((d) => (
               <span
                 key={d}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary border border-primary/20"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[12px] font-medium bg-[#f4f4f4] text-[#0a0a0a] border border-[#e5e5e5]"
               >
-                <Tag className="w-3 h-3" />
+                <Tag className="w-3 h-3 text-[#a3a3a3]" />
                 {d}
               </span>
             ))}
@@ -914,13 +999,13 @@ function DomainsTab() {
 
       {/* ── User domain assignments ── */}
       <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-foreground">User Access</h2>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest">User Access</p>
+        <p className="text-[12px] text-[#737373] leading-relaxed">
           Assign departments to users. Users with no departments are unrestricted.
         </p>
 
         {domains.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-4 text-center">
+          <p className="text-[13px] text-[#a3a3a3] py-4 text-center">
             No departments yet. Create one above first.
           </p>
         ) : (
@@ -932,24 +1017,22 @@ function DomainsTab() {
               return (
                 <div
                   key={u.id}
-                  className="p-4 rounded-xl border border-border bg-surface space-y-3"
+                  className="p-4 rounded-xl border border-[#e5e5e5] bg-[#f9f9f9] space-y-3"
                 >
-                  {/* User info */}
                   <div className="flex items-center gap-3">
                     {u.picture ? (
-                      <img src={u.picture} alt="" className="w-8 h-8 rounded-full border border-border" referrerPolicy="no-referrer" />
+                      <img src={u.picture} alt="" className="w-8 h-8 rounded-full border-2 border-white shadow-sm" referrerPolicy="no-referrer" />
                     ) : (
-                      <div className="w-8 h-8 rounded-full bg-surface-raised border border-border flex items-center justify-center">
-                        <UserCircle className="w-4 h-4 text-muted-foreground" />
+                      <div className="w-8 h-8 rounded-full bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center">
+                        <UserCircle className="w-4 h-4 text-[#a3a3a3]" />
                       </div>
                     )}
                     <div className="min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">{u.name || u.email}</p>
-                      <p className="text-xs text-muted-foreground truncate">{u.email}</p>
+                      <p className="text-[13px] font-medium text-[#0a0a0a] truncate">{u.name || u.email}</p>
+                      <p className="text-[11px] text-[#737373] truncate">{u.email}</p>
                     </div>
                   </div>
 
-                  {/* Domain pills */}
                   <div className="flex flex-wrap gap-1.5">
                     {domains.map((d) => {
                       const active = current.includes(d);
@@ -958,10 +1041,10 @@ function DomainsTab() {
                           key={d}
                           onClick={() => toggleUserDomain(u.id, d, u.allowed_domains)}
                           className={cn(
-                            "inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-all",
+                            "inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[12px] font-medium border transition-all",
                             active
-                              ? "bg-primary/15 text-primary border-primary/30"
-                              : "bg-surface-raised text-muted-foreground border-border hover:border-muted-foreground"
+                              ? "bg-[#0a0a0a]/8 text-[#0a0a0a] border-[#0a0a0a]/20"
+                              : "bg-white text-[#737373] border-[#e5e5e5] hover:border-[#a3a3a3] hover:text-[#0a0a0a]"
                           )}
                         >
                           {active && <CheckCircle2 className="w-3 h-3" />}
@@ -972,15 +1055,15 @@ function DomainsTab() {
                   </div>
 
                   {current.length === 0 && (
-                    <p className="text-xs text-amber-500">No departments — user sees all data</p>
+                    <p className="text-[11px] text-amber-600">No departments — user sees all data</p>
                   )}
 
-                  {/* Save button (only if changed) */}
                   {isDirty && (
                     <button
                       onClick={() => handleSaveUserDomains(u.id)}
                       disabled={savingUser === u.id}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg disabled:opacity-50 hover:opacity-90 transition-opacity"
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-white rounded-lg disabled:opacity-50 hover:opacity-90 transition-opacity"
+                      style={{ background: "linear-gradient(180deg, #1f1f1f 0%, #080808 100%)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12)" }}
                     >
                       {savingUser === u.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
                       Save changes
@@ -995,13 +1078,13 @@ function DomainsTab() {
 
       {/* ── Department file assignment ── */}
       <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-foreground">File Assignment by Department</h2>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest">File Assignment by Department</p>
+        <p className="text-[12px] text-[#737373] leading-relaxed">
           Select a department to see its files. Use AI Sort to auto-assign based on file content, or add files manually.
         </p>
 
         {domains.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-4 text-center">
+          <p className="text-[13px] text-[#a3a3a3] py-4 text-center">
             No departments yet. Create one above first.
           </p>
         ) : (
@@ -1054,34 +1137,33 @@ function DepartmentFilePanel({ domain }: { domain: string }) {
   };
 
   return (
-    <div className="rounded-xl border border-border bg-surface overflow-hidden">
-      {/* Header row */}
+    <div className="rounded-xl border border-[#e5e5e5] bg-[#f9f9f9] overflow-hidden">
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center justify-between px-4 py-3 hover:bg-surface-raised transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-[#f4f4f4] transition-colors"
       >
         <div className="flex items-center gap-2">
-          <FolderOpen className="w-4 h-4 text-primary" />
-          <span className="text-sm font-medium text-foreground">{domain}</span>
+          <FolderOpen className="w-4 h-4 text-[#0a0a0a]" />
+          <span className="text-[13px] font-medium text-[#0a0a0a]">{domain}</span>
           {data && (
-            <span className="text-xs text-muted-foreground">({data.count} file{data.count !== 1 ? "s" : ""})</span>
+            <span className="text-[11px] text-[#a3a3a3]">({data.count} file{data.count !== 1 ? "s" : ""})</span>
           )}
         </div>
         {expanded ? (
-          <ChevronDown className="w-4 h-4 text-muted-foreground" />
+          <ChevronDown className="w-4 h-4 text-[#a3a3a3]" />
         ) : (
-          <ChevronRight className="w-4 h-4 text-muted-foreground" />
+          <ChevronRight className="w-4 h-4 text-[#a3a3a3]" />
         )}
       </button>
 
       {expanded && (
-        <div className="px-4 pb-4 space-y-3 border-t border-border">
-          {/* Action buttons */}
+        <div className="px-4 pb-4 space-y-3 border-t border-[#e5e5e5]">
           <div className="flex gap-2 pt-3">
             <button
               onClick={handleAiSort}
               disabled={aiLoading}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg disabled:opacity-50 hover:opacity-90 transition-opacity"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-white rounded-lg disabled:opacity-50 hover:opacity-90 transition-opacity"
+              style={{ background: "linear-gradient(180deg, #1f1f1f 0%, #080808 100%)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12)" }}
             >
               {aiLoading ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1092,20 +1174,19 @@ function DepartmentFilePanel({ domain }: { domain: string }) {
             </button>
             <button
               onClick={() => setShowPicker(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border text-muted-foreground rounded-lg hover:text-foreground hover:border-muted-foreground transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] border border-[#e5e5e5] text-[#737373] rounded-lg hover:text-[#0a0a0a] hover:border-[#a3a3a3] transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />
               Add Files
             </button>
           </div>
 
-          {/* AI result banner */}
           {aiResult && (
             <div className={cn(
-              "flex items-start gap-2 p-3 rounded-lg text-xs border",
+              "flex items-start gap-2 p-3 rounded-xl text-[12px] border",
               aiResult.assigned_count === -1
-                ? "bg-destructive/10 border-destructive/20 text-destructive"
-                : "bg-primary/10 border-primary/20 text-primary"
+                ? "bg-[#dc2626]/5 border-[#dc2626]/15 text-[#dc2626]"
+                : "bg-[#0a0a0a]/5 border-[#0a0a0a]/10 text-[#0a0a0a]"
             )}>
               {aiResult.assigned_count === -1 ? (
                 <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -1127,30 +1208,29 @@ function DepartmentFilePanel({ domain }: { domain: string }) {
             </div>
           )}
 
-          {/* File list */}
           {isLoading ? (
             <div className="flex justify-center py-4">
-              <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+              <Loader2 className="w-4 h-4 animate-spin text-[#a3a3a3]" />
             </div>
           ) : data && data.files.length === 0 ? (
-            <p className="text-xs text-muted-foreground py-2">No files assigned yet.</p>
+            <p className="text-[12px] text-[#a3a3a3] py-2">No files assigned yet.</p>
           ) : (
             <div className="space-y-1.5">
               {(data?.files ?? []).map((f) => (
                 <div
                   key={f.file_id}
-                  className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-surface-raised"
+                  className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-white border border-[#e5e5e5]"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                    <span className="text-xs text-foreground truncate">{f.name}</span>
+                    <FileText className="w-3.5 h-3.5 text-[#a3a3a3] shrink-0" />
+                    <span className="text-[12px] text-[#0a0a0a] truncate">{f.name}</span>
                     {f.ingest_status !== "ingested" && (
-                      <span className="text-[10px] text-amber-500 shrink-0">{f.ingest_status}</span>
+                      <span className="text-[10px] text-amber-600 shrink-0">{f.ingest_status}</span>
                     )}
                   </div>
                   <button
                     onClick={() => handleRemoveFile(f.file_id)}
-                    className="p-1 text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                    className="p-1 text-[#a3a3a3] hover:text-[#dc2626] transition-colors shrink-0"
                     title="Remove from department"
                   >
                     <Trash2 className="w-3 h-3" />
@@ -1234,38 +1314,42 @@ function FilePickerModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-lg bg-surface border border-border rounded-2xl shadow-xl flex flex-col max-h-[80vh]">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96, y: 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 4 }}
+        transition={{ duration: 0.2, ease: "easeOut" }}
+        className="w-full max-w-lg bg-white border border-[#e5e5e5] rounded-2xl shadow-xl flex flex-col max-h-[80vh]"
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#e5e5e5]">
           <div>
-            <h2 className="text-sm font-semibold text-foreground">Add Files to {domain}</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
+            <h2 className="text-[15px] font-bold text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}>Add Files to {domain}</h2>
+            <p className="text-[11px] text-[#a3a3a3] mt-0.5">
               {selected.size} file{selected.size !== 1 ? "s" : ""} selected
             </p>
           </div>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+          <button onClick={onClose} className="p-1.5 rounded-lg text-[#a3a3a3] hover:text-[#0a0a0a] hover:bg-[#f4f4f4] transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Search */}
-        <div className="px-5 py-3 border-b border-border">
+        <div className="px-5 py-3 border-b border-[#e5e5e5]">
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by name or description..."
-            className="w-full px-3 py-1.5 text-sm rounded-lg border border-border bg-surface text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+            className="w-full px-3 py-1.5 text-[13px] rounded-xl border border-[#e5e5e5] bg-[#f9f9f9] text-[#0a0a0a] placeholder:text-[#a3a3a3] focus:outline-none focus:ring-2 focus:ring-[#0a0a0a]/10 focus:border-[#a3a3a3] transition-colors"
           />
         </div>
 
-        {/* File list */}
         <div className="flex-1 overflow-y-auto px-5 py-3 space-y-1.5">
           {loading ? (
             <div className="flex justify-center py-8">
-              <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+              <Loader2 className="w-5 h-5 animate-spin text-[#a3a3a3]" />
             </div>
           ) : filtered.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-8">
+            <p className="text-[13px] text-[#a3a3a3] text-center py-8">
               {search ? "No files match your search." : "All files are already assigned to this department."}
             </p>
           ) : (
@@ -1276,28 +1360,28 @@ function FilePickerModal({
                   key={f.file_id}
                   onClick={() => toggle(f.file_id)}
                   className={cn(
-                    "w-full flex items-start gap-3 px-3 py-2.5 rounded-lg border text-left transition-all",
+                    "w-full flex items-start gap-3 px-3 py-2.5 rounded-xl border text-left transition-all",
                     active
-                      ? "border-primary bg-primary/10"
-                      : "border-border hover:border-muted-foreground"
+                      ? "border-[#0a0a0a]/20 bg-[#0a0a0a]/5"
+                      : "border-[#e5e5e5] hover:border-[#a3a3a3] bg-[#f9f9f9]"
                   )}
                 >
                   <div className={cn(
                     "w-4 h-4 mt-0.5 rounded border-2 shrink-0 flex items-center justify-center",
-                    active ? "bg-primary border-primary" : "border-muted-foreground"
+                    active ? "bg-[#0a0a0a] border-[#0a0a0a]" : "border-[#a3a3a3]"
                   )}>
-                    {active && <CheckCircle2 className="w-3 h-3 text-primary-foreground" />}
+                    {active && <CheckCircle2 className="w-3 h-3 text-white" />}
                   </div>
                   <div className="min-w-0">
-                    <p className="text-xs font-medium text-foreground truncate">{f.name}</p>
+                    <p className="text-[12px] font-medium text-[#0a0a0a] truncate">{f.name}</p>
                     {f.current_domain && (
-                      <p className="text-[10px] text-amber-500">Currently in: {f.current_domain}</p>
+                      <p className="text-[10px] text-amber-600">Currently in: {f.current_domain}</p>
                     )}
                     {f.ai_description && (
-                      <p className="text-[10px] text-muted-foreground line-clamp-1 mt-0.5">{f.ai_description}</p>
+                      <p className="text-[10px] text-[#737373] line-clamp-1 mt-0.5">{f.ai_description}</p>
                     )}
                     {f.good_for && f.good_for.length > 0 && (
-                      <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-1">
+                      <p className="text-[10px] text-[#737373] mt-0.5 line-clamp-1">
                         Good for: {f.good_for.slice(0, 3).join(", ")}
                       </p>
                     )}
@@ -1308,24 +1392,24 @@ function FilePickerModal({
           )}
         </div>
 
-        {/* Footer */}
-        <div className="flex gap-2 px-5 py-4 border-t border-border">
+        <div className="flex gap-2 px-5 py-4 border-t border-[#e5e5e5]">
           <button
             onClick={onClose}
-            className="flex-1 py-2 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground transition-colors"
+            className="flex-1 py-2 rounded-xl border border-[#e5e5e5] text-[13px] text-[#737373] hover:text-[#0a0a0a] hover:border-[#a3a3a3] transition-colors"
           >
             Cancel
           </button>
           <button
             onClick={handleSave}
             disabled={selected.size === 0 || saving}
-            className="flex-1 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-40 hover:opacity-90 transition-opacity flex items-center justify-center gap-1.5"
+            className="flex-1 py-2 rounded-xl text-[13px] font-medium text-white disabled:opacity-40 hover:opacity-90 transition-opacity flex items-center justify-center gap-1.5"
+            style={{ background: "linear-gradient(180deg, #1f1f1f 0%, #080808 100%)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12)" }}
           >
             {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             Assign {selected.size > 0 ? `(${selected.size})` : ""}
           </button>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }
