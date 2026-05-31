@@ -133,10 +133,27 @@ def _available_memory_gib() -> float | None:
 
 
 def _default_ingest_parallelism() -> int:
-    cpu_bound = max(1, _available_cpu_count() // 2)
+    """Cores to give ingestion, leaving headroom so chat stays responsive.
+
+    Rule (hardware-aware, not a hardcoded number — works on any VM):
+        ingestion_cores = max(1, x - 2)        where x = detected CPU cores
+    i.e. RESERVE 2 cores for the chat/API process. Worked examples:
+        x = 2  → max(1, 0) = 1   (ingestion 1, chat keeps 1 — small-box rule)
+        x = 4  → 2               (ingestion 2, chat keeps 2)
+        x = 8  → 6               (ingestion 6, chat keeps 2)
+    Celery workers only occupy cores while there is work, so these cores are
+    used DURING ingestion and freed when idle — "x-2 when triggered" for free.
+
+    A memory bound still applies (each worker process needs RAM), and an upper
+    sanity cap guards huge boxes (real ceiling there is the Azure TPM quota, not
+    CPU). Override anytime via CELERY_WORKER_CONCURRENCY in the policy/env.
+    """
+    cpu = _available_cpu_count()
+    cpu_bound = max(1, cpu - 2)  # reserve 2 cores for chat (1 on a 2-core box)
     memory_gib = _available_memory_gib()
-    memory_bound = max(1, int(memory_gib // 4)) if memory_gib else cpu_bound
-    return max(1, min(cpu_bound, memory_bound, 4))
+    memory_bound = max(1, int(memory_gib // 2)) if memory_gib else cpu_bound
+    _SANITY_CAP = 32  # backstop for very large hosts; tune via quota, not here
+    return max(1, min(cpu_bound, memory_bound, _SANITY_CAP))
 
 
 def _dynamic_default(name: str) -> int:

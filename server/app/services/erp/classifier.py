@@ -368,6 +368,30 @@ class ErpClassifier:
         return raw, str(deployment)
 
 
+def schema_fingerprint(columns_info: list | None) -> str:
+    """Stable hash of a file's column shape (names + types, order-independent).
+
+    Two files with the same fingerprint have the same schema, so one's
+    classification can be reused for the other — the cache that lets large ERP
+    archives (many identical standard tables) skip most LLM calls on re-ingest.
+    """
+    import hashlib  # local — keep module import surface small
+
+    parts: list[str] = []
+    for col in (columns_info or []):
+        if isinstance(col, dict):
+            name = str(col.get("name") or col.get("column") or "").strip().lower()
+            ctype = str(col.get("type") or col.get("dtype") or "").strip().lower()
+            if name:
+                parts.append(f"{name}:{ctype}")
+        elif isinstance(col, str):
+            parts.append(col.strip().lower())
+    if not parts:
+        return ""
+    blob = "|".join(sorted(parts))
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
 async def classify_file(
     *,
     filename: str,

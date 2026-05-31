@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from pydantic import BaseModel
 
 from app.api.v1.chat_common import IngestRequest
 from app.core.database import get_db
@@ -12,10 +14,114 @@ from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
 from app.models.user import User
-from app.services.ingestion_config import is_supported_ingest_file, supported_ingest_extensions
-from app.worker.ingest_tasks import run_ingest_pipeline
+from app.services.ingestion_config import (
+    REPROCESS_SCOPES,
+    IngestStatus,
+    is_supported_ingest_file,
+    scope_forces_preprocess,
+    supported_ingest_extensions,
+)
+from app.worker.ingest_tasks import run_ingest_pipeline, run_scoped_ingest
 
 router = APIRouter()
+
+
+class ReprocessRequest(BaseModel):
+    container_id: str
+    scope: str  # one of: refresh_rules | re_analyze | full_rebuild
+
+
+@router.post("/reprocess")
+async def reprocess_container(
+    body: ReprocessRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_developer),
+):
+    """Scoped, parallel re-ingestion of every file in a container.
+
+    Maps the 3 UI actions to stage subsets and fans out ONE scoped chain per
+    file (so Celery runs them in parallel). Returns immediately with the count
+    queued. Faster wall-clock comes from worker concurrency — raise
+    CELERY_WORKER_CONCURRENCY (default is capped low) to widen the fan-out.
+    """
+    if body.scope not in REPROCESS_SCOPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown scope '{body.scope}'. Use one of: {', '.join(REPROCESS_SCOPES)}.",
+        )
+
+    rows = (await db.execute(select(File).where(File.container_id == body.container_id))).scalars().all()
+    ingestable = [f for f in rows if is_supported_ingest_file(f.name)]
+
+    # Domain scope: a developer with allowed_domains only touches their folders.
+    if admin.allowed_domains:
+        scoped: list[File] = []
+        for f in ingestable:
+            folder = await db.get(Folder, f.folder_id) if f.folder_id else None
+            fdomain = folder.domain_tag if folder else None
+            if fdomain is None or fdomain in admin.allowed_domains:
+                scoped.append(f)
+        ingestable = scoped
+
+    if not ingestable:
+        raise HTTPException(status_code=400, detail="No ingestable files found in this container.")
+
+    file_ids = [f.id for f in ingestable]
+
+    # full_rebuild is the only scope that re-runs preprocessing → clear the flag
+    # so clean_file_stage actually re-preprocesses.
+    if scope_forces_preprocess(body.scope):
+        await db.execute(update(File).where(File.id.in_(file_ids)).values(is_preprocessed=False))
+        await db.commit()
+
+    task_ids: list[str] = []
+    for fid in file_ids:
+        result = run_scoped_ingest.delay(fid, body.scope)
+        task_ids.append(result.id)
+
+    ingest_logger.info(
+        "reprocess_queued",
+        admin_id=admin.id,
+        container_id=body.container_id,
+        scope=body.scope,
+        file_count=len(file_ids),
+        backend="celery",
+    )
+    return {"queued": len(file_ids), "scope": body.scope, "container_id": body.container_id, "task_ids": task_ids}
+
+
+@router.get("/reprocess-status")
+async def reprocess_status(
+    container_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Lightweight progress for the 're-ingestion in progress, please wait' banner.
+
+    Counts files by ingest_status for the container. `in_progress` is true while
+    any file is running/pending — the UI shows a wait notice and chat-may-be-
+    slower hint during that window (ingestion is using cores reserved by the
+    x-2 rule, so chat stays usable but can be slower)."""
+    rows = (
+        await db.execute(
+            select(File.ingest_status, func.count())
+            .where(File.container_id == container_id)
+            .group_by(File.ingest_status)
+        )
+    ).all()
+    counts = {str(status): int(n) for status, n in rows}
+    running = counts.get(IngestStatus.RUNNING.value, 0)
+    pending = counts.get(IngestStatus.PENDING.value, 0)
+    total = sum(counts.values())
+    done = counts.get(IngestStatus.INGESTED.value, 0)
+    return {
+        "container_id": container_id,
+        "in_progress": (running + pending) > 0,
+        "running": running,
+        "pending": pending,
+        "done": done,
+        "total": total,
+    }
 
 
 @router.post("/ingest")

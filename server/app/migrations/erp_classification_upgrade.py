@@ -30,8 +30,10 @@ _STATEMENTS: list[str] = [
         CONSTRAINT uq_erp_classification_file UNIQUE (file_id)
     )
     """,
+    "ALTER TABLE erp_classifications ADD COLUMN IF NOT EXISTS schema_fingerprint VARCHAR(64)",
     "CREATE INDEX IF NOT EXISTS ix_erp_classifications_container ON erp_classifications (container_id)",
     "CREATE INDEX IF NOT EXISTS ix_erp_classifications_polarity ON erp_classifications (container_id, domain_polarity)",
+    "CREATE INDEX IF NOT EXISTS ix_erp_classifications_fingerprint ON erp_classifications (container_id, schema_fingerprint)",
 ]
 
 

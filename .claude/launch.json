@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "mockup",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["serve", "-l", "5500", "/Users/bharath/Desktop/projects/G-CHAT-"],
-      "port": 5500
+      "name": "nextjs",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000
     }
   ]
 }

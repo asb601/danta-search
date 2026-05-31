@@ -33,6 +33,7 @@ import {
   MoveRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ReprocessMenu } from "./ReprocessMenu";
 
 /* ━━━ Types ━━━ */
 export type FileStatus = "indexed" | "failed" | "pending" | "not_ingested";
@@ -709,6 +710,7 @@ export default function FileManagerView({
                   {reingestLoading ? "Re-ingesting…" : "Preprocess + Ingest All"}
                 </button>
               )}
+              <ReprocessMenu containerId={selectedContainerId} />
               <div className="w-px h-4 bg-border" />
               <button
                 onClick={() => {

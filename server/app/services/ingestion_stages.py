@@ -539,23 +539,57 @@ async def erp_classification_stage(payload: Payload) -> Payload:
 
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
 
-        from app.services.erp.classifier import classify_file  # noqa: PLC0415
+        from app.services.erp.classifier import classify_file, schema_fingerprint  # noqa: PLC0415
         from app.models.erp_classification import ErpClassification as ErpRow  # noqa: PLC0415
 
-        clf = await classify_file(
-            filename=file.name,
-            columns_info=metadata.columns_info or [],
-            sample_rows=metadata.sample_rows or [],
-            ai_description=metadata.ai_description,
-            column_semantic_roles=metadata.column_semantic_roles or {},
-        )
+        _container_id = metadata.container_id or container.id
+        fingerprint = schema_fingerprint(metadata.columns_info or [])
+
+        # ── Schema-fingerprint cache ──────────────────────────────────────────
+        # If a sibling file in this container with the SAME column shape was
+        # already reliably classified, reuse it and skip the LLM call entirely.
+        # This is the big speed lever for ERP archives full of identical tables.
+        clf = None
+        if fingerprint:
+            sibling = (await db.execute(
+                select(ErpRow).where(
+                    ErpRow.container_id == _container_id,
+                    ErpRow.schema_fingerprint == fingerprint,
+                    ErpRow.file_id != file_id,
+                    ErpRow.source.in_(("llm", "human_override")),
+                ).limit(1)
+            )).scalar_one_or_none()
+            if sibling is not None:
+                from app.services.erp.classifier import ErpClassification as _Clf  # noqa: PLC0415
+
+                clf = _Clf(
+                    source_system=sibling.source_system,
+                    erp_module=sibling.erp_module,
+                    domain_polarity=sibling.domain_polarity,  # type: ignore[arg-type]
+                    process_role=sibling.process_role,
+                    grain=sibling.grain or "",
+                    confidence=sibling.confidence,
+                    evidence=[f"cache: reused identical schema from {sibling.file_id}"],
+                    source="cache",
+                    model_version=sibling.model_version or "",
+                )
+                ingest_logger.info("erp_classification_cache_hit", file_id=file_id, fingerprint=fingerprint[:12])
+
+        if clf is None:
+            clf = await classify_file(
+                filename=file.name,
+                columns_info=metadata.columns_info or [],
+                sample_rows=metadata.sample_rows or [],
+                ai_description=metadata.ai_description,
+                column_semantic_roles=metadata.column_semantic_roles or {},
+            )
 
         # Upsert one row per file (re-ingest replaces it).
         existing = (
             await db.execute(select(ErpRow).where(ErpRow.file_id == file_id))
         ).scalar_one_or_none()
         if existing:
-            existing.container_id = metadata.container_id or container.id
+            existing.container_id = _container_id
             existing.source_system = clf.source_system
             existing.erp_module = clf.erp_module
             existing.domain_polarity = clf.domain_polarity
@@ -565,10 +599,11 @@ async def erp_classification_stage(payload: Payload) -> Payload:
             existing.evidence = clf.evidence or []
             existing.source = clf.source
             existing.model_version = clf.model_version or None
+            existing.schema_fingerprint = fingerprint or None
             existing.computed_at = datetime.now(timezone.utc)
         else:
             db.add(ErpRow(
-                container_id=metadata.container_id or container.id,
+                container_id=_container_id,
                 file_id=file_id,
                 source_system=clf.source_system,
                 erp_module=clf.erp_module,
@@ -579,6 +614,7 @@ async def erp_classification_stage(payload: Payload) -> Payload:
                 evidence=clf.evidence or [],
                 source=clf.source,
                 model_version=clf.model_version or None,
+                schema_fingerprint=fingerprint or None,
             ))
         await db.commit()
 

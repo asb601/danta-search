@@ -334,7 +334,16 @@ async def compile_and_store_contract(db: AsyncSession, container_id: str) -> dic
             content_hash=content_hash,
             version=1,
         ))
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as exc:
+        # Parallel re-ingest fans out many files; two may try to INSERT the same
+        # container's contract row at once → unique-constraint violation. That's
+        # benign (another worker wrote an equivalent contract). Roll back and
+        # return the freshly-built definition rather than failing the stage.
+        await db.rollback()
+        pipeline_logger.info("contract_compile_conflict", container_id=container_id, error=str(exc)[:160])
+        return definition
     pipeline_logger.info(
         "contract_compiled",
         container_id=container_id,

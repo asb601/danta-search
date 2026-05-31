@@ -37,9 +37,12 @@ class ErpClassification(Base):
 
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     evidence: Mapped[list | None] = mapped_column(JSONB, default=list)
-    # "llm" | "human_override" | "unknown"
+    # "llm" | "human_override" | "unknown" | "cache" (reused from an identical schema)
     source: Mapped[str] = mapped_column(String(20), default="unknown")
     model_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Hash of the column shape (names+types). Lets a re-ingest reuse a sibling
+    # file's classification when the schema is identical (skips the LLM call).
+    schema_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

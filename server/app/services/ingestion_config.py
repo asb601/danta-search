@@ -49,6 +49,7 @@ class StageSpec:
 
 INGEST_PIPELINE_TASK_NAME = "gchat.ingest_pipeline"
 SEMANTIC_REBUILD_TASK_NAME = "gchat.semantic.rebuild_container"
+SCOPED_REPROCESS_TASK_NAME = "gchat.ingest.scoped_reprocess"
 
 INGEST_STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(StageName.CLEAN, "gchat.ingest.clean"),
@@ -65,6 +66,37 @@ INGEST_STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(StageName.SEMANTIC_ENRICHMENT, "gchat.ingest.semantic_enrichment"),
     StageSpec(StageName.COMPLETE, "gchat.ingest.complete"),
 )
+
+
+# ── Re-ingestion scopes (the 3 user-facing buttons) ──────────────────────────
+# Each scope is a SET of stages; the actual run order always follows
+# INGEST_STAGE_SPECS (so dependencies are respected). Names are the API contract.
+#   refresh_rules → "Refresh Business Rules": just re-apply ERP rules + rebuild
+#                   the contract. Assumes metadata/columns already exist. (minutes)
+#   re_analyze    → "Re-analyze Files": redo all AI enrichment, REUSE the already
+#                   converted Parquet (skip clean+parquet). (medium)
+#   full_rebuild  → "Full Rebuild": everything from scratch incl. preprocessing.
+_PREPROCESSING_STAGES: frozenset[StageName] = frozenset({StageName.CLEAN, StageName.PARQUET})
+
+REPROCESS_SCOPES: dict[str, frozenset[StageName]] = {
+    "refresh_rules": frozenset({StageName.ERP_CLASSIFICATION, StageName.COMPLETE}),
+    "re_analyze": frozenset(
+        spec.stage for spec in INGEST_STAGE_SPECS if spec.stage not in _PREPROCESSING_STAGES
+    ),
+    "full_rebuild": frozenset(spec.stage for spec in INGEST_STAGE_SPECS),
+}
+
+
+def stages_for_scope(scope: str) -> list[StageName]:
+    """Return the ordered stage list for a reprocess scope (INGEST_STAGE_SPECS
+    order preserved). Raises KeyError for an unknown scope."""
+    wanted = REPROCESS_SCOPES[scope]
+    return [spec.stage for spec in INGEST_STAGE_SPECS if spec.stage in wanted]
+
+
+def scope_forces_preprocess(scope: str) -> bool:
+    """True only for full_rebuild — the only scope that re-runs clean+parquet."""
+    return StageName.CLEAN in REPROCESS_SCOPES.get(scope, frozenset())
 
 
 def _split_csv(value: str | Iterable[str]) -> tuple[str, ...]:
@@ -199,7 +231,12 @@ def stage_task_name(stage: StageName) -> str:
 
 
 def ingest_task_names() -> tuple[str, ...]:
-    return (INGEST_PIPELINE_TASK_NAME, *(spec.task_name for spec in INGEST_STAGE_SPECS), SEMANTIC_REBUILD_TASK_NAME)
+    return (
+        INGEST_PIPELINE_TASK_NAME,
+        *(spec.task_name for spec in INGEST_STAGE_SPECS),
+        SEMANTIC_REBUILD_TASK_NAME,
+        SCOPED_REPROCESS_TASK_NAME,
+    )
 
 
 def celery_ingest_task_options(settings: Settings | None = None) -> dict[str, object]:

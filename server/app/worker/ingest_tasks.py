@@ -375,6 +375,64 @@ def complete_ingestion_task(self, payload: Payload) -> Payload:
     return _run_stage(self, StageName.COMPLETE, payload, complete_ingestion_stage)
 
 
+@celery_app.task(
+    bind=True,
+    name="gchat.ingest.scoped_reprocess",
+    **_INGEST_TASK_OPTIONS,
+)
+def run_scoped_ingest(self, file_id: str, scope: str) -> Payload:
+    """Re-ingest ONE file running only the stages in `scope`.
+
+    Same prepare→chain pattern as run_ingest_pipeline, but the chain is the
+    subset of stages for the scope (refresh_rules / re_analyze / full_rebuild).
+    Each file is its own chain → many files reprocess in PARALLEL across Celery
+    workers (the speed lever; raise CELERY_WORKER_CONCURRENCY to widen it).
+    """
+    from app.services.ingestion_config import stages_for_scope
+
+    try:
+        stages = stages_for_scope(scope)
+    except KeyError:
+        return {"file_id": file_id, "status": PayloadStatus.SKIPPED.value, "reason": f"unknown scope '{scope}'"}
+    if not stages:
+        return {"file_id": file_id, "status": PayloadStatus.SKIPPED.value, "reason": "empty scope"}
+
+    try:
+        from app.services.ingestion_stages import prepare_pipeline
+
+        prepared = _run_async(prepare_pipeline(file_id))
+    except (SoftTimeLimitExceeded, Exception) as exc:
+        if self.request.retries >= self.max_retries:
+            from app.services.ingestion_stages import mark_ingestion_failed
+
+            _run_async(mark_ingestion_failed(file_id, "prepare", exc))
+            return _failed_payload(file_id, "prepare", exc, self.request.retries)
+        raise self.retry(exc=exc)
+
+    if prepared.get("status") != PayloadStatus.QUEUED.value:
+        return prepared
+
+    ordered_tasks = [_TASK_BY_STAGE[stage] for stage in stages]
+    initial_payload: Payload = {
+        "file_id": file_id,
+        "actor_user_id": prepared.get("actor_user_id"),
+        "actor_email": prepared.get("actor_email"),
+        "actor_role": prepared.get("actor_role"),
+        "reprocess_scope": scope,
+    }
+    chain(
+        ordered_tasks[0].s(initial_payload),
+        *(task.s() for task in ordered_tasks[1:]),
+    ).apply_async()
+
+    return {
+        "file_id": file_id,
+        "status": PayloadStatus.QUEUED.value,
+        "scope": scope,
+        "stages": [s.value for s in stages],
+    }
+
+
 _TASK_BY_STAGE = {
     StageName.CLEAN: clean_file_task,
     StageName.PARQUET: parquet_task,
