@@ -49,6 +49,13 @@ server/uploads/
 *.duckdb
 *.duckdb.wal
 
+project_memory/
+wrenai/
+
+*.md
+**/*.md
+
+!README.md
 
 # Test data (large files)
 server/testing/*.csv

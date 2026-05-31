@@ -23,6 +23,18 @@ from app.models.file import File
 from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
+from app.services.ingestion_config import IngestStatus
+
+# A file is dashboard-ready once ingestion has produced metadata/parquet. The
+# canonical terminal success status is IngestStatus.INGESTED ("ingested"); the
+# legacy literals are tolerated so historical rows are never silently excluded.
+# (RC-001: the previous hardcoded "completed" matched NO rows — that string is
+# never written by ingestion — which left the entire dashboard catalog empty.)
+_READY_STATUSES = (
+    IngestStatus.INGESTED.value,  # "ingested" — what ingestion actually writes
+    "completed",                  # legacy/defensive
+    "done",                       # legacy/defensive
+)
 
 
 def _first_present(*values):
@@ -259,7 +271,7 @@ async def build_catalog(
         select(File, FileMetadata, FileAnalytics)
         .outerjoin(FileMetadata, FileMetadata.file_id == File.id)
         .outerjoin(FileAnalytics, FileAnalytics.file_id == File.id)
-        .where(File.ingest_status == "completed")
+        .where(File.ingest_status.in_(_READY_STATUSES))
     )
     if container_id:
         q = q.where(File.container_id == container_id)

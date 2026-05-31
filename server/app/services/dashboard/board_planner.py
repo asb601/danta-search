@@ -482,9 +482,26 @@ async def plan_widgets(
     """
     max_widgets = max(1, min(int(max_widgets or MAX_WIDGETS), MAX_WIDGETS))
     warnings: list[str] = []
+    catalog = catalog or []
+    catalog_size = len(catalog)
+
+    # RC-004 GUARD: with NO grounding catalog there is nothing to plan against.
+    # Running the ungrounded fallback here produced phantom widgets (the agent
+    # resolved every vague question to the same wrong table). Surface ONE clear,
+    # actionable state instead of a bag of misleading tiles + skip-warnings.
+    if catalog_size == 0:
+        chat_logger.warning(
+            "dashboard_board_no_catalog",
+            reason="empty_catalog",
+            detail="no ingested, dashboard-ready data resolved for this scope",
+        )
+        return [], [
+            "No analyzable data is available for this dashboard yet. Once files "
+            "finish ingesting for this container, regenerate to build widgets."
+        ]
 
     try:
-        window = _board_window(catalog) if catalog else None
+        window = _board_window(catalog)
         raw = await _design_board(prompt, grounding_text, window, max_widgets)
         specs = _coerce_specs(raw, max_widgets)
     except Exception as exc:
@@ -492,17 +509,33 @@ async def plan_widgets(
         specs = []
 
     if specs:
-        kept, reasons = feasibility_filter(specs, catalog or [])
-        warnings.extend(reasons)
-        intents = specs_to_intents(kept[:max_widgets], catalog or [])
+        kept, reasons = feasibility_filter(specs, catalog)
+        intents = specs_to_intents(kept[:max_widgets], catalog)
         if intents:
+            # Only surface drop reasons when SOME widgets survived — a partial
+            # plan. They describe THIS plan's discarded widgets, so they are
+            # coherent with the rendered tiles.
+            warnings.extend(reasons)
             chat_logger.info(
                 "dashboard_board_planned",
+                catalog_size=catalog_size,
                 proposed=len(specs), feasible=len(intents), dropped=len(reasons),
             )
             return intents, warnings
+        # Every proposed widget was infeasible against the catalog. Do NOT keep
+        # the per-widget skip reasons AND run a different ungrounded fallback —
+        # that is the RC-004 two-planner split. Log it as a degraded state.
+        chat_logger.warning(
+            "dashboard_board_all_infeasible",
+            catalog_size=catalog_size, proposed=len(specs), dropped=len(reasons),
+        )
 
-    # Fallback: the original grounded single-pass decomposition.
-    chat_logger.info("dashboard_board_fallback_decompose")
+    # Fallback: the original grounded single-pass decomposition. It still has the
+    # full grounding_text, so it is grounded — just without the lattice/dry-run.
+    # We deliberately do NOT carry forward the board planner's drop reasons here.
+    chat_logger.warning(
+        "dashboard_board_fallback_decompose",
+        catalog_size=catalog_size, had_specs=bool(specs),
+    )
     intents = await decompose_prompt(prompt, grounding_text, max_widgets=max_widgets)
     return intents, warnings

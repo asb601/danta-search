@@ -368,6 +368,21 @@ async def generate_dashboard(
         chat_logger.warning("dashboard_catalog_error", error=str(exc)[:200])
         catalog = []
 
+    # RC-002 observability: the catalog size is the single best health signal for
+    # the whole dashboard pipeline (0 ⇒ every downstream stage runs blind). Emit it
+    # at warning level when empty so it is visible in error.log without log diving.
+    if catalog:
+        chat_logger.info(
+            "dashboard_catalog_built",
+            container_id=effective_container_id, table_count=len(catalog),
+        )
+    else:
+        chat_logger.warning(
+            "dashboard_catalog_empty",
+            container_id=effective_container_id,
+            detail="no dashboard-ready files resolved (check ingest_status / domain scope)",
+        )
+
     # Load the validated join graph for the catalog's files so the decomposer
     # keeps widgets within genuinely joinable tables (no fabricated joins).
     relationships: list[dict] = []
