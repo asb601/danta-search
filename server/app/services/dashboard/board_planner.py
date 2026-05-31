@@ -73,6 +73,10 @@ class WidgetSpec:
     dimension2: str | None = None
     comparison: str | None = None
     viz: str | None = None
+    # The brain's DETAILED analytical instruction for the SQL agent (preferred
+    # over the deterministic template) and the one-line chart rationale.
+    query: str | None = None
+    chart_rationale: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -140,39 +144,48 @@ async def _design_board(prompt: str, grounding_text: str, window: tuple[str, str
     """One LLM call that DESIGNS the board as a metric lattice. Returns [] on any
     failure (caller falls back to decompose_prompt)."""
 
-    def _run() -> list[dict]:
-        client, _ = get_client()
-        settings = get_settings()
-        # The board brain is ONE call per dashboard — use the strong model when
-        # available, fall back to the mini deployment.
-        deployment = getattr(settings, "AZURE_OPENAI_DEPLOYMENT", None) or \
-            settings.AZURE_OPENAI_DEPLOYMENT_MINI
+    win_phrase = (f"{window[0]} .. {window[1]}" if window
+                  else "none — no reliable date column; omit time filters")
 
-        win_phrase = (f"{window[0]} .. {window[1]}" if window
-                      else "none — no reliable date column; omit time filters")
-
-        sys = (
-            "You are a senior business-intelligence analyst. You DESIGN one coherent "
-            "dashboard from a single request — you do NOT answer questions.\n\n"
-            "Think like an analyst:\n"
-            "1) Infer the business DOMAIN from the catalog (finance, sales, operations...).\n"
-            "2) Reason as a metric lattice: each widget = (metric x dimension x time "
-            "window x comparison).\n"
-            "3) Build a NARRATIVE, not a bag of charts: lead with 1-2 headline KPIs, then "
-            "ONE trend, then 1-2 breakdowns, an optional share or matrix, and ONE detail "
-            "table.\n"
-            "4) Be DATA-ADAPTIVE: only propose a widget the catalog can ACTUALLY answer. "
-            "If the data supports 3 good widgets, return 3 — never pad.\n\n"
-            "GROUNDING (the catalog is authoritative):\n"
-            "- Use ONLY tables, columns and observed values shown in the catalog. Never invent.\n"
-            "- 'measure' MUST be a column whose role is a measure/metric for that table.\n"
-            "- 'dimension' MUST be a categorical or temporal column shown for that table.\n"
-            "- SHARED TIME WINDOW: every time-based widget uses the shared window provided. "
-            "Never request a period outside the data coverage.\n"
-            "- Prefer single-table widgets; only span tables via the KNOWN JOINS listed.\n\n"
-            "Return ONLY JSON."
-        )
-        user = f"""CATALOG (real tables, columns, roles, date coverage, observed values, known joins):
+    sys = (
+        "You are an elite business-intelligence analyst at a top-tier global "
+        "consulting firm. Fortune-500 executives rely on you to turn a single "
+        "request into ONE board-ready dashboard they can present in a leadership "
+        "meeting. You do NOT answer questions — you DESIGN the dashboard.\n\n"
+        "HOW YOU THINK:\n"
+        "1) Infer the business DOMAIN from the catalog and select ONLY the most "
+        "relevant tables (catalogs). Ignore tables that do not serve the request.\n"
+        "2) Decompose the request into a METRIC LATTICE — every widget is a "
+        "(metric x dimension x time window x comparison). A vague request such as "
+        "'Q2 analysis' becomes a deliberate set of executive widgets; a dense "
+        "request with several measures becomes one widget per measure plus the "
+        "trends and breakdowns that make them meaningful.\n"
+        "3) Pick the RIGHT chart for each insight, the way an analyst would for a "
+        "meeting: KPI/metric tile for one headline number; line or area for a "
+        "trend over time; bar to rank a measure across categories; pie ONLY for a "
+        "few-category share; heatmap for two dimensions; a table for detail/top-N.\n"
+        "4) For EACH widget, WRITE A PRECISE ANALYTICAL INSTRUCTION ('query') for a "
+        "downstream SQL agent. Be explicit: which measure to AGGREGATE (SUM/AVG/"
+        "COUNT), how to GROUP it, how to ORDER it, how many rows to return, and the "
+        "exact output columns. NEVER write a vague one-liner — vague instructions "
+        "produce wrong tiles. A trend MUST say: return one row per period with the "
+        "period column and the summed measure, ordered chronologically. A breakdown "
+        "MUST say: group by the dimension, sum the measure, return the dimension and "
+        "the total, top-N descending. A KPI MUST say: return the single aggregated "
+        "number.\n"
+        "5) Be DATA-ADAPTIVE and lead with a NARRATIVE: 1-2 headline KPIs, then a "
+        "trend, then 1-2 breakdowns, an optional share/matrix, then one detail "
+        "table. If the data only supports 3 strong widgets, return 3 — never pad.\n\n"
+        "GROUNDING (the catalog is authoritative):\n"
+        "- Use ONLY tables, columns and observed values shown. Never invent.\n"
+        "- 'measure' MUST be a measure column; 'dimension' MUST be a shown "
+        "categorical/temporal column for that table.\n"
+        "- SHARED TIME WINDOW: every time-based widget uses the provided window. "
+        "Never request a period outside the data coverage.\n"
+        "- Prefer single-table widgets; only span tables via the KNOWN JOINS listed.\n\n"
+        "Return ONLY JSON."
+    )
+    user = f"""CATALOG (real tables, columns, roles, date coverage, observed values, known joins):
 {grounding_text or '(catalog unavailable)'}
 
 SHARED TIME WINDOW (use for every time-based widget): {win_phrase}
@@ -180,26 +193,37 @@ SHARED TIME WINDOW (use for every time-based widget): {win_phrase}
 DASHBOARD REQUEST:
 \"\"\"{prompt}\"\"\"
 
-Return JSON (max {max_widgets} widgets):
-{{"domain":"inferred domain",
+Return JSON (max {max_widgets} widgets), ordered as a narrative (KPIs first, detail table last):
+{{"domain":"inferred business domain",
  "widgets":[
-  {{"title":"short title",
+  {{"title":"concise executive title",
     "question_type":"kpi|trend|breakdown|share|matrix|detail",
     "table":"table name from the catalog",
     "measure":"measure column (or null for a detail table)",
     "dimension":"dimension/temporal column (or null for kpi/detail)",
     "dimension2":"second dimension for a matrix (or null)",
     "comparison":"e.g. 'vs previous period' (or null)",
-    "viz":"kpi_card|metric_tile|line_chart|area_chart|bar_chart|pie_chart|heatmap|funnel|table|null"}}
+    "viz":"kpi_card|metric_tile|line_chart|area_chart|bar_chart|pie_chart|heatmap|funnel|table",
+    "query":"a PRECISE analytical instruction for the SQL agent: which measure to aggregate (SUM/AVG/COUNT), how to group, how to order, how many rows, and the exact output columns",
+    "chart_rationale":"one line: why this chart suits an executive audience"}}
  ]}}"""
 
+    def _run() -> list[dict]:
+        client, _ = get_client()
+        settings = get_settings()
+        # The board brain is ONE call per dashboard. Use the SAME deployment the
+        # rest of the dashboard layer uses (AZURE_OPENAI_DEPLOYMENT_MINI) — that is
+        # the deployment actually wired in this environment. The richer persona
+        # prompt above is what raises quality, not a larger model. Using the proven
+        # deployment is also what prevents a silent drop to the terse decomposer.
+        deployment = settings.AZURE_OPENAI_DEPLOYMENT_MINI
         resp = client.chat.completions.create(
             model=deployment,
             messages=[{"role": "system", "content": sys},
                       {"role": "user", "content": user}],
             response_format={"type": "json_object"},
             temperature=0,
-            max_completion_tokens=1200,
+            max_completion_tokens=1800,
         )
         raw = resp.choices[0].message.content or "{}"
         parsed = _safe_json(raw) or {}
@@ -244,6 +268,8 @@ def _coerce_specs(raw_widgets: list[dict], max_widgets: int) -> list[WidgetSpec]
             dimension2=_clean("dimension2"),
             comparison=_clean("comparison"),
             viz=viz,
+            query=_clean("query"),
+            chart_rationale=_clean("chart_rationale"),
         ))
     return specs
 
@@ -375,23 +401,32 @@ def feasibility_filter(specs: list[WidgetSpec], catalog: list) -> tuple[list[Wid
 # --------------------------------------------------------------------------
 
 def _nl_query(spec: WidgetSpec, win_phrase: str) -> str:
+    """Deterministic fallback instruction (explicit about aggregation, grouping,
+    ordering and output shape) used only when the brain omits a detailed query."""
     m = spec.measure or "records"
     d = spec.dimension
-    comp = f" Compare {spec.comparison}." if spec.comparison else ""
+    comp = f" Also compare {spec.comparison}." if spec.comparison else ""
     qt = spec.question_type
     if qt == "kpi":
-        return f"What is the total {m}{win_phrase}?{comp}"
+        return (f"Return the single aggregated total of {m}{win_phrase} as one number "
+                f"(the SUM of {m}).{comp}")
     if qt == "trend":
-        return f"Show how total {m} changes over time{win_phrase}.{comp}"
+        return (f"Return a time series of {m}{win_phrase}: aggregate the SUM of {m} per "
+                f"time period (use day or month granularity), output one row per period "
+                f"with the period and the summed {m}, ordered chronologically.{comp}")
     if qt == "breakdown":
-        return f"Show total {m} broken down by {d}{win_phrase}, top 10 by {m}.{comp}"
+        return (f"Aggregate the SUM of {m} grouped by {d}{win_phrase}: output {d} and the "
+                f"total {m}, returning the top 10 rows ordered by total {m} descending.{comp}")
     if qt == "share":
-        return f"Show the percentage share of total {m} across each {d}{win_phrase}."
+        return (f"Aggregate the SUM of {m} grouped by {d}{win_phrase}: output {d} and its "
+                f"share of the overall total {m} (a part-of-whole breakdown).")
     if qt == "matrix":
-        return f"Show total {m} by {d} and {spec.dimension2}{win_phrase}."
+        return (f"Aggregate the SUM of {m} grouped by BOTH {d} and {spec.dimension2}"
+                f"{win_phrase}: output {d}, {spec.dimension2} and the total {m}.")
     # detail
-    order = f", ordered by {spec.measure}" if spec.measure else ""
-    return f"List the top 20 records from {spec.table}{win_phrase}{order}."
+    order = f", ordered by {spec.measure} descending" if spec.measure else ""
+    return (f"Return the top 20 detail records from {spec.table}{win_phrase}{order}, "
+            f"showing the most relevant columns.")
 
 
 def specs_to_intents(specs: list[WidgetSpec], catalog: list) -> list[WidgetIntent]:
@@ -412,9 +447,15 @@ def specs_to_intents(specs: list[WidgetSpec], catalog: list) -> list[WidgetInten
         if win_phrase:
             hints["time_window"] = win_phrase.strip()
 
+        # Prefer the brain's DETAILED instruction; fall back to the strict template.
+        nl = (s.query or "").strip() or _nl_query(s, win_phrase)
+        # Guarantee the shared window is present even if the brain forgot it.
+        if win and win_phrase and not (str(win[0]) in nl or str(win[1]) in nl):
+            nl = nl.rstrip(".") + f". Restrict to the period between {win[0]} and {win[1]}."
+
         intents.append(WidgetIntent(
             title=s.title,
-            nl_query=_nl_query(s, win_phrase),
+            nl_query=nl,
             requested_viz=viz,
             hints=hints,
         ))
