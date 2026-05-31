@@ -28,7 +28,7 @@ from app.schemas.dashboard import (
     DashboardGenerateRequest,
     DashboardUpdate,
 )
-from app.services.dashboard import assembly_engine, data_catalog, query_engine
+from app.services.dashboard import assembly_engine, board_planner, data_catalog, query_engine
 from app.services.dashboard.component_catalog import catalog_as_metadata
 from app.services.dashboard.recommendation_engine import recommend
 
@@ -382,12 +382,14 @@ async def generate_dashboard(
         catalog, detailed=True, relationships=relationships
     )
 
-    # 2. Decompose the prompt into widget intents.
-    intents = await query_engine.decompose_prompt(
-        prompt, grounding, max_widgets=body.max_widgets
+    # 2. BOARD PLANNER — design the dashboard as a metric lattice, dry-run each
+    #    widget against catalog metadata (drop/repair the unanswerable ones), and
+    #    derive a shared time window — BEFORE any agent call. Never raises; falls
+    #    back to single-pass decomposition internally.
+    intents, warnings = await board_planner.plan_widgets(
+        prompt, catalog, grounding_text=grounding, max_widgets=body.max_widgets
     )
 
-    warnings: list[str] = []
     if len(intents) >= body.max_widgets:
         warnings.append(f"Widget count capped at {body.max_widgets}.")
 

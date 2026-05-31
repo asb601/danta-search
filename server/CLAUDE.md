@@ -1,5 +1,25 @@
 # CLAUDE.md — server/ (Deep Dive)
 
+## HOW TO WORK WITH ME (Claude Instructions)
+
+### Token Efficiency Rules
+- ONLY read files I explicitly mention
+- NEVER scan the full codebase unless I say "scan all"
+- ALWAYS ask clarifying questions BEFORE writing code
+- STOP and confirm if a change affects more than 2 files
+
+### Project Stack (reference only, don't read all files)
+- Backend: Python/FastAPI → server/
+- Frontend: Client → client/
+- DB: SQLAlchemy ORM + Alembic migrations
+- LLM: Anthropic Claude via llm_tasks.py
+
+### Off-limits unless I ask
+- testing/
+- .github/
+- *.txt, *.log files
+- __pycache__
+
 This document gives Claude the complete picture of the `server/` directory — every layer, module, data flow, design decision, and pitfall. Read this before modifying any server code.
 
 ---
