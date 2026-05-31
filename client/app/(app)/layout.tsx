@@ -2,12 +2,22 @@
 
 import { useRouter, usePathname } from "next/navigation";
 import { useState, useEffect, useCallback } from "react";
-import { MessageSquare, FolderOpen, LogOut, PanelLeftClose, PanelLeft, Database, UserCircle, ScrollText, LayoutDashboard } from "lucide-react";
+import {
+  MessageSquare,
+  FolderOpen,
+  LogOut,
+  PanelLeftClose,
+  PanelLeft,
+  Database,
+  UserCircle,
+  ScrollText,
+  LayoutDashboard,
+} from "lucide-react";
 import { NavLink, MobileNavLink } from "@/components/nav-link";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { useIdleTimeout } from "@/hooks/use-idle-timeout";
 
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 interface NavItem {
   href: string;
@@ -21,7 +31,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const noNavRoutes = ["/onboarding"];
-  const hideNav=noNavRoutes.includes(pathname);
+  const hideNav = noNavRoutes.includes(pathname);
 
   const handleIdle = useCallback(() => {
     logout();
@@ -33,13 +43,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (loading) return;
     if (!user) {
-      // Clear the token cookie so the middleware doesn't bounce the user
-      // back to /chat after we redirect them to /login.
       document.cookie = "token=; path=/; max-age=0";
       router.replace("/login");
       return;
     }
-    // Regular users with no domain selection should be routed to onboarding
     if (!user.is_admin && !user.allowed_domains && pathname !== "/onboarding") {
       router.replace("/onboarding");
     }
@@ -48,22 +55,22 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+            <div className="w-4 h-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+          </div>
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        </div>
       </div>
     );
   }
 
-  if (!user) {
-    return null;
+  if (!user) return null;
+
+  if (hideNav) {
+    return <div className="h-screen bg-background">{children}</div>;
   }
 
-if (hideNav) {
-  return (
-    <div className="h-screen bg-background">
-      {children}
-    </div>
-  );
-}
   const navItems: NavItem[] = [
     { href: "/chat", icon: MessageSquare, label: "Chat" },
     { href: "/folders", icon: FolderOpen, label: "Folders" },
@@ -71,19 +78,30 @@ if (hideNav) {
     ...(user.is_admin || user.role === "developer"
       ? [{ href: "/admin/containers", icon: Database, label: "Containers" }]
       : []),
-    ...(user.is_admin || user.role === "developer" || user.role === "manager" || user.role === "user"
+    ...(user.is_admin ||
+    user.role === "developer" ||
+    user.role === "manager" ||
+    user.role === "user"
       ? [{ href: "/admin/logs", icon: ScrollText, label: "Logs" }]
       : []),
     { href: "/profile", icon: UserCircle, label: "Profile" },
   ];
 
+  const roleLabel = user.is_admin
+    ? { text: "Admin", cls: "bg-primary/10 text-primary" }
+    : user.role === "developer"
+    ? { text: "Developer", cls: "bg-violet-500/10 text-violet-600" }
+    : user.role === "manager"
+    ? { text: "Manager", cls: "bg-cyan-500/10 text-cyan-700" }
+    : null;
+
   return (
     <div className="flex h-screen bg-background overflow-hidden">
-      {/* Sidebar toggle when collapsed */}
+      {/* Collapsed sidebar toggle */}
       {!sidebarOpen && (
         <button
           onClick={() => setSidebarOpen(true)}
-          className="hidden md:flex fixed top-4 left-4 z-40 items-center justify-center w-8 h-8 rounded-md bg-card border border-border shadow-sm text-muted-foreground hover:text-foreground transition-colors"
+          className="hidden md:flex fixed top-4 left-4 z-40 items-center justify-center w-8 h-8 rounded-lg bg-card border border-border shadow-sm text-muted-foreground hover:text-primary hover:border-primary/40 transition-colors"
         >
           <PanelLeft className="w-4 h-4" />
         </button>
@@ -91,50 +109,60 @@ if (hideNav) {
 
       {/* Desktop sidebar */}
       <aside
-        className={`hidden md:flex flex-col shrink-0 bg-sidebar border-r border-sidebar-border h-screen sticky top-0 transition-[width] duration-200 ${sidebarOpen ? "w-[220px]" : "w-0 overflow-hidden border-r-0"}`}
+        className={`hidden md:flex flex-col shrink-0 bg-sidebar border-r border-sidebar-border h-screen sticky top-0 transition-[width] duration-200 overflow-hidden ${
+          sidebarOpen ? "w-[228px]" : "w-0 border-r-0"
+        }`}
       >
-        <div className="px-4 py-5 border-b border-border flex items-start justify-between">
-          <div className="min-w-0">
-            <p className="text-sm font-semibold tracking-tight text-foreground">danta-search</p>
-            <p className="text-xs text-muted-foreground mt-0.5 truncate">
-              {user.email}
-            </p>
-            {user.is_admin && (
-              <span className="inline-flex mt-1.5 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full bg-primary/10 text-primary">
-                Admin
-              </span>
-            )}
-            {!user.is_admin && user.role === "developer" && (
-              <span className="inline-flex mt-1.5 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full bg-violet-500/10 text-violet-500">
-                Developer
-              </span>
-            )}
-            {!user.is_admin && user.role === "manager" && (
-              <span className="inline-flex mt-1.5 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full bg-cyan-500/10 text-cyan-600">
-                Manager
-              </span>
-            )}
+        {/* Brand header */}
+        <div className="px-4 pt-5 pb-4 border-b border-border">
+          <div className="flex items-start justify-between">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 mb-1">
+                {/* Logo mark */}
+                <div className="w-6 h-6 rounded-md bg-primary flex items-center justify-center shrink-0">
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                    <circle cx="6" cy="6" r="4" stroke="white" strokeWidth="1.5" />
+                    <circle cx="6" cy="6" r="1.5" fill="white" />
+                  </svg>
+                </div>
+                <p className="text-sm font-semibold tracking-tight text-foreground">
+                  danta-search
+                </p>
+              </div>
+              <p className="text-xs text-muted-foreground truncate pl-8">
+                {user.email}
+              </p>
+              {roleLabel && (
+                <span
+                  className={`inline-flex mt-1.5 ml-8 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full ${roleLabel.cls}`}
+                >
+                  {roleLabel.text}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+            >
+              <PanelLeftClose className="w-4 h-4" />
+            </button>
           </div>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="mt-0.5 p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <PanelLeftClose className="w-4 h-4" />
-          </button>
         </div>
 
-        <nav className="flex-1 px-3 py-4 flex flex-col gap-1">
+        {/* Nav */}
+        <nav className="flex-1 px-3 py-3 flex flex-col gap-0.5 overflow-y-auto">
           {navItems.map((item) => (
             <NavLink key={item.href} {...item} />
           ))}
         </nav>
 
-        <div className="px-3 py-4 border-t border-border">
+        {/* Sign out */}
+        <div className="px-3 py-3 border-t border-border">
           <button
             onClick={logout}
-            className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-surface-raised transition-colors"
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
           >
-            <LogOut className="w-4 h-4" />
+            <LogOut className="w-4 h-4 shrink-0" />
             Sign out
           </button>
         </div>

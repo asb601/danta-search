@@ -19,13 +19,13 @@ export function NavLink({ href, icon: Icon, label }: NavLinkProps) {
     <Link
       href={href}
       className={cn(
-        "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors duration-150 border-l-2",
+        "relative flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors duration-150",
         isActive
-          ? "border-primary bg-primary/[0.09] text-foreground font-medium"
-          : "border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-raised"
+          ? "nav-item-active"
+          : "text-muted-foreground hover:text-foreground hover:bg-muted"
       )}
     >
-      <Icon className="w-4 h-4 shrink-0" />
+      <Icon className={cn("w-4 h-4 shrink-0", isActive ? "text-primary" : "")} />
       <span>{label}</span>
     </Link>
   );
@@ -39,12 +39,15 @@ export function MobileNavLink({ href, icon: Icon, label }: NavLinkProps) {
     <Link
       href={href}
       className={cn(
-        "flex flex-col items-center justify-center gap-1 flex-1 py-2 text-xs transition-colors",
-        isActive ? "text-primary" : "text-muted-foreground"
+        "flex flex-col items-center justify-center gap-1 flex-1 py-2.5 text-xs transition-colors relative",
+        isActive ? "text-primary" : "text-muted-foreground hover:text-foreground"
       )}
     >
+      {isActive && (
+        <span className="absolute top-0 left-1/2 -translate-x-1/2 w-6 h-0.5 rounded-full bg-primary" />
+      )}
       <Icon className="w-5 h-5" />
-      {isActive && <span className="text-[10px] font-medium">{label}</span>}
+      <span className={cn("text-[10px]", isActive ? "font-semibold" : "font-normal")}>{label}</span>
     </Link>
   );
 }

@@ -709,8 +709,8 @@ function ParquetTab() {
     }
   }, [mutate]);
 
-  if (isLoading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-zinc-400" /></div>;
-  if (error) return <p className="text-red-400 p-4">Failed to load parquet status.</p>;
+  if (isLoading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-muted-foreground" /></div>;
+  if (error) return <p className="text-destructive p-4">Failed to load parquet status.</p>;
 
   const files = data?.files ?? [];
 
@@ -718,14 +718,14 @@ function ParquetTab() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold text-zinc-100">Missing Parquet Conversions</h3>
-          <p className="text-sm text-zinc-400">{files.length} file(s) without parquet</p>
+          <h3 className="text-lg font-semibold text-foreground">Missing Parquet Conversions</h3>
+          <p className="text-sm text-muted-foreground">{files.length} file(s) without parquet</p>
         </div>
         {files.length > 0 && (
           <button
             onClick={retryAll}
             disabled={retrying}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors"
+            className="flex items-center gap-2 px-4 py-2 bg-primary hover:opacity-90 disabled:opacity-50 rounded-lg text-sm font-medium text-primary-foreground transition-opacity"
           >
             {retrying ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Retry All
@@ -734,38 +734,38 @@ function ParquetTab() {
       </div>
 
       {result && (
-        <div className="flex items-center gap-2 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-sm text-blue-300">
+        <div className="flex items-center gap-2 p-3 bg-primary/10 border border-primary/20 rounded-lg text-sm text-primary">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
           {result}
         </div>
       )}
 
       {files.length === 0 ? (
-        <div className="flex flex-col items-center py-12 text-zinc-400">
-          <CheckCircle2 className="w-8 h-8 mb-2 text-green-400" />
+        <div className="flex flex-col items-center py-12 text-muted-foreground">
+          <CheckCircle2 className="w-8 h-8 mb-2 text-success" />
           <p>All files have parquet conversions.</p>
         </div>
       ) : (
         <div className="space-y-2">
           {files.map((f) => (
-            <div key={f.file_id} className="p-3 bg-zinc-800/50 rounded-lg border border-zinc-700/50 space-y-1">
+            <div key={f.file_id} className="p-3 bg-surface rounded-lg border border-border space-y-1">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-medium text-zinc-200 truncate min-w-0">{f.name}</p>
+                <p className="text-sm font-medium text-foreground truncate min-w-0">{f.name}</p>
                 {f.job_status === "failed" && (
-                  <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30">failed</span>
+                  <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded bg-destructive/10 text-destructive border border-destructive/20">failed</span>
                 )}
                 {f.job_status === "running" && (
-                  <span className="shrink-0 flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                  <span className="shrink-0 flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 border border-amber-500/20">
                     <Loader2 className="w-2.5 h-2.5 animate-spin" />running
                   </span>
                 )}
                 {!f.job_status && (
-                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
                 )}
               </div>
-              <p className="text-xs text-zinc-500 truncate">{f.blob_path}</p>
+              <p className="text-xs text-muted-foreground truncate">{f.blob_path}</p>
               {f.job_error && (
-                <p className="text-xs text-red-400 break-all">{f.job_error}</p>
+                <p className="text-xs text-destructive break-all">{f.job_error}</p>
               )}
             </div>
           ))}

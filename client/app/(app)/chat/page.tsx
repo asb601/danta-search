@@ -1,6 +1,6 @@
 "use client";
 
-import { Send, RefreshCw, X, PanelLeft, MessageSquare } from "lucide-react";
+import { Send, RefreshCw, X, PanelLeft, MessageSquare, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useChat } from "./_hooks/useChat";
 import { AssistantMessage } from "./_components/AssistantMessage";
@@ -35,7 +35,7 @@ export default function ChatPage() {
   } = useChat();
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full bg-background">
       <ConversationSidebar
         conversations={conversations}
         activeId={activeConvId}
@@ -50,11 +50,12 @@ export default function ChatPage() {
       />
 
       <div className="flex-1 flex flex-col min-w-0">
-        <div className="px-3 py-2 border-b border-border flex items-center justify-between gap-2">
+        {/* Top bar */}
+        <div className="px-4 py-2.5 border-b border-border bg-card flex items-center justify-between gap-3">
           {!sidebarOpen ? (
             <button
               onClick={() => setSidebarOpen(true)}
-              className="p-1.5 rounded-md bg-surface border border-border text-muted-foreground hover:text-foreground transition-colors"
+              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
               title="Open sidebar"
             >
               <PanelLeft className="w-4 h-4" />
@@ -76,16 +77,29 @@ export default function ChatPage() {
             </div>
           ) : messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full px-4 text-center">
-              <div className="w-11 h-11 rounded-xl bg-foreground/[0.07] flex items-center justify-center mb-5">
-                <MessageSquare className="w-5 h-5 text-foreground/60" />
+              <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mb-5 shadow-sm">
+                <Sparkles className="w-6 h-6 text-primary" />
               </div>
-              <h2 className="text-base font-semibold tracking-tight text-foreground mb-1.5">Start a conversation</h2>
-              <p className="text-sm text-muted-foreground max-w-sm leading-relaxed">
+              <h2 className="text-lg font-bold tracking-tight text-foreground mb-2">
+                Start a conversation
+              </h2>
+              <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
                 Ask anything about your data. The AI will search, query, and analyse it for you.
               </p>
+              <div className="flex gap-2 mt-6 flex-wrap justify-center">
+                {["Summarise sales last month", "Show top 10 customers", "Compare Q1 vs Q2"].map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setInput(s)}
+                    className="px-3 py-1.5 rounded-lg border border-border bg-card text-xs text-muted-foreground hover:text-foreground hover:border-primary/40 hover:bg-accent transition-colors"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
           ) : (
-            <div className="max-w-4xl mx-auto px-3 sm:px-4 py-6 space-y-6">
+            <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
               {messages.map((msg) => (
                 <div
                   key={msg.id}
@@ -95,29 +109,44 @@ export default function ChatPage() {
                   )}
                 >
                   {msg.role === "user" ? (
-                    <div className="max-w-[75%] sm:max-w-[65%] rounded-xl px-4 py-3 text-sm leading-relaxed bg-foreground text-background">
+                    <div className="max-w-[75%] sm:max-w-[65%] rounded-2xl rounded-tr-sm px-4 py-3 text-sm leading-relaxed shadow-xs"
+                      style={{ background: "var(--gradient-primary)", color: "white" }}
+                    >
                       {msg.content}
                     </div>
                   ) : (
                     <div className="flex-1 min-w-0 max-w-full">
-                      <AssistantMessage
-                        msg={msg}
-                        isExpanded={expandedMsgId === msg.id}
-                        onToggle={() =>
-                          setExpandedMsgId((prev) => (prev === msg.id ? null : msg.id))
-                        }
-                      />
+                      {/* Assistant avatar */}
+                      <div className="flex items-start gap-2.5">
+                        <div className="w-6 h-6 rounded-lg bg-primary/10 flex items-center justify-center shrink-0 mt-0.5">
+                          <MessageSquare className="w-3 h-3 text-primary" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <AssistantMessage
+                            msg={msg}
+                            isExpanded={expandedMsgId === msg.id}
+                            onToggle={() =>
+                              setExpandedMsgId((prev) =>
+                                prev === msg.id ? null : msg.id
+                              )
+                            }
+                          />
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
               ))}
               {isLoading && (
-                <div className="flex justify-start">
-                  <div className="bg-surface border border-border rounded-xl px-4 py-3">
+                <div className="flex items-start gap-2.5">
+                  <div className="w-6 h-6 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                    <MessageSquare className="w-3 h-3 text-primary" />
+                  </div>
+                  <div className="bg-card border border-border rounded-2xl rounded-tl-sm px-4 py-3 shadow-xs">
                     <div className="flex gap-1.5 items-center">
-                      <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" />
-                      <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse [animation-delay:150ms]" />
-                      <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse [animation-delay:300ms]" />
+                      <span className="w-2 h-2 rounded-full bg-primary/60 animate-pulse" />
+                      <span className="w-2 h-2 rounded-full bg-primary/60 animate-pulse [animation-delay:150ms]" />
+                      <span className="w-2 h-2 rounded-full bg-primary/60 animate-pulse [animation-delay:300ms]" />
                     </div>
                   </div>
                 </div>
@@ -126,22 +155,25 @@ export default function ChatPage() {
           )}
         </div>
 
-        {/* Input */}
-        <div className="border-t border-border bg-surface p-4">
-          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex items-end gap-2">
+        {/* Input bar */}
+        <div className="border-t border-border bg-card p-4">
+          <form
+            onSubmit={handleSubmit}
+            className="max-w-3xl mx-auto flex items-end gap-2"
+          >
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Ask a question about your data..."
+              placeholder="Ask a question about your data…"
               rows={1}
-              className="flex-1 resize-none bg-surface-raised border border-border rounded-lg px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary"
+              className="flex-1 resize-none bg-background border border-border rounded-xl px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground input-focus shadow-xs"
             />
             {isLoading ? (
               <button
                 type="button"
                 onClick={handleStop}
-                className="shrink-0 h-10 w-10 flex items-center justify-center rounded-lg bg-danger/90 text-white transition-opacity hover:opacity-90"
+                className="shrink-0 h-10 w-10 flex items-center justify-center rounded-xl bg-danger/90 text-white transition-opacity hover:opacity-90 shadow-xs"
                 title="Stop generating"
               >
                 <X className="w-4 h-4" />
@@ -150,12 +182,15 @@ export default function ChatPage() {
               <button
                 type="submit"
                 disabled={!input.trim()}
-                className="shrink-0 h-10 w-10 flex items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40 transition-opacity hover:opacity-90"
+                className="shrink-0 h-10 w-10 flex items-center justify-center rounded-xl disabled:opacity-40 transition-opacity hover:opacity-90 shadow-xs btn-gradient"
               >
                 <Send className="w-4 h-4" />
               </button>
             )}
           </form>
+          <p className="text-center text-[11px] text-subtle-foreground mt-2">
+            AI may make mistakes — verify important information.
+          </p>
         </div>
       </div>
     </div>
