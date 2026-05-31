@@ -101,7 +101,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
       {!sidebarOpen && (
         <button
           onClick={() => setSidebarOpen(true)}
-          className="hidden md:flex fixed top-4 left-4 z-40 items-center justify-center w-8 h-8 rounded-lg bg-card border border-border shadow-sm text-muted-foreground hover:text-primary hover:border-primary/40 transition-colors"
+          className="hidden md:flex fixed top-4 left-4 z-40 items-center justify-center w-9 h-9 rounded-lg bg-card border border-border shadow-sm text-muted-foreground hover:text-primary hover:border-primary/40 transition-colors"
         >
           <PanelLeft className="w-4 h-4" />
         </button>
@@ -114,39 +114,34 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
         }`}
       >
         {/* Brand header */}
-        <div className="px-4 pt-5 pb-4 border-b border-border">
-          <div className="flex items-start justify-between">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                {/* Logo mark */}
-                <div className="w-6 h-6 rounded-md bg-primary flex items-center justify-center shrink-0">
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                    <circle cx="6" cy="6" r="4" stroke="white" strokeWidth="1.5" />
-                    <circle cx="6" cy="6" r="1.5" fill="white" />
-                  </svg>
-                </div>
-                <p className="text-sm font-semibold tracking-tight text-foreground">
+        <div className="px-4 pt-4 pb-4 border-b border-[#e5e5e5]">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="w-6 h-6 rounded-lg bg-[#0a0a0a] flex items-center justify-center shrink-0">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <circle cx="6" cy="6" r="3.5" stroke="white" strokeWidth="1.5"/>
+                  <circle cx="6" cy="6" r="1.25" fill="white"/>
+                </svg>
+              </div>
+              <div className="min-w-0">
+                <p className="text-[13px] font-semibold tracking-tight text-[#0a0a0a] leading-none mb-0.5" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}>
                   danta-search
                 </p>
+                <p className="text-[11px] text-[#a3a3a3] truncate">{user.email}</p>
               </div>
-              <p className="text-xs text-muted-foreground truncate pl-8">
-                {user.email}
-              </p>
-              {roleLabel && (
-                <span
-                  className={`inline-flex mt-1.5 ml-8 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full ${roleLabel.cls}`}
-                >
-                  {roleLabel.text}
-                </span>
-              )}
             </div>
             <button
               onClick={() => setSidebarOpen(false)}
-              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+              className="btn-ghost p-1.5 rounded-md"
             >
               <PanelLeftClose className="w-4 h-4" />
             </button>
           </div>
+          {roleLabel && (
+            <span className={`inline-flex mt-2 ml-8 items-center px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full ${roleLabel.cls}`}>
+              {roleLabel.text}
+            </span>
+          )}
         </div>
 
         {/* Nav */}

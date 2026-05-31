@@ -1,184 +1,584 @@
+"use client";
+
 import Link from "next/link";
-import { Network, Search, FileStack, BarChart3, Zap, ShieldCheck } from "lucide-react";
+import { useEffect, useState, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Network, Search, FileStack, BarChart3, Zap, ShieldCheck, ArrowRight,
+} from "lucide-react";
 
-export default function HomePage() {
+/* ─── Typing hero ─── */
+const QUERIES = [
+  "What were the top 5 SKUs by revenue last quarter?",
+  "Show me purchase orders above ₹10L from April.",
+  "Which vendors have outstanding invoices over 60 days?",
+  "Compare Q1 vs Q2 sales by region.",
+  "Summarise the FBL3N report for finance.",
+];
+
+function TypingHero() {
+  const [queryIdx, setQueryIdx] = useState(0);
+  const [displayed, setDisplayed] = useState("");
+  const [phase, setPhase] = useState<"typing" | "pause" | "erasing">("typing");
+
+  useEffect(() => {
+    const target = QUERIES[queryIdx];
+    let timeout: ReturnType<typeof setTimeout>;
+
+    if (phase === "typing") {
+      if (displayed.length < target.length) {
+        timeout = setTimeout(() => setDisplayed(target.slice(0, displayed.length + 1)), 38);
+      } else {
+        timeout = setTimeout(() => setPhase("pause"), 1800);
+      }
+    } else if (phase === "pause") {
+      timeout = setTimeout(() => setPhase("erasing"), 400);
+    } else {
+      if (displayed.length > 0) {
+        timeout = setTimeout(() => setDisplayed(displayed.slice(0, -1)), 18);
+      } else {
+        setQueryIdx((i) => (i + 1) % QUERIES.length);
+        setPhase("typing");
+      }
+    }
+    return () => clearTimeout(timeout);
+  }, [displayed, phase, queryIdx]);
+
   return (
-    <div className="flex flex-col min-h-screen bg-background">
-      {/* Navbar */}
-      <header className="sticky top-0 z-50 bg-surface/80 backdrop-blur-sm border-b border-border">
-        <div className="mx-auto max-w-5xl px-4 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="font-bold text-foreground text-base tracking-tight">
-              danta<span className="text-primary">-search</span>
-            </span>
-            <span className="hidden sm:inline-block px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[10px] font-medium uppercase tracking-wide">
-              Beta
-            </span>
+    <span className="text-[#0a0a0a]">
+      {displayed}
+      <span className="cursor-blink" />
+    </span>
+  );
+}
+
+/* ─── Feature tabs ─── */
+const FEATURES = [
+  {
+    id: "analytics",
+    label: "Business Analytics",
+    icon: BarChart3,
+    title: "Understands your business logic",
+    body: "Column semantics, KPIs, date ranges, fiscal calendars — danta-search learns how your business thinks, not just what your data contains.",
+    preview: (
+      <div className="p-5 flex flex-col gap-2.5">
+        {[["Total Revenue", "₹1.24Cr", "+14.2%", true], ["Orders Shipped", "8,430", "+7.8%", true], ["Avg Order Value", "₹14,700", "−2.1%", false], ["Active Vendors", "142", "+3.4%", true]].map(([label, val, chg, up]) => (
+          <div key={String(label)} className="flex items-center justify-between py-2 border-b border-[#e5e5e5] last:border-0">
+            <span className="text-[12px] text-[#737373]">{label}</span>
+            <div className="flex items-center gap-3">
+              <span className="text-[13px] font-semibold text-[#0a0a0a]">{val}</span>
+              <span className={`text-[11px] font-semibold ${up ? "text-[#16a34a]" : "text-[#dc2626]"}`}>{String(chg)}</span>
+            </div>
           </div>
-          <Link
-            href="/login"
-            className="inline-flex items-center justify-center h-8 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium transition-opacity hover:opacity-90"
-          >
-            Sign In
-          </Link>
+        ))}
+      </div>
+    ),
+  },
+  {
+    id: "performance",
+    label: "GB-Scale Speed",
+    icon: Zap,
+    title: "Millions of rows, instant answers",
+    body: "Apache DataFusion executes Parquet scans with predicate pushdown across your entire data estate. No sampling. No slowdowns.",
+    preview: (
+      <div className="p-5 flex flex-col gap-3">
+        <div className="flex items-end gap-1.5 h-20">
+          {[35, 55, 42, 78, 60, 88, 65, 92, 70, 85, 95, 82].map((h, i) => (
+            <motion.div
+              key={i}
+              initial={{ height: 0 }}
+              animate={{ height: `${h}%` }}
+              transition={{ delay: i * 0.04, duration: 0.5, ease: "easeOut" }}
+              className="flex-1 rounded-sm"
+              style={{ background: i >= 10 ? "#0a0a0a" : i >= 8 ? "rgba(10,10,10,0.45)" : "rgba(10,10,10,0.12)" }}
+            />
+          ))}
         </div>
-      </header>
+        <div className="flex justify-between text-[10px] text-[#a3a3a3]">
+          <span>Jan</span><span>Mar</span><span>Jun</span><span>Sep</span><span>Dec</span>
+        </div>
+        <div className="flex gap-4 pt-1">
+          {[["280k rows", "scanned"], ["0.38s", "response"], ["99.9%", "uptime"]].map(([n, l]) => (
+            <div key={l}>
+              <div className="text-[15px] font-bold text-[#0a0a0a]">{n}</div>
+              <div className="text-[10px] text-[#a3a3a3]">{l}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    ),
+  },
+  {
+    id: "retrieval",
+    label: "Hybrid Search",
+    icon: Search,
+    title: "Finds what you mean, not just what you wrote",
+    body: "OpenSearch hybrid (BM25 + vector) with native RRF ranking. Accurate results across both structured tables and unstructured document content.",
+    preview: (
+      <div className="p-5 space-y-2">
+        {[
+          { q: "overdue invoices south region", file: "FBL3N_report.pdf", score: 96 },
+          { q: "purchase orders Q2 vendor", file: "purchase_orders_2025.xlsx", score: 89 },
+          { q: "SKU revenue last quarter", file: "sales_q3_south.xlsx", score: 84 },
+        ].map((r) => (
+          <div key={r.file} className="flex items-center gap-3 p-2.5 rounded-lg bg-[#f9f9f9] border border-[#e5e5e5]">
+            <div className="w-7 h-7 rounded-md bg-[#0a0a0a]/08 flex items-center justify-center">
+              <Search className="w-3 h-3 text-[#0a0a0a]" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-[11.5px] font-medium text-[#0a0a0a] truncate">{r.file}</div>
+              <div className="text-[10px] text-[#a3a3a3] truncate">{r.q}</div>
+            </div>
+            <div className="text-[11px] font-bold text-[#0a0a0a]">{r.score}%</div>
+          </div>
+        ))}
+      </div>
+    ),
+  },
+  {
+    id: "trust",
+    label: "Source Citations",
+    icon: ShieldCheck,
+    title: "Every answer is fully auditable",
+    body: "Results link back to the exact file, sheet, and row. Finance and compliance teams get the paper trail they need without asking for it.",
+    preview: (
+      <div className="p-5 space-y-3">
+        <div className="text-[12.5px] text-[#0a0a0a] leading-relaxed">SKU-4821 generated <strong>₹28.4L</strong> in Q3 across South region.</div>
+        <div className="space-y-1.5">
+          {[{ file: "sales_q3_south.xlsx", rows: "rows 1,203–5,421", sheet: "Sheet1" }, { file: "sales_q3_north.xlsx", rows: "rows 880–2,100", sheet: "Q3 Data" }].map((s) => (
+            <div key={s.file} className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-[#e5e5e5] bg-[#f9f9f9]">
+              <div className="w-2 h-2 rounded-full bg-[#16a34a]" />
+              <div>
+                <div className="text-[11px] font-semibold text-[#0a0a0a] font-mono">{s.file}</div>
+                <div className="text-[10px] text-[#a3a3a3]">{s.rows} · {s.sheet}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    ),
+  },
+];
 
-      {/* Hero */}
-      <main className="flex-1">
-        <section className="flex flex-col items-center justify-center text-center px-4 pt-24 pb-16">
-          <span className="inline-block mb-5 px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium">
-            Enterprise Data Intelligence
-          </span>
-          <h1 className="text-4xl md:text-6xl font-bold text-foreground leading-tight max-w-3xl">
-            Chat with your
-            <br />
-            Excel & PDF data —{" "}
-            <span className="text-primary">at scale</span>
-          </h1>
-          <p className="mt-5 text-base md:text-lg text-muted-foreground max-w-lg">
-            Ask business questions across GBs of spreadsheets and documents in plain English.
-            danta-search understands your data, your columns, and your business logic.
-          </p>
+/* ─── Main page ─── */
+export default function HomePage() {
+  const [activeTab, setActiveTab] = useState("analytics");
+  const activeFeature = FEATURES.find((f) => f.id === activeTab)!;
 
-          <div className="flex flex-col sm:flex-row gap-3 mt-8">
-            <Link
-              href="/login"
-              className="inline-flex items-center justify-center h-10 px-6 rounded-md bg-primary text-primary-foreground text-sm font-medium transition-opacity hover:opacity-90"
-            >
-              Get Started Free
-            </Link>
-            <Link
-              href="/demo"
-              className="inline-flex items-center justify-center h-10 px-6 rounded-md border border-border text-foreground text-sm font-medium hover:bg-muted transition-colors"
-            >
-              See a Demo
+  return (
+    <div className="flex flex-col min-h-screen bg-white text-[#0a0a0a]">
+
+      {/* ── NAV ── */}
+      <motion.header
+        initial={{ y: -8, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ duration: 0.45, ease: "easeOut" }}
+        className="nav-bar"
+      >
+        <div className="page-container flex items-center justify-between h-14 px-4 sm:px-6">
+          <Link href="/" className="flex items-center gap-2 shrink-0">
+            <div className="w-6 h-6 rounded-lg bg-[#0a0a0a] flex items-center justify-center shrink-0">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <circle cx="6" cy="6" r="3.5" stroke="white" strokeWidth="1.5" />
+                <circle cx="6" cy="6" r="1.25" fill="white" />
+              </svg>
+            </div>
+            <span className="text-[14px] font-semibold tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
+              danta-search
+            </span>
+          </Link>
+
+          <nav className="hidden md:flex items-center gap-7">
+            {["Product", "Solutions", "Pricing", "Blog"].map((l, i) => (
+              <motion.div
+                key={l}
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.08 + i * 0.05, duration: 0.35 }}
+              >
+                <Link href="#" className="nav-link">{l}</Link>
+              </motion.div>
+            ))}
+          </nav>
+
+          <div className="flex items-center gap-2 sm:gap-3">
+            <Link href="/login" className="nav-link hidden sm:inline text-[13px]">Sign in</Link>
+            <Link href="/login" className="btn-black px-3 sm:px-4 h-8 rounded-lg text-[12.5px] sm:text-[13px]">
+              Book a Demo
             </Link>
           </div>
+        </div>
+      </motion.header>
 
-          {/* Social proof pill */}
-          <p className="mt-6 text-xs text-muted-foreground">
-            Handles files up to{" "}
-            <span className="text-foreground font-medium">10 GB+</span> · Excel, CSV, PDF, DOCX
-          </p>
+      <main className="flex-1">
+
+        {/* ── HERO ── */}
+        <section className="relative overflow-hidden pt-14 pb-10 sm:pt-20 sm:pb-12 md:pt-32 md:pb-16 px-4 sm:px-6">
+          {/* Grid background — fades at bottom */}
+          <div
+            className="absolute inset-0 grid-bg pointer-events-none"
+            style={{
+              opacity: 0.4,
+              maskImage: "radial-gradient(ellipse 80% 55% at 50% 0%, black 30%, transparent 100%)",
+            }}
+          />
+
+          <div className="relative page-container text-center">
+            <motion.div
+              initial="hidden"
+              animate="show"
+              variants={{ hidden: {}, show: { transition: { staggerChildren: 0.09 } } }}
+              className="flex flex-col items-center"
+            >
+              {/* Label */}
+              <motion.span
+                variants={{ hidden: { opacity: 0, y: 16 }, show: { opacity: 1, y: 0, transition: { duration: 0.5 } } }}
+                className="section-label mb-5 inline-block"
+              >
+                Enterprise Data Intelligence
+              </motion.span>
+
+              {/* Main headline */}
+              <motion.h1
+                variants={{ hidden: { opacity: 0, y: 20 }, show: { opacity: 1, y: 0, transition: { duration: 0.6 } } }}
+                className="display-xl mb-4 max-w-3xl"
+              >
+                Your enterprise data,
+                <br />
+                <span className="gradient-text">answered instantly.</span>
+              </motion.h1>
+
+              {/* Sub headline */}
+              <motion.p
+                variants={{ hidden: { opacity: 0, y: 16 }, show: { opacity: 1, y: 0, transition: { duration: 0.55 } } }}
+                className="body-lead max-w-[460px] mb-10"
+              >
+                Ask business questions across GBs of spreadsheets, PDFs, and documents in plain English.
+              </motion.p>
+
+              {/* CTA buttons */}
+              <motion.div
+                variants={{ hidden: { opacity: 0, y: 14 }, show: { opacity: 1, y: 0, transition: { duration: 0.5 } } }}
+                className="flex flex-col xs:flex-row gap-3 items-center mb-8 sm:mb-10 w-full sm:w-auto"
+              >
+                <Link href="/login" className="btn-black px-5 sm:px-6 h-11 rounded-xl gap-2 w-full sm:w-auto justify-center">
+                  Get Started Free <ArrowRight className="w-4 h-4" />
+                </Link>
+                <Link href="#" className="btn-outline px-5 sm:px-6 h-11 rounded-xl w-full sm:w-auto justify-center">
+                  See a Demo
+                </Link>
+              </motion.div>
+
+              {/* Live typing box */}
+              <motion.div
+                variants={{ hidden: { opacity: 0, scale: 0.97 }, show: { opacity: 1, scale: 1, transition: { duration: 0.55 } } }}
+                className="w-full max-w-xl bg-white border border-[#e5e5e5] rounded-xl px-5 py-3.5 text-left shadow-sm flex items-center gap-3"
+              >
+                <Search className="w-4 h-4 text-[#a3a3a3] shrink-0" />
+                <span className="text-[14px] leading-relaxed min-h-[22px]">
+                  <TypingHero />
+                </span>
+              </motion.div>
+
+              <motion.p
+                variants={{ hidden: { opacity: 0 }, show: { opacity: 1, transition: { duration: 0.5, delay: 0.2 } } }}
+                className="mt-4 section-label"
+              >
+                Handles files up to{" "}
+                <span className="text-[#0a0a0a]">10 GB+</span>
+                {" "}· Excel · CSV · PDF · DOCX
+              </motion.p>
+            </motion.div>
+          </div>
         </section>
 
-        {/* How it works — simple 3-step flow */}
-        <section className="mx-auto max-w-5xl px-4 pb-20">
-          <div className="flex flex-col md:flex-row items-start md:items-center gap-2 justify-center mb-10 text-xs text-muted-foreground">
-            {["Upload your files", "danta-search indexes them", "Ask anything in plain English"].map(
-              (step, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-primary/10 text-primary font-semibold text-[10px]">
-                    {i + 1}
-                  </span>
-                  <span>{step}</span>
-                  {i < 2 && (
-                    <span className="hidden md:inline text-border-strong">→</span>
-                  )}
-                </div>
-              )
-            )}
-          </div>
+        {/* ── PRODUCT SHOWCASE ── */}
+        <section className="px-4 sm:px-6 pb-14 sm:pb-20 page-container mx-auto">
+          <motion.div
+            initial={{ opacity: 0, y: 40 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, margin: "-60px" }}
+            transition={{ duration: 0.7, ease: "easeOut" }}
+            className="product-window"
+          >
+            {/* Window chrome */}
+            <div className="window-chrome">
+              <div className="window-dot bg-[#ff5f57]" />
+              <div className="window-dot bg-[#febc2e]" />
+              <div className="window-dot bg-[#28c840]" />
+              <span className="ml-3 text-[11.5px] text-white/30 font-medium tracking-wider hidden sm:inline">
+                danta-search · analytics
+              </span>
+            </div>
 
-          {/* Mock chat preview */}
-          <div className="bg-surface border border-border rounded-xl p-5 max-w-2xl mx-auto mb-16 text-left shadow-sm">
-            <p className="text-xs text-muted-foreground mb-4 font-medium uppercase tracking-wide">
-              Example conversation
+            {/* On mobile: stacked. On sm+: side by side */}
+            <div className="bg-[#111111] flex flex-col sm:grid sm:[grid-template-columns:180px_1fr]" style={{ minHeight: 320 }}>
+              {/* File list — hidden on very small, shown from sm */}
+              <div className="hidden sm:block border-r border-white/[0.06] p-4">
+                <p className="section-label text-white/30 mb-3">Files</p>
+                {[
+                  { ext: "XL", name: "sales_q3_south.xlsx", sub: "142k rows", color: "#4ade80", bg: "rgba(74,222,128,0.12)", active: true },
+                  { ext: "XL", name: "purchase_orders.xlsx", sub: "89k rows", color: "#4ade80", bg: "rgba(74,222,128,0.12)", active: false },
+                  { ext: "PDF", name: "FBL3N_report.pdf", sub: "312 pages", color: "#f87171", bg: "rgba(248,113,113,0.12)", active: false },
+                  { ext: "CSV", name: "inventory.csv", sub: "220k rows", color: "#60a5fa", bg: "rgba(96,165,250,0.12)", active: false },
+                ].map((f) => (
+                  <div
+                    key={f.name}
+                    className={`flex items-center gap-2 px-2 py-2 rounded-lg mb-0.5 ${f.active ? "bg-white/[0.07]" : "hover:bg-white/[0.04]"}`}
+                  >
+                    <span className="w-7 h-7 rounded-md flex items-center justify-center text-[9px] font-bold shrink-0" style={{ background: f.bg, color: f.color }}>
+                      {f.ext}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-[11px] text-white/70 font-medium leading-tight truncate">{f.name}</p>
+                      <p className="text-[10px] text-white/25">{f.sub}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Chat */}
+              <div className="p-4 sm:p-5 flex flex-col gap-3">
+                <div className="flex justify-end">
+                  <div className="bg-white/10 text-white/85 text-[12px] sm:text-[13px] px-3 sm:px-4 py-2.5 rounded-2xl rounded-tr-sm max-w-[85%] sm:max-w-[68%]">
+                    What were the top 5 SKUs by revenue last quarter across all regions?
+                  </div>
+                </div>
+                <div className="bg-white/[0.04] border border-white/[0.06] rounded-2xl rounded-tl-sm p-3 sm:p-4 max-w-[95%] sm:max-w-[90%]">
+                  <p className="text-[11px] sm:text-[12px] text-white/55 mb-3">Based on Q3 2025 sales data (3 files, 280k rows):</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[11px] sm:text-[11.5px] border-collapse">
+                      <thead>
+                        <tr>
+                          {["#", "SKU", "Region", "Revenue"].map((h) => (
+                            <th key={h} className="text-left py-1.5 px-2 text-[9.5px] sm:text-[10px] font-semibold tracking-widest text-white/25 uppercase border-b border-white/[0.05]">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[["01", "SKU-4821", "South", "₹28.4L"], ["02", "SKU-0093", "North", "₹21.1L"], ["03", "SKU-7712", "South", "₹18.9L"]].map(([r, s, reg, rev]) => (
+                          <tr key={s}>
+                            <td className="py-1.5 px-2 text-white/25">{r}</td>
+                            <td className="py-1.5 px-2 text-white/85 font-semibold">{s}</td>
+                            <td className="py-1.5 px-2 text-white/45">{reg}</td>
+                            <td className="py-1.5 px-2 text-white/85 font-bold">{rev}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    {["sales_q3_south.xlsx", "sales_q3_north.xlsx"].map((s) => (
+                      <span key={s} className="text-[10px] bg-white/[0.07] px-2 py-0.5 rounded font-mono text-white/30">{s}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Input bar */}
+            <div className="bg-[#111111] border-t border-white/[0.06] px-4 sm:px-5 py-3 flex items-center gap-3">
+              <span className="text-[12px] sm:text-[13px] text-white/18 flex-1">Ask anything about your data…</span>
+              <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: "rgba(255,255,255,0.08)" }}>
+                <ArrowRight className="w-3.5 h-3.5 text-white/40" />
+              </div>
+            </div>
+          </motion.div>
+        </section>
+
+        {/* ── HOW IT WORKS ── */}
+        <section className="page-section">
+          <div className="page-container">
+            <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-14">
+              <div>
+                <motion.span
+                  initial={{ opacity: 0 }}
+                  whileInView={{ opacity: 1 }}
+                  viewport={{ once: true }}
+                  className="section-label block mb-4"
+                >
+                  How it works
+                </motion.span>
+                <motion.h2
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.55, ease: "easeOut" }}
+                  className="display-md"
+                >
+                  From upload to insight<br />in minutes.
+                </motion.h2>
+              </div>
+              <p className="body-lead max-w-xs md:text-right">
+                No SQL. No data engineering. No dashboards to configure.
+              </p>
+            </div>
+
+            <div className="border border-[#e5e5e5] rounded-2xl overflow-hidden grid grid-cols-1 md:grid-cols-3">
+              {[
+                { n: "01", title: "Upload your files", body: "Excel, CSV, PDF, DOCX — any format, any size up to 10 GB+. No preprocessing required." },
+                { n: "02", title: "We index & understand", body: "The platform learns your column semantics, metrics, date ranges, and cross-file relationships." },
+                { n: "03", title: "Ask in plain English", body: "Get grounded, source-cited answers with tables and breakdowns — linked to the exact rows." },
+              ].map((s, i) => (
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.5, delay: i * 0.1, ease: "easeOut" }}
+                  className="step-card"
+                >
+                  <div className="step-number">{s.n}</div>
+                  <h3 className="text-[15px] font-semibold mb-2 text-[#0a0a0a]">{s.title}</h3>
+                  <p className="text-[13.5px] text-[#737373] leading-relaxed">{s.body}</p>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ── ANIMATED FEATURE TABS ── */}
+        <section className="page-section">
+          <div className="page-container">
+            <motion.span
+              initial={{ opacity: 0 }}
+              whileInView={{ opacity: 1 }}
+              viewport={{ once: true }}
+              className="section-label block mb-4"
+            >
+              Capabilities
+            </motion.span>
+            <motion.h2
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.55 }}
+              className="display-md mb-10 max-w-lg"
+            >
+              Built for enterprise-grade data at real scale.
+            </motion.h2>
+
+            {/* Tab bar — scrollable on mobile */}
+            <div className="overflow-x-auto pb-1 mb-6 sm:mb-8 -mx-4 sm:mx-0 px-4 sm:px-0">
+              <div className="relative flex items-center gap-1 p-1 bg-[#f4f4f4] rounded-full w-fit">
+                {FEATURES.map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => setActiveTab(f.id)}
+                    className={`feature-tab ${activeTab === f.id ? "active" : ""}`}
+                  >
+                    {activeTab === f.id && (
+                      <motion.span
+                        layoutId="feature-pill"
+                        className="absolute inset-0 bg-white rounded-full shadow-sm border border-[#e5e5e5]"
+                        transition={{ type: "spring", stiffness: 400, damping: 34 }}
+                      />
+                    )}
+                    <span className="relative z-10 flex items-center gap-1.5">
+                      <f.icon className="w-3.5 h-3.5" />
+                      <span className="hidden xs:inline">{f.label}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Tab content */}
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={activeTab}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.28, ease: "easeOut" }}
+                className="grid md:grid-cols-2 gap-0 items-stretch border border-[#e5e5e5] rounded-2xl overflow-hidden"
+              >
+                {/* Text side */}
+                <div className="p-6 sm:p-8 md:p-10">
+                  <div className="w-10 h-10 rounded-xl bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center mb-4 sm:mb-5">
+                    <activeFeature.icon className="w-5 h-5 text-[#0a0a0a]" />
+                  </div>
+                  <h3 className="text-[18px] sm:text-[22px] font-bold mb-3 text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.025em" }}>
+                    {activeFeature.title}
+                  </h3>
+                  <p className="text-[13.5px] sm:text-[14.5px] text-[#737373] leading-relaxed mb-5 sm:mb-6">{activeFeature.body}</p>
+                  <Link href="/login" className="btn-black px-5 h-9 rounded-lg text-[13px] gap-1.5">
+                    Try it free <ArrowRight className="w-3.5 h-3.5" />
+                  </Link>
+                </div>
+
+                {/* Preview side */}
+                <div className="border-t md:border-t-0 md:border-l border-[#e5e5e5] bg-[#f9f9f9] min-h-[200px] md:min-h-[240px]">
+                  {activeFeature.preview}
+                </div>
+              </motion.div>
+            </AnimatePresence>
+          </div>
+        </section>
+
+        {/* ── TESTIMONIAL ── */}
+        <section className="bg-[#0a0a0a] py-14 sm:py-24 px-4 sm:px-6">
+          <motion.div
+            initial={{ opacity: 0, y: 24 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.65, ease: "easeOut" }}
+            className="page-container text-center"
+          >
+            <span className="section-label text-white/30 block mb-8">Customer story</span>
+            <blockquote
+              className="text-2xl sm:text-3xl md:text-[42px] font-bold text-white leading-[1.18] mb-8 max-w-3xl mx-auto"
+              style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.03em" }}
+            >
+              "We cut our weekly reporting time by 80%. danta-search just gets our data."
+            </blockquote>
+            <cite className="text-[13px] text-white/35 not-italic tracking-wide">
+              — Chief Financial Officer · Manufacturing Enterprise · 2,400 employees
+            </cite>
+          </motion.div>
+        </section>
+
+        {/* ── FINAL CTA ── */}
+        <section className="page-section text-center border-b-0">
+          <motion.div
+            initial={{ opacity: 0, y: 24 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.6, ease: "easeOut" }}
+            className="page-container"
+          >
+            <span className="section-label block mb-5">Get started</span>
+            <h2 className="display-lg mb-5">
+              Ready to unlock<br />your data?
+            </h2>
+            <p className="body-lead mb-10 max-w-sm mx-auto">
+              Join teams who've replaced hours of manual reporting with a single question.
             </p>
-            <div className="space-y-3">
-              <div className="flex justify-end">
-                <div className="bg-primary/10 text-foreground text-sm px-4 py-2 rounded-xl rounded-tr-sm max-w-xs">
-                  What were the top 5 SKUs by revenue last quarter across all regions?
-                </div>
-              </div>
-              <div className="flex justify-start">
-                <div className="bg-muted text-foreground text-sm px-4 py-2 rounded-xl rounded-tl-sm max-w-sm">
-                  Based on your Q3 sales data (3 Excel files, 142k rows):
-                  <br />
-                  <span className="font-medium">1. SKU-4821</span> — ₹28.4L &nbsp;
-                  <span className="font-medium">2. SKU-0093</span> — ₹21.1L &nbsp;
-                  <span className="text-muted-foreground text-xs">…and 3 more</span>
-                </div>
-              </div>
-              <div className="flex justify-end">
-                <div className="bg-primary/10 text-foreground text-sm px-4 py-2 rounded-xl rounded-tr-sm max-w-xs">
-                  Show me SKU-4821's month-over-month trend as a table.
-                </div>
-              </div>
-              <div className="flex justify-start">
-                <div className="bg-muted text-foreground text-sm px-4 py-2 rounded-xl rounded-tl-sm max-w-sm">
-                  Pulling from <span className="text-primary font-medium">sales_q3_south.xlsx</span> and <span className="text-primary font-medium">sales_q3_north.xlsx</span>…
-                  <br />
-                  <span className="text-muted-foreground text-xs">✓ Results ready</span>
-                </div>
-              </div>
+            <div className="flex gap-3 justify-center flex-wrap">
+              <Link href="/login" className="btn-black px-8 h-12 rounded-xl gap-2 text-[14px]">
+                Get Started Free <ArrowRight className="w-4 h-4" />
+              </Link>
+              <Link href="#" className="btn-outline px-8 h-12 rounded-xl text-[14px]">
+                Talk to Sales
+              </Link>
             </div>
-          </div>
-
-          {/* Feature cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 w-full">
-            <div className="bg-surface border border-border rounded-lg p-5 text-left">
-              <BarChart3 className="w-5 h-5 text-primary mb-3" />
-              <h3 className="text-sm font-semibold text-foreground mb-1">
-                Business-aware analysis
-              </h3>
-              <p className="text-xs text-muted-foreground">
-                Understands column semantics, date ranges, and business metrics — not just raw cell values.
-              </p>
-            </div>
-            <div className="bg-surface border border-border rounded-lg p-5 text-left">
-              <Zap className="w-5 h-5 text-primary mb-3" />
-              <h3 className="text-sm font-semibold text-foreground mb-1">
-                GB-scale performance
-              </h3>
-              <p className="text-xs text-muted-foreground">
-                Processes and queries across millions of rows from multiple Excel, CSV, Text, JSON, XML PDF and PPT files without slowdown.
-              </p>
-            </div>
-            <div className="bg-surface border border-border rounded-lg p-5 text-left">
-              <ShieldCheck className="w-5 h-5 text-primary mb-3" />
-              <h3 className="text-sm font-semibold text-foreground mb-1">
-                Source-cited answers
-              </h3>
-              <p className="text-xs text-muted-foreground">
-                Every answer links back to the exact file, sheet, and rows it came from — fully auditable.
-              </p>
-            </div>
-            <div className="bg-surface border border-border rounded-lg p-5 text-left">
-              <Network className="w-5 h-5 text-primary mb-3" />
-              <h3 className="text-sm font-semibold text-foreground mb-1">
-                 Agentic RAG engine
-              </h3>
-              <p className="text-xs text-muted-foreground">
-                Builds a knowledge graph across your files to answer cross-document questions with linked reasoning.
-              </p>
-            </div>
-            <div className="bg-surface border border-border rounded-lg p-5 text-left">
-              <Search className="w-5 h-5 text-primary mb-3" />
-              <h3 className="text-sm font-semibold text-foreground mb-1">
-                Hybrid search
-              </h3>
-              <p className="text-xs text-muted-foreground">
-                Combines vector similarity and keyword search for accurate results on both structured and unstructured content.
-              </p>
-            </div>
-            <div className="bg-surface border border-border rounded-lg p-5 text-left">
-              <FileStack className="w-5 h-5 text-primary mb-3" />
-              <h3 className="text-sm font-semibold text-foreground mb-1">
-                Multi-format ingestion
-              </h3>
-              <p className="text-xs text-muted-foreground">
-                Handles Excel (XLSX), CSV, PDF, DOCX, and TXT — upload once, query across all formats together.
-              </p>
-            </div>
-          </div>
+          </motion.div>
         </section>
       </main>
 
-      {/* Footer */}
-      <footer className="text-center text-xs text-subtle-foreground pb-8">
-        danta-search &copy; 2026 · Enterprise Data Intelligence
+      {/* ── FOOTER ── */}
+      <footer className="border-t border-[#e5e5e5] px-4 sm:px-6 py-5">
+        <div className="page-container flex flex-col sm:flex-row items-center justify-between gap-4">
+          <span className="text-[13.5px] font-semibold tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
+            danta-search
+          </span>
+          <nav className="flex flex-wrap justify-center gap-4 sm:gap-6">
+            {["Product", "Privacy", "Terms", "Contact"].map((l) => (
+              <Link key={l} href="#" className="nav-link text-[12px]">{l}</Link>
+            ))}
+          </nav>
+          <span className="text-[12px] text-[#a3a3a3]">© 2026 danta-search</span>
+        </div>
       </footer>
     </div>
   );
