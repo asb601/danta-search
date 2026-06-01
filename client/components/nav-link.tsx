@@ -12,6 +12,7 @@ interface NavLinkProps {
   label: string;
 }
 
+/** Horizontal top-bar nav link — used in the app shell top nav */
 export function NavLink({ href, icon: Icon, label }: NavLinkProps) {
   const pathname = usePathname();
   const isActive = pathname === href || pathname.startsWith(href + "/");
@@ -20,20 +21,20 @@ export function NavLink({ href, icon: Icon, label }: NavLinkProps) {
     <Link
       href={href}
       className={cn(
-        "sidebar-item relative",
-        isActive ? "active text-[#0a0a0a]" : "text-[#737373]"
+        "relative flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[13px] font-medium transition-colors duration-150 whitespace-nowrap",
+        isActive ? "text-white" : "text-[#737373] hover:text-[#0a0a0a] hover:bg-[#f4f4f4]"
       )}
     >
-      {/* Sliding background pill */}
       {isActive && (
         <motion.span
-          layoutId="sidebar-active-pill"
-          className="absolute inset-0 bg-[#f0f0f0] rounded-[6px]"
+          layoutId="topnav-active-pill"
+          className="absolute inset-0 rounded-full bg-[#0a0a0a]"
+          style={{ boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 1px 4px rgba(0,0,0,0.12)" }}
           transition={{ type: "spring", stiffness: 420, damping: 36 }}
         />
       )}
-      <Icon className={cn("w-4 h-4 shrink-0 relative z-10", isActive ? "text-[#0a0a0a]" : "text-[#a3a3a3]")} />
-      <span className="relative z-10 text-[13px]">{label}</span>
+      <Icon className={cn("w-3.5 h-3.5 shrink-0 relative z-10", isActive ? "text-white" : "text-[#a3a3a3]")} />
+      <span className="relative z-10">{label}</span>
     </Link>
   );
 }

@@ -156,6 +156,7 @@ async def chat_message_stream(
                     allowed_domains=user_allowed_domains,
                     container_id=effective_container_id,
                     prior_files=prior_files,
+                    org_id=getattr(user, "organization_id", None),
                 ):
                     evt_type = evt["type"]
 

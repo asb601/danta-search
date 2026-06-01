@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { useChat } from "./_hooks/useChat";
 import { AssistantMessage } from "./_components/AssistantMessage";
 import { ConversationSidebar } from "./_components/ConversationSidebar";
+import { ConversationTopBar } from "./_components/ConversationTopBar";
 import { ContainerPicker } from "./_components/ContainerPicker";
 
 const PROMPTS = ["Summarise sales last month", "Show top 10 customers", "Compare Q1 vs Q2"];
@@ -29,34 +30,47 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-full bg-white overflow-hidden">
-      {/* Conversation sidebar */}
-      <ConversationSidebar
-        conversations={conversations}
-        activeId={activeConvId}
-        onSelect={loadConversation}
-        onNew={startNewChat}
-        onDelete={deleteConversation}
-        onRename={renameConversation}
-        isOpen={sidebarOpen}
-        onToggle={() => setSidebarOpen(false)}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-      />
+      {/* ── Mobile-only drawer sidebar ─────────────────────────────── */}
+      {/* Hidden on sm+; appears as fixed overlay drawer on mobile     */}
+      <div className="sm:hidden">
+        <ConversationSidebar
+          conversations={conversations}
+          activeId={activeConvId}
+          onSelect={(id) => { loadConversation(id); setSidebarOpen(false); }}
+          onNew={() => { startNewChat(); setSidebarOpen(false); }}
+          onDelete={deleteConversation}
+          onRename={renameConversation}
+          isOpen={sidebarOpen}
+          onToggle={() => setSidebarOpen(false)}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+        />
+      </div>
 
+      {/* ── Main chat column ───────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 w-full">
-        {/* Top bar */}
+
+        {/* ── Desktop: conversation top bar ─────────────────────────── */}
+        <ConversationTopBar
+          conversations={conversations}
+          activeId={activeConvId}
+          onSelect={loadConversation}
+          onNew={startNewChat}
+        />
+
+        {/* ── App top bar (container picker + mobile menu) ──────────── */}
         <div className="app-topbar px-3 sm:px-4">
           <div className="flex items-center gap-2 min-w-0">
+            {/* Mobile-only hamburger: show always (topbar isn't visible on mobile) */}
             <AnimatePresence>
-              {/* Show toggle always on mobile, only when closed on desktop */}
-              {(!sidebarOpen) && (
+              {!sidebarOpen && (
                 <motion.button
                   initial={{ opacity: 0, x: -6 }}
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: -6 }}
                   transition={{ duration: 0.18 }}
                   onClick={() => setSidebarOpen(true)}
-                  className="btn-ghost p-1.5 rounded-lg shrink-0"
+                  className="sm:hidden btn-ghost p-1.5 rounded-lg shrink-0"
                 >
                   <PanelLeft className="w-4 h-4" />
                 </motion.button>
@@ -66,7 +80,7 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* Messages area */}
+        {/* ── Messages area ─────────────────────────────────────────── */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           {loadingConv ? (
             <div className="flex items-center justify-center h-full">
@@ -136,7 +150,7 @@ export default function ChatPage() {
           ) : (
             <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 sm:space-y-5">
               <AnimatePresence initial={false}>
-                {messages.map((msg, i) => (
+                {messages.map((msg) => (
                   <motion.div
                     key={msg.id}
                     variants={msgVariants}
@@ -206,7 +220,7 @@ export default function ChatPage() {
           )}
         </div>
 
-        {/* Input bar */}
+        {/* ── Input bar ─────────────────────────────────────────────── */}
         <div className="border-t border-[#e5e5e5] bg-white px-3 sm:px-4 pt-3 pb-3">
           <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
             <motion.div

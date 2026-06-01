@@ -367,10 +367,15 @@ async def _build_agent_context(
     container_id: str | None = None,
     prior_files: list[str] | None = None,
     request_trace_id: str | None = None,
+    org_id: str | None = None,
 ) -> dict | None:
     """
     Shared setup for both streaming and non-streaming entry points.
     Returns None if no catalog data exists.
+
+    `org_id` (optional): when provided and ORG_AI_KEYS_ENABLED with an
+    OrgAISettings row, the agent's LLM uses the org's keys/deployment. When None
+    (ingestion + non-org paths) the global AI config is used (resolver falls back).
     """
     # ── STEP 1: USER QUERY RECEIVED ──────────────────────────────────────────
     pipeline_logger.info(
@@ -1199,11 +1204,23 @@ async def _build_agent_context(
     except Exception as exc:
         pipeline_logger.warning("feasibility_gate_error", error=str(exc)[:200])
 
+    # Resolve per-org AI settings (keys/deployments) once, here where we have the
+    # db session + org context. Falls back to global config when the flag is off,
+    # org_id is None, or no OrgAISettings row exists. Never raises.
+    _org_ai = None
+    try:
+        from app.services.org_ai_resolver import resolve_org_ai_settings
+
+        _org_ai = await resolve_org_ai_settings(org_id, db)
+    except Exception as exc:  # global fallback must always work
+        pipeline_logger.warning("org_ai_resolve_error", error=str(exc)[:200])
+        _org_ai = None
+
     # Build graph and system prompt concurrently — both are pure CPU computation
     # with no shared mutable state. Overlapping them hides whichever is slower.
     _build_loop = asyncio.get_running_loop()
     graph, system_prompt = await asyncio.gather(
-        _build_loop.run_in_executor(None, build_graph, all_tools),
+        _build_loop.run_in_executor(None, lambda: build_graph(all_tools, org_ai=_org_ai)),
         _build_loop.run_in_executor(
             None,
             lambda: build_system_prompt(
@@ -1288,10 +1305,13 @@ async def run_agent_query(
     prior_files: list[str] | None = None,
     actor_email: str = "",
     actor_role: str = "",
+    org_id: str | None = None,
 ) -> dict:
     """
     Main entry point for the agentic query pipeline.
     Returns {answer, data, chart, route, row_count, files_used, tool_calls}.
+
+    `org_id` (optional): enables per-org AI keys for this request. None => global.
     """
     pipeline_start = time.perf_counter()
     _req_trace_id = uuid.uuid4().hex
@@ -1303,7 +1323,7 @@ async def run_agent_query(
     )
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id, org_id=org_id)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
         return {
@@ -1440,6 +1460,7 @@ async def run_agent_query_stream(
     prior_files: list[str] | None = None,
     actor_email: str = "",
     actor_role: str = "",
+    org_id: str | None = None,
 ) -> AsyncIterator[dict]:
     """
     Streaming variant of run_agent_query.
@@ -1460,7 +1481,7 @@ async def run_agent_query_stream(
     )
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id, org_id=org_id)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
         yield {

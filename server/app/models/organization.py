@@ -35,12 +35,40 @@ class Organization(Base):
         ForeignKey("container_configs.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Org-RBAC overhaul:
+    # The user who owns / created this organization (org-level super-admin).
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Onboarding lifecycle state machine.
+    # e.g. 'created' | 'container_provisioned' | 'ai_configured' | 'completed'.
+    onboarding_state: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="created"
+    )
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # URL- and blob-safe unique slug derived from the org name.
+    slug: Mapped[str | None] = mapped_column(
+        String(255), unique=True, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    container: Mapped["ContainerConfig | None"] = relationship("ContainerConfig")
-    users: Mapped[list["User"]] = relationship("User", back_populates="organization")
+    container: Mapped["ContainerConfig | None"] = relationship(
+        "ContainerConfig", foreign_keys=[container_id]
+    )
+    users: Mapped[list["User"]] = relationship(
+        "User",
+        back_populates="organization",
+        foreign_keys="User.organization_id",
+    )
+    owner: Mapped["User | None"] = relationship(
+        "User", foreign_keys=[owner_user_id]
+    )
 
 
 # Late imports to break circular references

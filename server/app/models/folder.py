@@ -21,6 +21,17 @@ class Folder(Base):
     container_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("container_configs.id", ondelete="CASCADE"), nullable=True
     )
+    # Org-RBAC overhaul: which organization this folder belongs to.
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    # Structural role of the folder: 'org_root' | 'domain' | 'generic'.
+    folder_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="generic"
+    )
     # Domain tag (PHASE 15): optional single label (e.g. 'finance', 'hr').
     # NULL means the folder is in no domain → always visible to all users.
     domain_tag: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)

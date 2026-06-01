@@ -17,7 +17,17 @@ class User(Base):
     )
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     picture: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Local email+password auth. NULL for Google-SSO users (org owners stay null).
+    hashed_password: Mapped[str | None] = mapped_column(String, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Org-RBAC overhaul: how this user authenticated. 'google' | 'local' | etc.
+    auth_provider: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="google"
+    )
+    # Platform-level superuser (cross-organization). Distinct from per-org is_admin.
+    is_platform_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True
+    )
     # Role label exposed to the client so the UI can adapt.
     # Allowed values: "user" | "manager" | "developer" | "admin".
     # `is_admin` remains the source of truth for backend permission checks;

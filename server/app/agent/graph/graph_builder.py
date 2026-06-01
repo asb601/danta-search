@@ -60,12 +60,17 @@ def _should_escalate_to_primary(messages: list) -> bool:
     return False  # turn 1, no prior tool calls — mini handles intent + first SQL
 
 
-def build_agent_node(all_tools: list):
-    """Create the async agent node closure with all tools pre-bound."""
+def build_agent_node(all_tools: list, org_ai: dict | None = None):
+    """Create the async agent node closure with all tools pre-bound.
+
+    `org_ai` is an optional pre-resolved per-org AI settings dict (from
+    org_ai_resolver). When present (and ORG_AI_KEYS_ENABLED with an OrgAISettings
+    row), the agent uses the org's keys/deployment; otherwise the global client.
+    """
     # Bind tools once at graph-construction time — avoids repeated LangChain
     # tool-schema serialisation on every agent iteration (typically 2-4x per request).
     _ = get_llm  # kept for import compatibility
-    _active_llm = get_llm_mini()
+    _active_llm = get_llm_mini(org_ai)
     _llm_with_tools = _active_llm.bind_tools(all_tools)
 
     async def agent_node(state: AgentState) -> dict:
@@ -372,15 +377,19 @@ def route(state: AgentState) -> Literal["tools", "broaden_nudge", "__end__"]:
     return END
 
 
-def build_graph(all_tools: list) -> Any:
-    """Build a fresh compiled StateGraph per request."""
+def build_graph(all_tools: list, org_ai: dict | None = None) -> Any:
+    """Build a fresh compiled StateGraph per request.
+
+    `org_ai` (optional) is forwarded to the agent node so per-org AI keys are
+    used when available. None => global client (ingestion + non-org paths).
+    """
     # handle_tool_errors=True converts ANY unhandled tool exception into a
     # ToolMessage error string instead of crashing the graph.  Without this,
     # only ToolInvocationError is caught; all other exceptions (SQLAlchemy,
     # network, etc.) propagate up and kill the entire chain, showing the user
     # "Failed to process query. Please try again."
     tool_node = ToolNode(all_tools, handle_tool_errors=True)
-    agent_node = build_agent_node(all_tools)
+    agent_node = build_agent_node(all_tools, org_ai=org_ai)
 
     builder = StateGraph(AgentState)
     builder.add_node("agent", agent_node)

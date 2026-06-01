@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, ForeignKey, Text
+from sqlalchemy import String, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -21,6 +21,22 @@ class ContainerConfig(Base):
     )
     created_by: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # Org-RBAC overhaul: which organization owns this container.
+    # Enables an org to have multiple containers (multi-container support).
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    # Storage backend kind for this container. 'azure_blob' | 's3' | etc.
+    storage_kind: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="azure_blob"
+    )
+    # Whether this is the org's primary / default container.
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

@@ -7,6 +7,8 @@ Access request lifecycle:
 """
 from __future__ import annotations
 
+import re
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,10 +25,32 @@ from app.core.email import (
     send_email,
 )
 from app.core.logger import auth_logger
-from app.dependencies import get_current_user, require_admin
+from app.dependencies import get_current_user, require_admin, require_platform_admin
 from app.models.access_request import AccessRequest
+from app.models.organization import Organization
 from app.models.user import User
 from sqlalchemy import update
+
+
+# Blob-/URL-safe slug (mirrors api/v1/onboarding.py::_slugify).
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(name: str) -> str:
+    slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")
+    return slug or f"org-{uuid.uuid4().hex[:8]}"
+
+
+async def _unique_org_slug(base_name: str, db: AsyncSession) -> str:
+    base_slug = _slugify(base_name)
+    slug = base_slug
+    n = 1
+    while (
+        await db.execute(select(Organization.id).where(Organization.slug == slug))
+    ).scalar_one_or_none() is not None:
+        n += 1
+        slug = f"{base_slug}-{n}"
+    return slug
 
 router = APIRouter(prefix="/access-requests", tags=["access"])
 
@@ -35,6 +59,15 @@ router = APIRouter(prefix="/access-requests", tags=["access"])
 
 class AccessRequestIn(BaseModel):
     message: str | None = None
+
+
+class ApproveRequestIn(BaseModel):
+    # "owner" → grant org_owner (creates an Organization; Google-SSO client).
+    # "admin" → grant platform-side internal staff (no organization).
+    role: str
+    # Optional org name used when role == "owner"; falls back to the
+    # requester's email local-part if omitted.
+    org_name: str | None = None
 
 
 class AccessRequestOut(BaseModel):
@@ -151,22 +184,73 @@ async def list_access_requests(
 @router.patch("/{request_id}/approve")
 async def approve_request(
     request_id: str,
-    admin: User = Depends(require_admin),
+    body: ApproveRequestIn,
+    admin: User = Depends(require_platform_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    """
+    Approve an access request and assign a role (platform admin only).
+
+    body.role:
+      "owner" → requester is a CLIENT. Promotes them to org_owner (Google-SSO),
+                creates a new Organization (owner_user_id = user, slug from
+                org_name or the user's email local-part, onboarding_state='created'),
+                and binds user.organization_id to it. The owner is then forced
+                through onboarding by the hard gate.
+      "admin" → requester is internal DANTA staff. Promotes them to a platform
+                admin (is_platform_admin = True). No organization is created.
+    """
+    role = (body.role or "").strip().lower()
+    if role not in ("owner", "admin"):
+        raise HTTPException(400, detail="role must be one of: 'owner', 'admin'")
+
     req = await _get_request(request_id, db)
-    req.status       = "approved"
-    req.reviewed_at  = datetime.now(timezone.utc)
-    req.reviewed_by_id = admin.id
-    # Set allowed_domains = [] (empty = approved, unrestricted)
-    # This lets the frontend layout know the user has been cleared through onboarding
-    await db.execute(
-        update(User).where(User.id == req.user_id).values(allowed_domains=[])
-    )
-    await db.commit()
+    user = await db.get(User, req.user_id)
+    if user is None:
+        raise HTTPException(404, detail="Requesting user not found")
+
+    new_org_id: str | None = None
+
+    try:
+        if role == "owner":
+            # CLIENT: org owner, Google-SSO, gets a fresh organization.
+            org_name = (body.org_name or "").strip() or (user.email or "").split("@")[0]
+            slug = await _unique_org_slug(org_name, db)
+            org = Organization(
+                name=org_name,
+                owner_user_id=user.id,
+                slug=slug,
+                onboarding_state="created",
+            )
+            db.add(org)
+            await db.flush()  # populate org.id within the transaction
+            new_org_id = org.id
+
+            user.role = "org_owner"
+            user.is_admin = True
+            user.auth_provider = "google"
+            user.organization_id = org.id
+        else:  # role == "admin"
+            # Internal DANTA staff: platform-side admin, no organization.
+            user.role = "admin"
+            user.is_platform_admin = True
+            user.is_admin = True
+
+        # Cleared through access: empty allowed_domains = unrestricted.
+        user.allowed_domains = []
+
+        req.status = "approved"
+        req.reviewed_at = datetime.now(timezone.utc)
+        req.reviewed_by_id = admin.id
+
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
     auth_logger.info("access_approved", request_id=request_id,
-                     user_id=req.user_id, by=admin.email)
+                     user_id=req.user_id, by=admin.email,
+                     granted_role=role, org_id=new_org_id)
 
     settings = get_settings()
     html = access_approved_user_email(

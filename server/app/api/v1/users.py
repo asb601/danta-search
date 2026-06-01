@@ -17,7 +17,23 @@ from app.schemas.user import UserOut
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-_VALID_ROLES = {"admin", "developer", "manager", "user"}
+# Org-RBAC v2 canonical roles.
+_VALID_ROLES = {"platform_admin", "org_owner", "org_admin", "manager", "user"}
+
+# Legacy role aliases accepted during the transition → mapped to canonical.
+_ROLE_ALIASES = {
+    "developer": "manager",
+    "admin": "org_admin",
+}
+
+# Roles that imply org-level admin authority (sync is_admin = True).
+_ADMIN_ROLES = {"platform_admin", "org_owner", "org_admin"}
+
+
+def _normalize_role(role: str) -> str | None:
+    """Map a submitted role to its canonical form, or None if invalid."""
+    role = _ROLE_ALIASES.get(role, role)
+    return role if role in _VALID_ROLES else None
 
 
 class _MeDomainsBody(BaseModel):
@@ -155,17 +171,30 @@ async def set_user_role(
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot change your own role")
 
-    if body.role not in _VALID_ROLES:
-        raise HTTPException(status_code=422, detail=f"role must be one of {sorted(_VALID_ROLES)}")
+    canonical_role = _normalize_role(body.role)
+    if canonical_role is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"role must be one of {sorted(_VALID_ROLES)} (or a legacy alias {sorted(_ROLE_ALIASES)})",
+        )
 
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Org owners MUST be Google-authenticated — refuse to promote a non-google user.
+    if canonical_role == "org_owner" and getattr(user, "auth_provider", None) != "google":
+        raise HTTPException(
+            status_code=400,
+            detail="Only Google-authenticated users can be made organization owners",
+        )
+
     old_role = user.role
     old_is_admin = user.is_admin
-    user.role = body.role
-    user.is_admin = body.role == "admin"
+    user.role = canonical_role
+    # Sync legacy backend permission flags from the canonical role.
+    user.is_admin = canonical_role in _ADMIN_ROLES
+    user.is_platform_admin = canonical_role == "platform_admin"
     await db.commit()
 
     auth_logger.info(
@@ -174,7 +203,7 @@ async def set_user_role(
         admin_id=current_user.id,
         admin_email=current_user.email,
         old_role=old_role,
-        role=body.role,
+        role=canonical_role,
         old_is_admin=old_is_admin,
         is_admin=user.is_admin,
     )
@@ -191,7 +220,7 @@ async def set_user_role(
             target_user_name=user.name,
             details={
                 "old_role": old_role,
-                "new_role": body.role,
+                "new_role": canonical_role,
                 "old_is_admin": old_is_admin,
                 "new_is_admin": user.is_admin,
             },

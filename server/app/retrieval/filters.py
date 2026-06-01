@@ -41,7 +41,9 @@ Public API
     permission_clause(user_id, is_admin) -> ColumnElement
     date_overlap_clause(date_from, date_to) -> ColumnElement | None
     domain_clause(allowed_domains) -> ColumnElement | None
-    build_base_query(user_id, is_admin, date_from, date_to, allowed_domains) -> Select
+    org_clause(organization_id) -> ColumnElement | None
+    build_base_query(user_id, is_admin, date_from, date_to, allowed_domains,
+                     container_id, organization_id) -> Select
 """
 from __future__ import annotations
 
@@ -50,6 +52,7 @@ from datetime import date
 from sqlalchemy import and_, or_, select
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.models.container import ContainerConfig
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
@@ -171,6 +174,33 @@ def domain_clause(allowed_domains: list[str] | None) -> ColumnElement | None:
 
 
 # ---------------------------------------------------------------------------
+# Stage 5 — Organization filter (Org-RBAC v2)
+# ---------------------------------------------------------------------------
+
+def org_clause(organization_id: str | None) -> ColumnElement | None:
+    """
+    Return a WHERE fragment restricting FileMetadata to files whose container
+    belongs to the given organization.
+
+    Returns None when organization_id is None (no restriction) — so callers
+    that omit it are completely unaffected.
+
+    Implementation mirrors domain_clause: a sub-select on container_configs
+    avoids an extra JOIN in the calling query. FileMetadata.container_id is
+    matched against the set of ContainerConfig.id rows owned by the org.
+    """
+    if not organization_id:
+        return None
+
+    org_container_subq = (
+        select(ContainerConfig.id)
+        .where(ContainerConfig.organization_id == organization_id)
+        .scalar_subquery()
+    )
+    return FileMetadata.container_id.in_(org_container_subq)
+
+
+# ---------------------------------------------------------------------------
 # Combined helper — builds the base SELECT used by all retrieval stages
 # ---------------------------------------------------------------------------
 
@@ -181,6 +211,7 @@ def build_base_query(
     date_to: date | None = None,
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
+    organization_id: str | None = None,
 ) -> "Select":
     """
     Return a SELECT on FileMetadata that:
@@ -189,8 +220,10 @@ def build_base_query(
       3. Applies date overlap filter (stage 3) if date_from/date_to given
       4. Applies domain filter (stage 4) if allowed_domains given
       5. Applies container filter (chat picker) if container_id given
+      6. Applies organization filter (Org-RBAC v2) if organization_id given
 
-    Callers add their own WHERE / ORDER BY / LIMIT on top.
+    Callers add their own WHERE / ORDER BY / LIMIT on top. The organization_id
+    param is additive — callers passing only container_id are unaffected.
     """
     q = (
         select(FileMetadata)
@@ -208,5 +241,9 @@ def build_base_query(
 
     if container_id:
         q = q.where(FileMetadata.container_id == container_id)
+
+    org_filter = org_clause(organization_id)
+    if org_filter is not None:
+        q = q.where(org_filter)
 
     return q

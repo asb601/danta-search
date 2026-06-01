@@ -29,6 +29,7 @@ from app.api.v1.logs import router as logs_router
 from app.api.v1.access import router as access_router
 from app.api.v1.organizations import router as organizations_router
 from app.api.v1.dashboards import router as dashboards_router
+from app.api.v1.onboarding import router as onboarding_router
 import app.models.file  # ensure File table is created
 import app.models.access_request  # ensure AccessRequest table is created
 import app.models.container  # ensure ContainerConfig table is created
@@ -173,6 +174,25 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("semantic_contract_migration_failed", error=str(exc)[:300])
 
+    # Multi-tenant Org/RBAC overhaul — additive, idempotent. Order matters:
+    # multi_container (3) backfills container.organization_id; folder_scope (4)
+    # backfills folder.organization_id FROM that, so 3 must precede 4.
+    for _mod_name, _label in [
+        ("org_rbac_users_upgrade", "org_rbac_users"),
+        ("org_rbac_org_upgrade", "org_rbac_org"),
+        ("org_multi_container_upgrade", "org_multi_container"),
+        ("org_folder_scope_upgrade", "org_folder_scope"),
+        ("manager_domain_assignment_upgrade", "manager_domain_assignment"),
+        ("org_ai_settings_upgrade", "org_ai_settings"),
+        ("platform_admin_grant_upgrade", "platform_admin_grant"),
+        ("local_auth_upgrade", "local_auth"),
+    ]:
+        try:
+            _mod = __import__(f"app.migrations.{_mod_name}", fromlist=["migrate"])
+            await _mod.migrate()
+        except Exception as exc:
+            chat_logger.warning("org_rbac_migration_failed", migration=_label, error=str(exc)[:300])
+
     # Drop legacy audit_logs table — all audit events now go to server_logs
     from app.migrations.drop_audit_logs import migrate as _drop_audit_logs
     try:
@@ -218,6 +238,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from app.core.onboarding_gate import onboarding_gate_middleware
+
+# HARD ONBOARDING GATE — blocks un-onboarded org_owners from all /api routes
+# except onboarding/auth/health. Registered after log_requests so log_requests
+# remains the outermost middleware and still records the 403.
+app.middleware("http")(onboarding_gate_middleware)
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -269,6 +297,7 @@ app.include_router(logs_router, prefix="/api")
 app.include_router(access_router, prefix="/api")
 app.include_router(organizations_router, prefix="/api")
 app.include_router(dashboards_router, prefix="/api")
+app.include_router(onboarding_router, prefix="/api")
 
 
 @app.get("/api/health")

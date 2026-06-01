@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session, get_db
-from app.core.logger import upload_logger, blob_logger, db_logger, ingest_logger
+from app.core.logger import upload_logger, blob_logger, db_logger, ingest_logger, folder_logger
 from app.dependencies import get_current_user, require_admin, require_developer
 from app.services.audit_log import record_audit_event_safe
 from app.services.ingestion_config import IngestStatus, is_auto_ingest_file, parquet_blob_path_for
@@ -118,10 +118,12 @@ async def get_upload_url(
     start = time.perf_counter()
     upload_logger.info("sas_token_requested", filename=body.filename, container_id=body.container_id)
 
-    # Domain scope: block upload to folders outside developer's allowed domains
-    if body.folder_id and admin.allowed_domains:
+    # Domain scope: block upload to folders outside developer's allowed domains.
+    # Also capture the target folder so we can root the blob under its prefix.
+    folder: Folder | None = None
+    if body.folder_id:
         folder = await db.get(Folder, body.folder_id)
-        if folder and folder.domain_tag and folder.domain_tag not in admin.allowed_domains:
+        if folder and folder.domain_tag and admin.allowed_domains and folder.domain_tag not in admin.allowed_domains:
             raise HTTPException(status_code=403, detail="Not authorized to upload to this domain folder")
 
     config = await _get_container_config(db, body.container_id)
@@ -132,7 +134,18 @@ async def get_upload_url(
 
     file_id = str(uuid.uuid4())
     safe_filename = body.filename.replace(" ", "_")
-    blob_name = f"{file_id[:8]}_{safe_filename}"
+    # Root the blob under the target folder's virtual prefix when a folder is
+    # given (additive — only new folder uploads change layout). Uploads with no
+    # folder keep today's flat name. Prefix resolution is non-fatal.
+    leaf_name = f"{file_id[:8]}_{safe_filename}"
+    blob_name = leaf_name
+    if folder is not None:
+        try:
+            prefix = await _folder_blob_prefix(db, folder)
+            if prefix:
+                blob_name = f"{prefix}/{leaf_name}"
+        except Exception as exc:  # noqa: BLE001 — never block upload on prefix calc
+            upload_logger.warning("folder_blob_prefix_failed", folder_id=body.folder_id, error=str(exc)[:200])
 
     sas_token = generate_blob_sas(
         account_name=account_name,
@@ -193,9 +206,66 @@ async def _resolve_folder_path(
         )
         db.add(new_folder)
         await db.flush()  # populate id without ending the transaction
+        # Materialize the corresponding virtual folder in Azure Blob (non-fatal).
+        await _materialize_folder_blob(db, new_folder)
         current_parent = new_folder.id
 
     return current_parent
+
+
+async def _folder_blob_prefix(db: AsyncSession, folder: Folder) -> str:
+    """Compute the virtual blob prefix for a folder by walking its ancestor
+    chain (root → leaf), joined by '/'. e.g. 'finance/2025/q1'."""
+    names: list[str] = []
+    cursor: Folder | None = folder
+    seen: set[str] = set()
+    while cursor is not None and cursor.id not in seen:
+        seen.add(cursor.id)
+        if cursor.name:
+            names.append(cursor.name)
+        cursor = await db.get(Folder, cursor.parent_id) if cursor.parent_id else None
+    names.reverse()
+    return "/".join(p.strip("/").replace(" ", "_") for p in names if p.strip("/"))
+
+
+async def _materialize_folder_blob(db: AsyncSession, folder: Folder) -> None:
+    """Create the corresponding virtual 'folder' in Azure Blob Storage by
+    writing a zero-byte placeholder blob named '<prefix>/'.
+
+    Azure Blob has no real folders — a folder is a virtual prefix, so we
+    materialize it with an empty marker blob so it shows up in the storage
+    browser and uploads can be organized under it.
+
+    NON-FATAL: any failure only logs a warning — DB folder creation must never
+    fail because of a blob error. IDEMPOTENT: overwrite=True.
+    """
+    if not folder.container_id:
+        return
+    try:
+        config = await db.get(ContainerConfig, folder.container_id)
+        if not config or not config.connection_string:
+            return
+        prefix = await _folder_blob_prefix(db, folder)
+        if not prefix:
+            return
+        marker = f"{prefix}/"
+
+        blob_service = await asyncio.to_thread(
+            BlobServiceClient.from_connection_string, config.connection_string
+        )
+        container_client = await asyncio.to_thread(
+            blob_service.get_container_client, config.container_name
+        )
+        await asyncio.to_thread(
+            container_client.upload_blob, marker, b"", overwrite=True
+        )
+        folder_logger.info(
+            "blob_folder_materialized", folder_id=folder.id, blob_prefix=marker
+        )
+    except Exception as exc:  # noqa: BLE001 — never let a blob error break folder creation
+        folder_logger.warning(
+            "blob_folder_materialize_failed", folder_id=folder.id, error=str(exc)
+        )
 
 
 @router.post("/confirm-upload", response_model=FileOut)

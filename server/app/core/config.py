@@ -69,6 +69,21 @@ class Settings(BaseSettings):
     INGESTION_POLICY_FILE: str = "config/ingestion_policy.json"
     INGESTION_POLICY_JSON: str = ""
 
+    # ── Org-RBAC v2 rollout flags (Lane B) ──────────────────────────────────
+    # All default to a backward-compatible posture: with these defaults,
+    # runtime behavior is byte-identical to the pre-overhaul system.
+    #
+    # RBAC_V2_ENFORCE — when True, resolve_chat_scope applies the new org+domain
+    #   scoping via org_access. Default False keeps TODAY'S scoping exactly.
+    # RBAC_V2_SHADOW  — when True (and ENFORCE False), additionally log what the
+    #   new org+domain scope WOULD be, without changing behavior.
+    # ORG_AI_KEYS_ENABLED — gate for per-org AI key resolution (OrgAISettings).
+    # ONBOARDING_REQUIRED — gate for enforcing org onboarding completion.
+    RBAC_V2_ENFORCE: bool = True
+    RBAC_V2_SHADOW: bool = False
+    ORG_AI_KEYS_ENABLED: bool = True
+    ONBOARDING_REQUIRED: bool = True
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 

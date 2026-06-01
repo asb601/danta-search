@@ -160,10 +160,31 @@ async def create_folder(
     start = time.perf_counter()
     folder_logger.info("create_started", name=body.name, parent_id=body.parent_id)
 
-    folder = Folder(name=body.name, parent_id=body.parent_id, owner_id=admin.id)
+    # Inherit container/domain scope from the parent so child folders stay in the
+    # same tenant + domain (and so we can materialize the blob prefix).
+    container_id: str | None = None
+    domain_tag: str | None = None
+    if body.parent_id:
+        parent = await db.get(Folder, body.parent_id)
+        if parent:
+            container_id = parent.container_id
+            domain_tag = parent.domain_tag
+
+    folder = Folder(
+        name=body.name,
+        parent_id=body.parent_id,
+        owner_id=admin.id,
+        container_id=container_id,
+        domain_tag=domain_tag,
+    )
     db.add(folder)
     await db.commit()
     await db.refresh(folder)
+
+    # Materialize the corresponding virtual folder in Azure Blob (non-fatal,
+    # idempotent). DB folder creation must never fail because of a blob error.
+    from app.api.v1.files import _materialize_folder_blob
+    await _materialize_folder_blob(db, folder)
 
     folder_logger.info("create_complete", folder_id=folder.id, duration_ms=round((time.perf_counter() - start) * 1000, 2))
     return folder

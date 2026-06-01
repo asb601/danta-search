@@ -463,15 +463,53 @@ async def create_domain(
     if existing:
         raise HTTPException(status_code=409, detail=f"Domain '{name}' already exists")
 
-    folder = Folder(
-        id=str(_uuid.uuid4()),
-        name=name,
-        owner_id=admin.id,
-        parent_id=None,
-        container_id=None,
-        domain_tag=name,
-    )
-    db.add(folder)
+    # Org-RBAC overhaul (additive): when the admin belongs to an organization
+    # that already has an org-root folder, create the domain folder UNDER that
+    # root with organization_id + container_id + folder_kind='domain' and
+    # materialize the blob folder. Otherwise fall back to the legacy bare
+    # top-level folder (container_id=None) so this keeps working without an org.
+    from app.models.organization import Organization as _Org
+
+    org_id = getattr(admin, "organization_id", None)
+    org_root: Folder | None = None
+    if org_id:
+        org_root = (await db.execute(
+            select(Folder).where(
+                Folder.organization_id == org_id,
+                Folder.folder_kind == "org_root",
+            ).limit(1)
+        )).scalar_one_or_none()
+
+    if org_root is not None:
+        folder = Folder(
+            id=str(_uuid.uuid4()),
+            name=name,
+            owner_id=admin.id,
+            parent_id=org_root.id,
+            container_id=org_root.container_id,
+            organization_id=org_id,
+            folder_kind="domain",
+            domain_tag=name,
+        )
+        db.add(folder)
+        await db.flush()
+        # Materialize the corresponding virtual blob folder (non-fatal).
+        try:
+            from app.api.v1.files import _materialize_folder_blob
+            await _materialize_folder_blob(db, folder)
+        except Exception as exc:  # noqa: BLE001
+            ingest_logger.warning("create_domain_blob_failed", domain=name, error=str(exc)[:200])
+    else:
+        # Legacy fallback: bare top-level domain folder, no blob.
+        folder = Folder(
+            id=str(_uuid.uuid4()),
+            name=name,
+            owner_id=admin.id,
+            parent_id=None,
+            container_id=None,
+            domain_tag=name,
+        )
+        db.add(folder)
     await db.commit()
     # Invalidate catalog so this new domain folder is reflected in chat scope
     # immediately (default 5-min TTL would otherwise hide it from users).

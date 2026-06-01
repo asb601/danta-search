@@ -43,6 +43,7 @@ async def _get_or_create_folder_path(
     container_id: str,
     owner_id: str,
     db: AsyncSession,
+    organization_id: str | None = None,
 ) -> str | None:
     """Recursively create folder hierarchy from blob path segments. Return deepest folder id."""
     if not path_parts:
@@ -64,6 +65,7 @@ async def _get_or_create_folder_path(
                 parent_id=parent_id,
                 owner_id=owner_id,
                 container_id=container_id,
+                organization_id=organization_id,
             )
             db.add(folder)
             await db.flush()
@@ -167,7 +169,8 @@ async def sync_container(container_id: str, user_id: str) -> None:
                 folder_parts = parts[:-1]
 
                 parent_folder_id = await _get_or_create_folder_path(
-                    folder_parts, container_id, user_id, db
+                    folder_parts, container_id, user_id, db,
+                    organization_id=config.organization_id,
                 )
 
                 file = File(
@@ -335,11 +338,29 @@ async def create_container(
             detail=f"Cannot connect to Azure container '{body.container_name}': {e}",
         )
 
+    # Org-RBAC overhaul (additive): inherit the creator's organization and mark
+    # this container primary when the org has no primary container yet. For
+    # platform admins (no organization_id), both stay null/false as before.
+    org_id = getattr(admin, "organization_id", None)
+    is_primary = False
+    if org_id:
+        has_primary = (
+            await db.execute(
+                select(ContainerConfig.id).where(
+                    ContainerConfig.organization_id == org_id,
+                    ContainerConfig.is_primary.is_(True),
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        is_primary = has_primary is None
+
     config = ContainerConfig(
         name=body.name,
         container_name=body.container_name,
         connection_string=body.connection_string,
         created_by=admin.id,
+        organization_id=org_id,
+        is_primary=is_primary,
         semantic_config=_validate_semantic_config(body.semantic_config),
     )
     db.add(config)
