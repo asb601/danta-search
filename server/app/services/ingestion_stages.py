@@ -48,6 +48,24 @@ def _file_ext(file: File) -> str:
     return Path(file.name).suffix.lower()
 
 
+def _escalation_policy() -> tuple[bool, float]:
+    """Return (escalation_enabled, confidence_threshold) from ingestion policy.
+
+    Defaults to (False, 0.55). When disabled, every escalation hook below is a
+    no-op and behaviour is byte-identical to today.
+    """
+    try:
+        from app.services.ingestion_policy import get_ingestion_policy  # noqa: PLC0415
+
+        pol = get_ingestion_policy()
+        enabled = bool(pol.lookup(("model_pool", "escalation_enabled")))
+        raw_threshold = pol.lookup(("model_pool", "escalation_confidence_threshold"))
+        threshold = float(raw_threshold) if raw_threshold is not None else 0.55
+    except Exception:  # noqa: BLE001 — policy failure must never block ingestion
+        return False, 0.55
+    return enabled, threshold
+
+
 def _next(payload: Payload, *, stage: str, **extra: Any) -> Payload:
     merged = dict(payload)
     merged.update(extra)
@@ -412,6 +430,30 @@ async def ai_description_stage(payload: Payload) -> Payload:
             column_glossary=column_glossary or None,
         )
 
+        # ── Escalation hook (gated; default OFF => no-op) ─────────────────────
+        # generate_file_description returns the empty-fallback shape (summary ==
+        # filename, no good_for/key_metrics) when the mini call's JSON parse
+        # failed after its inner retry. Retry ONCE at the high tier.
+        escalation_enabled, _ = _escalation_policy()
+        if escalation_enabled:
+            mini_failed = (
+                description.get("summary", "") == file.name
+                and not description.get("good_for")
+                and not description.get("key_metrics")
+            )
+            if mini_failed:
+                ingest_logger.info(
+                    "ingest_stage_escalation", stage=stage, file_id=file_id, reason="json_parse_failed"
+                )
+                description = await generate_file_description(
+                    columns_info=metadata.columns_info or [],
+                    sample_rows=metadata.sample_rows or [],
+                    filename=file.name,
+                    domain_tag=domain_tag,
+                    column_glossary=column_glossary or None,
+                    tier="high",
+                )
+
         metadata.ai_description = description.get("summary", "")
         metadata.good_for = description.get("good_for", [])
         metadata.key_metrics = description.get("key_metrics", [])
@@ -482,15 +524,42 @@ async def ontology_stage(payload: Payload) -> Payload:
                 container_name=container.container_name,
             )
 
-        from app.services.column_role_resolver import resolve_column_roles  # noqa: PLC0415
-
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
-        col_roles, role_src, role_evidence = await resolve_column_roles(
-            columns_info=metadata.columns_info or [],
-            filename=file.name,
-            glossary=column_glossary or None,
-            semantic_config=container.semantic_config or None,
-        )
+
+        escalation_enabled, _ = _escalation_policy()
+        if escalation_enabled:
+            from app.services.column_role_resolver import (  # noqa: PLC0415
+                resolve_column_roles_with_signal,
+            )
+
+            col_roles, role_src, role_evidence, parse_failed = await resolve_column_roles_with_signal(
+                columns_info=metadata.columns_info or [],
+                filename=file.name,
+                glossary=column_glossary or None,
+                semantic_config=container.semantic_config or None,
+            )
+            # Escalation hook: mini call failed JSON parse after inner retry —
+            # retry ONCE at the high tier.
+            if parse_failed:
+                ingest_logger.info(
+                    "ingest_stage_escalation", stage=stage, file_id=file_id, reason="json_parse_failed"
+                )
+                col_roles, role_src, role_evidence, _ = await resolve_column_roles_with_signal(
+                    columns_info=metadata.columns_info or [],
+                    filename=file.name,
+                    glossary=column_glossary or None,
+                    semantic_config=container.semantic_config or None,
+                    tier="high",
+                )
+        else:
+            from app.services.column_role_resolver import resolve_column_roles  # noqa: PLC0415
+
+            col_roles, role_src, role_evidence = await resolve_column_roles(
+                columns_info=metadata.columns_info or [],
+                filename=file.name,
+                glossary=column_glossary or None,
+                semantic_config=container.semantic_config or None,
+            )
         metadata.column_semantic_roles = col_roles or None
         metadata.role_source = role_src
         metadata.column_role_evidence = role_evidence or None
@@ -583,6 +652,34 @@ async def erp_classification_stage(payload: Payload) -> Payload:
                 ai_description=metadata.ai_description,
                 column_semantic_roles=metadata.column_semantic_roles or {},
             )
+
+            # ── Escalation hook (gated; default OFF => no-op) ─────────────────
+            # Re-run ONCE at the high tier when the mini classification is below
+            # the confidence threshold OR produced no usable result (invalid
+            # JSON after its inner retry => source != "llm").
+            escalation_enabled, threshold = _escalation_policy()
+            if escalation_enabled:
+                low_confidence = clf.confidence < threshold
+                mini_failed = clf.source != "llm"
+                if low_confidence or mini_failed:
+                    ingest_logger.info(
+                        "ingest_stage_escalation",
+                        stage=stage,
+                        file_id=file_id,
+                        reason="low_confidence" if low_confidence else "json_parse_failed",
+                        confidence=clf.confidence,
+                    )
+                    escalated = await classify_file(
+                        filename=file.name,
+                        columns_info=metadata.columns_info or [],
+                        sample_rows=metadata.sample_rows or [],
+                        ai_description=metadata.ai_description,
+                        column_semantic_roles=metadata.column_semantic_roles or {},
+                        tier="high",
+                    )
+                    # Keep the better result; never regress to a less-reliable one.
+                    if escalated.is_reliable or escalated.confidence >= clf.confidence:
+                        clf = escalated
 
         # Upsert one row per file (re-ingest replaces it).
         existing = (

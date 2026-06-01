@@ -352,7 +352,7 @@ Files are ingested via:
    - row/col counts, quality score, schema JSON
 6. Generate AI description (LLM call — gpt-4o-mini):
    - business-friendly description of what the file contains
-7. Generate embeddings (Azure OpenAI text-embedding-3-large):
+7. Generate embeddings (Azure OpenAI text-embedding-3-small, 1536-dim):
    - embed the description + schema summary
 8. Index in OpenSearch (opensearch_indexer.py):
    - BM25 text fields: display_name, description, column_names

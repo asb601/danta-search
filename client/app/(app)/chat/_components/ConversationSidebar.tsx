@@ -106,17 +106,27 @@ export function ConversationSidebar({
   const grouped = groupByTime(conversations);
   let globalIdx = 0;
 
-  if (!isOpen) return null;
-
   return (
     <AnimatePresence>
+      {isOpen && (
+      <>
+        {/* Mobile backdrop */}
+        <motion.div
+          key="sidebar-backdrop"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2 }}
+          className="fixed inset-0 z-30 bg-black/30 backdrop-blur-[2px] sm:hidden"
+          onClick={onToggle}
+        />
       <motion.div
         key="conv-sidebar"
         variants={sidebarVariants}
         initial="hidden"
         animate="show"
         exit="exit"
-        className="w-[240px] shrink-0 border-r border-[#e5e5e5] bg-[#f9f9f9] flex flex-col h-full overflow-hidden"
+        className="fixed sm:relative inset-y-0 left-0 z-40 sm:z-auto w-[260px] sm:w-[240px] shrink-0 border-r border-[#e5e5e5] bg-[#f9f9f9] flex flex-col h-full overflow-hidden shadow-[4px_0_24px_rgba(0,0,0,0.08)] sm:shadow-none"
       >
         {/* Header */}
         <div className="px-3 pt-3.5 pb-2.5 border-b border-[#e5e5e5] flex items-center justify-between gap-2">
@@ -307,6 +317,8 @@ export function ConversationSidebar({
           </AnimatePresence>
         </div>
       </motion.div>
+      </>
+      )}
     </AnimatePresence>
   );
 }

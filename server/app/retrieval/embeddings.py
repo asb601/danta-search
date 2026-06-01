@@ -35,6 +35,59 @@ _lock = threading.Lock()
 
 _EMBED_DIMS = 1536
 
+# ── Embedding pool (flag-gated, default OFF) ───────────────────────────────────
+# Lazily built once. With model_pool.embedding_pool_enabled false (default), this
+# stays None and embed_batch uses the existing single-client path unchanged.
+_embedding_pool = None  # type: ignore[var-annotated]
+_pool_lock = threading.Lock()
+
+
+def _embedding_pool_enabled() -> bool:
+    """True only when the flag is on AND ≥1 embedding deployment is configured.
+
+    Returns today's behaviour (False) on any policy failure, so a misconfigured
+    policy never changes the embedding path.
+    """
+    try:
+        from app.services.ingestion_policy import get_ingestion_policy
+
+        pol = get_ingestion_policy()
+        if not bool(pol.lookup(("model_pool", "embedding_pool_enabled"))):
+            return False
+        raw = pol.lookup(("model_pool", "deployments")) or []
+        from app.core.model_pool import load_deployments
+
+        deployments = load_deployments(raw)
+        return any(d.kind == "embedding" for d in deployments)
+    except Exception:  # noqa: BLE001 — any failure keeps the default single-client path
+        return False
+
+
+def _get_embedding_pool():
+    """Lazily construct the embedding ModelPool (embedding lanes only).
+
+    Returns None when the pool is disabled or no embedding lanes exist, in which
+    case callers use the legacy single-client path.
+    """
+    global _embedding_pool
+    if not _embedding_pool_enabled():
+        return None
+    if _embedding_pool is None:
+        with _pool_lock:
+            if _embedding_pool is None:
+                from app.services.ingestion_policy import get_ingestion_policy
+                from app.core.model_pool import ModelPool, load_deployments
+
+                pol = get_ingestion_policy()
+                raw = pol.lookup(("model_pool", "deployments")) or []
+                deployments = tuple(
+                    d for d in load_deployments(raw) if d.kind == "embedding"
+                )
+                overrides = pol.lookup(("model_pool",))
+                overrides = dict(overrides) if isinstance(overrides, dict) else None
+                _embedding_pool = ModelPool(deployments, overrides=overrides)
+    return _embedding_pool
+
 
 def _get_embedding_client() -> tuple[AsyncAzureOpenAI, str]:
     global _embedding_client, _embedding_deployment
@@ -86,11 +139,17 @@ async def embed_batch(texts: list[str]) -> list[list[float]]:
 
     if cleaned:
         try:
-            client, deployment = _get_embedding_client()
-            resp = await client.embeddings.create(
-                model=deployment,
-                input=cleaned,
-            )
+            # Flag-gated pool path: route through ModelPool.aembed for weighted
+            # selection + 429/timeout failover. Default OFF → legacy single client.
+            pool = _get_embedding_pool()
+            if pool is not None:
+                resp = await pool.aembed(inputs=cleaned)
+            else:
+                client, deployment = _get_embedding_client()
+                resp = await client.embeddings.create(
+                    model=deployment,
+                    input=cleaned,
+                )
             for pos, item in enumerate(resp.data):
                 result[indices_to_embed[pos]] = item.embedding
         except Exception as exc:

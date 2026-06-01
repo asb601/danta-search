@@ -28,7 +28,7 @@ export default function ChatPage() {
   } = useChat();
 
   return (
-    <div className="flex h-full bg-white">
+    <div className="flex h-full bg-white overflow-hidden">
       {/* Conversation sidebar */}
       <ConversationSidebar
         conversations={conversations}
@@ -43,24 +43,27 @@ export default function ChatPage() {
         onSearchChange={setSearchQuery}
       />
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 w-full">
         {/* Top bar */}
         <div className="app-topbar px-3 sm:px-4">
-          <AnimatePresence>
-            {!sidebarOpen && (
-              <motion.button
-                initial={{ opacity: 0, x: -6 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -6 }}
-                transition={{ duration: 0.18 }}
-                onClick={() => setSidebarOpen(true)}
-                className="btn-ghost p-1.5 rounded-lg shrink-0"
-              >
-                <PanelLeft className="w-4 h-4" />
-              </motion.button>
-            )}
-          </AnimatePresence>
-          <ContainerPicker value={selectedContainerId} onChange={setSelectedContainerId} />
+          <div className="flex items-center gap-2 min-w-0">
+            <AnimatePresence>
+              {/* Show toggle always on mobile, only when closed on desktop */}
+              {(!sidebarOpen) && (
+                <motion.button
+                  initial={{ opacity: 0, x: -6 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -6 }}
+                  transition={{ duration: 0.18 }}
+                  onClick={() => setSidebarOpen(true)}
+                  className="btn-ghost p-1.5 rounded-lg shrink-0"
+                >
+                  <PanelLeft className="w-4 h-4" />
+                </motion.button>
+              )}
+            </AnimatePresence>
+            <ContainerPicker value={selectedContainerId} onChange={setSelectedContainerId} />
+          </div>
         </div>
 
         {/* Messages area */}

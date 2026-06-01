@@ -102,6 +102,12 @@ def _make_celery() -> Celery:
         # ── Task routing ─────────────────────────────────────────────────────
         task_routes=celery_task_routes(),
 
+        # When ingestion_features.lane_split is ON, tasks route to ingest_cpu /
+        # ingest_io. Auto-declare those queues on first publish so they exist
+        # without a manual broker setup step. Harmless when lane_split is OFF
+        # (no task ever routes off the normal queue).
+        task_create_missing_queues=True,
+
         # ── Default queue ────────────────────────────────────────────────────
         task_default_queue=settings.INGEST_NORMAL_QUEUE,
     )

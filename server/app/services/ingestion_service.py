@@ -621,12 +621,31 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
             #   • Re-ingest after parquet files were deleted
             #   • Re-ingest after container was removed and re-connected
             if not analytics.parquet_blob_path:
-                asyncio.ensure_future(trigger_parquet_conversion(
-                    file_id=file_id,
-                    blob_path=clean_blob_path,
-                    connection_string=container.connection_string,
-                    container_name=container.container_name,
-                ))
+                # Parquet trigger: flag-gated. Default (celery_parquet_trigger
+                # false) keeps today's in-process asyncio.ensure_future. When true,
+                # enqueue the durable Celery path instead so the conversion survives
+                # a worker restart. The idempotency guard above is unchanged.
+                _use_celery_parquet = False
+                try:
+                    from app.services.ingestion_policy import get_ingestion_policy
+                    _use_celery_parquet = bool(
+                        get_ingestion_policy().lookup(
+                            ("ingestion_features", "celery_parquet_trigger")
+                        )
+                    )
+                except Exception:  # noqa: BLE001 — any failure keeps today's path
+                    _use_celery_parquet = False
+
+                if _use_celery_parquet:
+                    from app.worker.ingest_tasks import run_scoped_ingest
+                    run_scoped_ingest.delay(file_id, "parquet_only")
+                else:
+                    asyncio.ensure_future(trigger_parquet_conversion(
+                        file_id=file_id,
+                        blob_path=clean_blob_path,
+                        connection_string=container.connection_string,
+                        container_name=container.container_name,
+                    ))
             else:
                 ingest_logger.info("step", step="5/5", name="parquet",
                                    status="skipped", reason="parquet_already_exists",

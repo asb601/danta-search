@@ -8,7 +8,7 @@ import time
 
 from app.core.config import get_settings
 from app.core.logger import chat_logger, ingest_logger
-from app.core.openai_client import get_client
+from app.core.openai_client import chat_complete_with_failover, get_chat_client, get_client
 from app.core.token_counter import count_tokens, elapsed_ms, track_and_log
 
 
@@ -97,6 +97,7 @@ async def generate_file_description(
     filename: str,
     domain_tag: str | None = None,
     column_glossary: dict[str, str] | None = None,
+    tier: str = "standard",
 ) -> dict:
     def _run() -> dict:
         settings = get_settings()
@@ -109,7 +110,7 @@ async def generate_file_description(
             for raw in retry_delay_items
             if str(raw).strip()
         ]
-        client, deployment = get_client()
+        _, deployment = get_chat_client(tier=tier)
         cols_for_prompt = [
             {
                 "name": c["name"],
@@ -176,9 +177,9 @@ Sample rows: {json.dumps(sample_rows[:description_sample_rows], default=str)}"""
         response = None
         for _attempt in range(len(retry_delays) + 1):
             try:
-                response = client.chat.completions.create(
-                    model=deployment,
+                response = chat_complete_with_failover(
                     messages=[{"role": "user", "content": prompt}],
+                    tier=tier,
                     max_completion_tokens=max_completion_tokens,
                     temperature=0,
                 )
@@ -376,6 +377,7 @@ async def enrich_semantic_description(
     role_groups: list,
     neighbors: list,
     grain: str | None = None,
+    tier: str = "standard",
 ) -> dict:
     """Generate additional good_for phrases using workflow signals.
 
@@ -394,7 +396,7 @@ async def enrich_semantic_description(
         max_additions = max(
             1, int(getattr(settings, "INGEST_SEMANTIC_ENRICHMENT_MAX_ADDITIONS", 5))
         )
-        client, deployment = get_client()
+        _, deployment = get_chat_client(tier=tier)
 
         groups_section = ""
         if role_groups:
@@ -465,9 +467,9 @@ async def enrich_semantic_description(
         response = None
         for _attempt in range(len(retry_delays) + 1):
             try:
-                response = client.chat.completions.create(
-                    model=deployment,
+                response = chat_complete_with_failover(
                     messages=[{"role": "user", "content": prompt}],
+                    tier=tier,
                     max_completion_tokens=max_completion_tokens,
                     temperature=0,
                 )

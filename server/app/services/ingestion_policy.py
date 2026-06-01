@@ -103,6 +103,14 @@ LEGACY_POLICY_PATHS: dict[str, tuple[str, ...]] = {
     "INGEST_SCHEMA_NOTES_TOKENS": ("dictionary_detection", "notes_tokens"),
     "INGEST_SEMANTIC_ENRICHMENT_MAX_COMPLETION_TOKENS": ("semantic_enrichment", "max_completion_tokens"),
     "INGEST_SEMANTIC_ENRICHMENT_MAX_ADDITIONS": ("semantic_enrichment", "max_additions"),
+    # Huge-client scaling feature flags (all default to today's behavior; flip
+    # one at a time during rollout). See huge_clients.txt Section 9.4.
+    "INGEST_USE_POLARS_CLEANER": ("preprocess", "use_polars_cleaner"),
+    "INGEST_LANE_SPLIT": ("ingestion_features", "lane_split"),
+    "INGEST_CELERY_PARQUET_TRIGGER": ("ingestion_features", "celery_parquet_trigger"),
+    "INGEST_MODEL_POOL_ESCALATION": ("model_pool", "escalation_enabled"),
+    "INGEST_EMBEDDING_POOL_ENABLED": ("model_pool", "embedding_pool_enabled"),
+    "MODEL_POOL_DEPLOYMENTS_JSON": ("model_pool", "deployments"),
 }
 
 _DYNAMIC_DEFAULTS = {
@@ -112,14 +120,50 @@ _DYNAMIC_DEFAULTS = {
     "INGEST_PREPROCESS_CONCURRENCY",
     "INGEST_EXCEL_PREPROCESS_CONCURRENCY",
     "CELERY_WORKER_CONCURRENCY",
+    # Routed through the resource-aware formula so an unset/null policy value
+    # self-tunes to the VM/container instead of a hardcoded fallback.
+    "CELERY_WORKER_PREFETCH_MULTIPLIER",
+}
+
+# Maps the legacy policy/env names that should self-tune onto the keys returned
+# by ``compute_ingestion_knobs``. Names absent here keep their prior behavior.
+_FORMULA_KEY_BY_NAME: dict[str, str] = {
+    "REINGEST_BATCH_SIZE": "reingest_batch_size",
+    "REINGEST_BATCH_DELAY_SECONDS": "reingest_batch_delay_seconds",
+    "PARQUET_CONVERSION_CONCURRENCY": "parquet_conversion_concurrency",
+    "INGEST_PREPROCESS_CONCURRENCY": "preprocess_concurrency",
+    "INGEST_EXCEL_PREPROCESS_CONCURRENCY": "excel_preprocess_concurrency",
+    "CELERY_WORKER_CONCURRENCY": "celery_worker_concurrency",
+    "CELERY_WORKER_PREFETCH_MULTIPLIER": "celery_prefetch_multiplier",
 }
 
 
 def _available_cpu_count() -> int:
-    return max(1, os.cpu_count() or 1)
+    # cgroup-aware via the resource profile, falling back to os.cpu_count().
+    try:
+        from app.services.resource_profile import get_resource_profile
+
+        return max(1, get_resource_profile().cpu_count)
+    except Exception:
+        return max(1, os.cpu_count() or 1)
 
 
 def _available_memory_gib() -> float | None:
+    """Available-RAM signal in GiB, respecting cgroup limits.
+
+    Previously this read ``SC_PHYS_PAGES`` directly, which reports the *host*
+    physical memory and ignores cgroup caps — so inside a container it
+    massively over-reported and oversized memory-bound pools. It now delegates
+    to ``get_resource_profile()`` (cgroup-aware), preserving the float|None
+    return contract.
+    """
+    try:
+        from app.services.resource_profile import get_resource_profile
+
+        return get_resource_profile().ram_available_bytes / (1024 ** 3)
+    except Exception:
+        pass
+
     if not hasattr(os, "sysconf"):
         return None
     try:
@@ -156,7 +200,47 @@ def _default_ingest_parallelism() -> int:
     return max(1, min(cpu_bound, memory_bound, _SANITY_CAP))
 
 
+def _resource_model_overrides() -> dict[str, Any]:
+    """Read the optional ``resource_model`` override block from the policy file.
+
+    These are the tuning constants (reserve_cores, ram_safety, ...) that let ops
+    adjust the sizing formula without a code change. Read directly from the
+    policy file (no get_ingestion_policy() round-trip) to avoid recursion: the
+    policy object calls _dynamic_default during its own value resolution.
+    """
+    try:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        policy_path = _policy_file_path(getattr(settings, "INGESTION_POLICY_FILE", ""))
+        data = _read_json_file(policy_path)
+        block = data.get("resource_model")
+        if not isinstance(block, Mapping):
+            return {}
+        overrides = dict(block)
+        # Policy uses an explicit *_bytes name; map it to the formula key.
+        if "per_proc_overhead_bytes" in overrides:
+            overrides.setdefault("per_proc_overhead", overrides.pop("per_proc_overhead_bytes"))
+        return overrides
+    except Exception:
+        return {}
+
+
 def _dynamic_default(name: str) -> int:
+    """Resource-aware fallback for an auto/null knob.
+
+    For any name that maps to a formula key, return the value computed from the
+    live (cgroup-aware) resource profile, tuned by the policy ``resource_model``
+    overrides. Names without a formula mapping keep their original heuristic.
+    """
+    formula_key = _FORMULA_KEY_BY_NAME.get(name)
+    if formula_key is not None:
+        from app.services.resource_profile import compute_ingestion_knobs, get_resource_profile
+
+        knobs = compute_ingestion_knobs(get_resource_profile(), overrides=_resource_model_overrides())
+        return int(knobs[formula_key])
+
+    # Non-formula dynamic knobs retain their prior, simpler heuristics.
     if name == "INGEST_EXCEL_PREPROCESS_CONCURRENCY":
         return max(1, _default_ingest_parallelism() // 2)
     if name == "REINGEST_BATCH_DELAY_SECONDS":

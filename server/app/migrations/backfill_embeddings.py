@@ -35,6 +35,82 @@ from app.retrieval.embeddings import build_search_text, embed_text
 
 logger = structlog.get_logger("backfill_embeddings")
 
+
+# ---------------------------------------------------------------------------
+# Pool-batched embedding path (flag-gated, default OFF)
+# ---------------------------------------------------------------------------
+
+def _embedding_pool_enabled() -> bool:
+    """True only when model_pool.embedding_pool_enabled is set AND ≥1 embedding
+    deployment is configured. Any failure → False (today's per-row path)."""
+    try:
+        from app.services.ingestion_policy import get_ingestion_policy
+
+        pol = get_ingestion_policy()
+        if not bool(pol.lookup(("model_pool", "embedding_pool_enabled"))):
+            return False
+        from app.core.model_pool import load_deployments
+
+        raw = pol.lookup(("model_pool", "deployments")) or []
+        return any(d.kind == "embedding" for d in load_deployments(raw))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _embed_page_pooled(
+    rows: list[FileMetadata],
+) -> list[tuple[str, list[float] | None, str | None]]:
+    """Embed a whole DB page in one or few pooled requests via embed_batcher.
+
+    Packs the page's search texts into BatchPlan windows bounded by
+    model_pool.embedding_batch_max / embedding_token_budget, then issues one
+    pool.aembed per window (with failover). Returns the SAME per-row
+    (file_id, embedding_or_None, search_text_or_error) tuples the per-row path
+    produces so the caller's write-back loop is unchanged.
+    """
+    from app.core.token_counter import count_tokens
+    from app.core.embed_batcher import embed_all
+    from app.services.ingestion_policy import get_ingestion_policy
+    # Reuse the SAME module-level lazy-singleton embedding pool that
+    # app/retrieval/embeddings.py builds (embedding-only lanes + model_pool
+    # overrides). Single source of truth: the pool — and its health /
+    # circuit-breaker state — persists across all backfill pages instead of
+    # being rebuilt per page.
+    from app.retrieval.embeddings import _get_embedding_pool
+
+    pol = get_ingestion_policy()
+    pool = _get_embedding_pool()
+    if pool is None:
+        # Defensive: caller only enters this path when the pool is enabled, but
+        # if the policy flips between the gate check and here, fail the whole
+        # page so the caller logs per row (same shape as the embed failure path).
+        return [(r.id, None, "embedding pool unavailable") for r in rows]
+
+    batch_max = int(pol.lookup(("model_pool", "embedding_batch_max")) or 256)
+    token_budget = int(pol.lookup(("model_pool", "embedding_token_budget")) or 8000)
+
+    search_texts = [build_search_text(r) for r in rows]
+    # text-embedding-3-* share the cl100k_base encoding; "text-embedding-3-small"
+    # routes to that fallback inside count_tokens.
+    token_counts = [count_tokens(t or "", "text-embedding-3-small") for t in search_texts]
+
+    out: list[tuple[str, list[float] | None, str | None]] = []
+    try:
+        vectors = await embed_all(
+            pool, search_texts, token_counts,
+            batch_max=batch_max, token_budget=token_budget, tier="standard",
+        )
+    except Exception as exc:  # noqa: BLE001 — whole page fails; caller logs per row
+        err = str(exc)[:200]
+        return [(r.id, None, err) for r in rows]
+
+    for r, text, vec in zip(rows, search_texts, vectors):
+        if vec is None or not any(x != 0.0 for x in vec):
+            out.append((r.id, None, "zero_vector (deployment not live?)"))
+        else:
+            out.append((r.id, vec, text))  # payload = search_text on success
+    return out
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -110,9 +186,14 @@ async def run_backfill(*, batch_size: int = 20, concurrency: int = 5, force: boo
             total += len(rows)
             logger.info("backfill_page", offset=offset, batch=len(rows))
 
-            # Embed all rows in this page concurrently (bounded by semaphore)
-            tasks = [_embed_row(row, semaphore=semaphore) for row in rows]
-            results = await asyncio.gather(*tasks)
+            if _embedding_pool_enabled():
+                # Pool-batched path: pack the page into embed_batcher windows and
+                # issue few pooled requests with failover (TPM-bound, not RPM-bound).
+                results = await _embed_page_pooled(rows)
+            else:
+                # Default path: embed each row concurrently (bounded by semaphore).
+                tasks = [_embed_row(row, semaphore=semaphore) for row in rows]
+                results = await asyncio.gather(*tasks)
 
             # Write results back
             for row, (row_id, embedding, payload) in zip(rows, results):

@@ -398,6 +398,36 @@ async def preprocess_file(
         CSV / text  →  same path as input (overwritten in place atomically).
         Excel       →  sibling .csv blob (same folder, .xlsx → .csv).
     """
+    # ── Size-router: optional Polars + DuckDB cleaner (flag-gated) ─────────────
+    # Default OFF: with preprocess.use_polars_cleaner false this block is skipped
+    # entirely and the existing pandas body below runs byte-for-byte as today.
+    # When true: try the Polars cleaner (it internally size-routes DuckDB-streaming
+    # vs in-memory Polars). On ANY exception, log a warning and FALL THROUGH to the
+    # pandas path so a parity gap degrades gracefully and never fails ingestion.
+    try:
+        from app.services.ingestion_policy import get_ingestion_policy
+        _use_polars = bool(get_ingestion_policy().lookup(("preprocess", "use_polars_cleaner")))
+    except Exception:  # noqa: BLE001 — any policy failure keeps today's pandas path
+        _use_polars = False
+    if _use_polars:
+        try:
+            from app.services.preprocessor import streaming_cleaner
+            return await streaming_cleaner.preprocess_file(
+                blob_path=blob_path,
+                file_name=file_name,
+                file_id=file_id,
+                connection_string=connection_string,
+                container_name=container_name,
+                cleaning_config=cleaning_config,
+            )
+        except Exception as exc:  # noqa: BLE001 — fall back to pandas on parity gaps
+            ingest_logger.warning(
+                "preprocess", status="polars_fallback",
+                blob_path=blob_path, file_name=file_name,
+                error=str(exc)[:300],
+                hint="Polars cleaner raised; falling back to the pandas path",
+            )
+
     t0 = time.perf_counter()
     warns: list[str] = []
     ext       = Path(file_name).suffix.lower()

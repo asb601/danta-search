@@ -7,7 +7,45 @@
     "excel_preprocess_concurrency": null,
     "celery_worker_concurrency": null,
     "celery_worker_prefetch_multiplier": 1,
-    "celery_result_expires_seconds": 86400
+    "celery_result_expires_seconds": 86400,
+    "io_concurrency": null,
+    "duckdb_threads": null,
+    "duckdb_memory_limit_bytes": null,
+    "small_file_threshold_bytes": null
+  },
+  "resource_model": {
+    "reserve_cores": null,
+    "ram_safety": 0.60,
+    "k_pandas": 10,
+    "max_file_bytes": 67108864,
+    "read_block": 67108864,
+    "io_fanout": 8,
+    "io_cap": 64,
+    "per_proc_overhead_bytes": 262144000,
+    "ingest_rpm": null,
+    "sla_seconds": 600,
+    "per_file_seconds": 45.0,
+    "per_instance_concurrency": 1,
+    "min_instances": 1,
+    "max_instances": 50,
+    "scale_in_idle_ticks": 3,
+    "tokens_per_file_chat": 10000,
+    "tokens_per_file_embed": 700
+  },
+  "model_pool": {
+    "deployments": [],
+    "embedding_batch_max": 256,
+    "embedding_token_budget": 8000,
+    "tokens_per_file_chat": 10000,
+    "tokens_per_file_embed": 700,
+    "escalation_confidence_threshold": 0.55,
+    "circuit_breaker_cooldown_seconds": 20.0,
+    "escalation_enabled": false,
+    "embedding_pool_enabled": false
+  },
+  "ingestion_features": {
+    "lane_split": false,
+    "celery_parquet_trigger": false
   },
   "queues": {
     "high": "ingest_high",
@@ -48,13 +86,13 @@
   },
   "role_resolver": {
     "max_columns": 60,
-    "sample_values": 10,
+    "sample_values": 5,
     "glossary_items": 80,
     "preview_items": 10,
     "max_completion_tokens": 2400
   },
   "file_description": {
-    "sample_rows": 20,
+    "sample_rows": 10,
     "max_completion_tokens": 600
   },
   "llm": {
@@ -66,6 +104,7 @@
     "prefixes": []
   },
   "preprocess": {
+    "use_polars_cleaner": false,
     "chunk_rows": 50000,
     "small_file_threshold_mb": 50,
     "header_scan_rows": 15,

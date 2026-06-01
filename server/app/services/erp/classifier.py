@@ -288,6 +288,7 @@ class ErpClassifier:
         sample_rows: list | None = None,
         ai_description: str | None = None,
         column_semantic_roles: dict | None = None,
+        tier: str = "standard",
     ) -> ErpClassification:
         prompt = _build_prompt(
             filename=filename,
@@ -298,7 +299,7 @@ class ErpClassifier:
         )
 
         try:
-            raw, model_version = await asyncio.to_thread(self._call_llm, prompt)
+            raw, model_version = await asyncio.to_thread(self._call_llm, prompt, tier)
         except Exception as exc:  # never break ingestion
             ingest_logger.warning("erp_classification_llm_error", error=str(exc)[:200], file=filename)
             return ErpClassification.unknown(f"llm_error: {str(exc)[:120]}")
@@ -342,28 +343,34 @@ class ErpClassifier:
         return clf
 
     @staticmethod
-    def _call_llm(prompt: str) -> tuple[str, str]:
+    def _call_llm(prompt: str, tier: str = "standard") -> tuple[str, str]:
         """Blocking Azure OpenAI call. Returns (raw_text, deployment_name).
 
-        Mirrors the ingestion description-call pattern: get_client() →
+        Mirrors the ingestion description-call pattern: get_chat_client() →
         chat.completions.create(...). Requests JSON object output where the
         deployment supports it; falls back transparently otherwise.
         """
-        from app.core.openai_client import get_client  # local import — matches llm_tasks pattern
+        from app.core.openai_client import (  # local import — matches llm_tasks pattern
+            chat_complete_with_failover,
+            get_chat_client,
+        )
 
-        client, deployment = get_client()
+        # deployment is reported back to the caller for telemetry; the helper
+        # supplies the model= for the actual create call (and may pick a
+        # different lane on failover when a multi-lane pool is configured).
+        _client, deployment = get_chat_client(tier=tier)
         kwargs: dict[str, Any] = {
-            "model": deployment,
             "messages": [{"role": "user", "content": prompt}],
+            "tier": tier,
             "temperature": 0,
         }
         try:
-            resp = client.chat.completions.create(
+            resp = chat_complete_with_failover(
                 response_format={"type": "json_object"}, **kwargs
             )
         except Exception:
             # Older deployments may reject response_format — retry without it.
-            resp = client.chat.completions.create(**kwargs)
+            resp = chat_complete_with_failover(**kwargs)
         raw = resp.choices[0].message.content or ""
         return raw, str(deployment)
 
@@ -399,6 +406,7 @@ async def classify_file(
     sample_rows: list | None = None,
     ai_description: str | None = None,
     column_semantic_roles: dict | None = None,
+    tier: str = "standard",
 ) -> ErpClassification:
     """Convenience wrapper — one-shot classification with default config."""
     return await ErpClassifier().classify(
@@ -407,4 +415,5 @@ async def classify_file(
         sample_rows=sample_rows,
         ai_description=ai_description,
         column_semantic_roles=column_semantic_roles,
+        tier=tier,
     )

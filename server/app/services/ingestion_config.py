@@ -84,6 +84,12 @@ REPROCESS_SCOPES: dict[str, frozenset[StageName]] = {
         spec.stage for spec in INGEST_STAGE_SPECS if spec.stage not in _PREPROCESSING_STAGES
     ),
     "full_rebuild": frozenset(spec.stage for spec in INGEST_STAGE_SPECS),
+    # parquet_only → just re-derive Parquet + recompute analytics, then close
+    # out. Used by the parquet reprocess trigger. Reuses cleaned source if the
+    # clean stage already ran; the run order still follows INGEST_STAGE_SPECS.
+    "parquet_only": frozenset(
+        {StageName.PARQUET, StageName.ANALYTICS, StageName.COMPLETE}
+    ),
 }
 
 
@@ -260,7 +266,53 @@ def celery_semantic_rebuild_task_options(settings: Settings | None = None) -> di
     return options
 
 
+# Worker-lane queue names used only when ingestion_features.lane_split is ON.
+INGEST_CPU_QUEUE = "ingest_cpu"
+INGEST_IO_QUEUE = "ingest_io"
+
+# DevOps lane map (stage -> lane), applied ONLY when lane_split is enabled.
+#   cpu  : CPU-bound preprocessing/conversion
+#   io   : LLM / embedding / OpenSearch network-bound work
+# Every stage NOT listed here (metadata, analytics, relationships,
+# semantic_layer, complete) plus the orchestrator/rebuild/reprocess tasks stay
+# on INGEST_NORMAL_QUEUE.
+_LANE_STAGE_MAP: dict[StageName, str] = {
+    StageName.CLEAN: INGEST_CPU_QUEUE,
+    StageName.PARQUET: INGEST_CPU_QUEUE,
+    StageName.AI_DESCRIPTION: INGEST_IO_QUEUE,
+    StageName.EMBEDDING: INGEST_IO_QUEUE,
+    StageName.OPENSEARCH: INGEST_IO_QUEUE,
+    StageName.ERP_CLASSIFICATION: INGEST_IO_QUEUE,
+    StageName.ONTOLOGY: INGEST_IO_QUEUE,
+    StageName.SEMANTIC_ENRICHMENT: INGEST_IO_QUEUE,
+}
+
+
+def _lane_split_enabled() -> bool:
+    try:
+        from app.services.ingestion_policy import get_ingestion_policy
+
+        return bool(get_ingestion_policy().lookup(("ingestion_features", "lane_split")))
+    except Exception:  # noqa: BLE001 — any failure keeps today's single-queue routing
+        return False
+
+
 @lru_cache
 def celery_task_routes() -> dict[str, dict[str, str]]:
-    queue = get_settings().INGEST_NORMAL_QUEUE
-    return {task_name: {"queue": queue} for task_name in ingest_task_names()}
+    normal = get_settings().INGEST_NORMAL_QUEUE
+
+    # Default (flag OFF): EXACTLY today's behaviour — every task -> normal queue.
+    if not _lane_split_enabled():
+        return {task_name: {"queue": normal} for task_name in ingest_task_names()}
+
+    # Flag ON: split per the DevOps lane map. Stage tasks route to their lane;
+    # orchestrators + unmapped stages stay on the normal queue.
+    stage_lane_by_task: dict[str, str] = {
+        spec.task_name: _LANE_STAGE_MAP[spec.stage]
+        for spec in INGEST_STAGE_SPECS
+        if spec.stage in _LANE_STAGE_MAP
+    }
+    routes: dict[str, dict[str, str]] = {}
+    for task_name in ingest_task_names():
+        routes[task_name] = {"queue": stage_lane_by_task.get(task_name, normal)}
+    return routes

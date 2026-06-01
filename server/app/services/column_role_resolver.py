@@ -70,6 +70,7 @@ async def resolve_column_roles(
     filename: str,
     glossary: dict[str, str] | None = None,
     semantic_config: dict[str, Any] | None = None,
+    tier: str = "standard",
 ) -> tuple[dict[str, str], str, dict[str, dict]]:
     """Resolve all columns to semantic roles via one LLM call.
 
@@ -90,7 +91,9 @@ async def resolve_column_roles(
 
     settings = get_settings()
     preview_items = max(0, int(settings.INGEST_ROLE_RESOLVER_PREVIEW_ITEMS))
-    roles, evidence = await _call_llm(columns_info, filename, glossary, semantic_config)
+    roles, evidence = await _call_llm(columns_info, filename, glossary, semantic_config, tier=tier)
+    # Strip the parse-failure sentinel (additive; only present on JSON failure).
+    evidence.pop("__parse_failed__", None)
     source = "llm_dynamic" if any(is_dynamic_role(role) for role in roles.values()) else "llm"
 
     ingest_logger.info(
@@ -108,19 +111,64 @@ async def resolve_column_roles(
     return roles, source, evidence
 
 
+async def resolve_column_roles_with_signal(
+    columns_info: list[dict[str, Any]],
+    filename: str,
+    glossary: dict[str, str] | None = None,
+    semantic_config: dict[str, Any] | None = None,
+    tier: str = "standard",
+) -> tuple[dict[str, str], str, dict[str, dict], bool]:
+    """Same as ``resolve_column_roles`` but also returns ``parse_failed``.
+
+    ``parse_failed`` is True when the LLM response could not be parsed as JSON
+    after the inner retry. Used ONLY by the escalation hook in
+    ``ingestion_stages.ontology_stage`` (gated behind ``escalation_enabled``).
+    Existing callers keep using ``resolve_column_roles`` unchanged.
+    """
+    if not columns_info:
+        return {}, "llm", {}, False
+
+    settings = get_settings()
+    preview_items = max(0, int(settings.INGEST_ROLE_RESOLVER_PREVIEW_ITEMS))
+    roles, evidence = await _call_llm(columns_info, filename, glossary, semantic_config, tier=tier)
+    parse_failed = evidence.pop("__parse_failed__", None) is not None
+    source = "llm_dynamic" if any(is_dynamic_role(role) for role in roles.values()) else "llm"
+
+    ingest_logger.info(
+        "column_role_resolver",
+        filename=filename,
+        total_columns=len(columns_info),
+        resolved=len(roles),
+        coverage_pct=round(len(roles) / len(columns_info) * 100, 1) if columns_info else 0,
+        roles_preview={k: v for k, v in list(roles.items())[:preview_items]},
+        avg_confidence=round(
+            sum(e.get("confidence", 0.0) for e in evidence.values()) / len(evidence), 3
+        ) if evidence else None,
+        tier=tier,
+    )
+    return roles, source, evidence, parse_failed
+
+
 async def _call_llm(
     columns_info: list[dict[str, Any]],
     filename: str,
     glossary: dict[str, str] | None,
     semantic_config: dict[str, Any] | None,
+    tier: str = "standard",
 ) -> tuple[dict[str, str], dict[str, dict]]:
     """Single LLM call — classifies ALL columns at once with full data profile.
 
     Returns (roles, evidence) where:
       roles    = {col: role_str}           — flat map for backward compatibility
       evidence = {col: {confidence, signals, source}} — per-column trust metadata
+
+    When the LLM response cannot be parsed as JSON after the inner retry, the
+    returned evidence dict carries a sentinel key ``"__parse_failed__"`` so an
+    escalation hook can re-run the resolution at a higher tier. The sentinel is
+    stripped by ``resolve_column_roles`` before the public return, so downstream
+    readers never see it.
     """
-    from app.core.openai_client import get_client  # local to avoid circular
+    from app.core.openai_client import chat_complete_with_failover, get_chat_client  # local to avoid circular
     from app.core.token_counter import count_tokens, elapsed_ms, track_and_log
 
     settings = get_settings()
@@ -207,7 +255,7 @@ Rules:
 """
 
     def _run() -> tuple[dict[str, str], dict[str, dict]]:
-        client, deployment = get_client()
+        client, deployment = get_chat_client(tier=tier)
         prompt_tokens = count_tokens(prompt, deployment)
         # Larger budget: enriched format is ~2.5× larger than flat role strings
         completion_budget = max(600, min(max_completion_tokens, len(col_profiles) * 100))
@@ -218,9 +266,9 @@ Rules:
         response = None
         for attempt in range(len(_RETRY) + 1):
             try:
-                response = client.chat.completions.create(
-                    model=deployment,
+                response = chat_complete_with_failover(
                     messages=[{"role": "user", "content": prompt}],
+                    tier=tier,
                     max_completion_tokens=completion_budget,
                     temperature=0,
                 )
@@ -242,10 +290,12 @@ Rules:
             lines = [ln for ln in cleaned.split("\n") if not ln.strip().startswith("```")]
             cleaned = "\n".join(lines).strip()
 
+        parse_failed = False
         try:
             parsed: dict = json.loads(cleaned)
         except (json.JSONDecodeError, ValueError):
             parsed = {}
+            parse_failed = True
 
         roles: dict[str, str] = {}
         evidence: dict[str, dict] = {}
@@ -294,6 +344,10 @@ Rules:
                 "completion_budget": completion_budget,
             },
         )
+        if parse_failed:
+            # Sentinel consumed by resolve_column_roles; stripped before the
+            # public return so downstream readers never see it.
+            evidence["__parse_failed__"] = {"confidence": 0.0, "signals": [], "source": "parse_failed"}
         return roles, evidence
 
     ingest_logger.info(

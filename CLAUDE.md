@@ -61,7 +61,7 @@ G-CHAT-/
 | File storage | Azure Blob Storage (adlfs + fsspec) |
 | Analytical format | Apache Parquet (PyArrow) |
 | Retrieval | OpenSearch (BM25 + vector hybrid with native RRF) |
-| Embeddings | Azure OpenAI (text-embedding-3-large) |
+| Embeddings | Azure OpenAI (text-embedding-3-small, 1536-dim) |
 | LLM | Azure OpenAI (gpt-4o / gpt-4o-mini) |
 | Agent orchestration | LangGraph |
 | Background jobs | Celery + Redis |

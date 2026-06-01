@@ -1,0 +1,123 @@
+#cloud-config
+# ============================================================================
+# cloud-init.yaml — the ENTIRE per-node configuration for a worker VM.
+# ----------------------------------------------------------------------------
+# Installs uv, pulls the repo, drops a systemd unit that runs the Celery
+# CPU-lane worker, and enables the queue-depth custom-metric timer.
+#
+# CRITICAL: the worker launch carries NO -c / --concurrency flag. On boot,
+# app/services/resource_profile.py reads cgroup/sysconf and
+# compute_ingestion_knobs() decides worker_concurrency for this exact box.
+# The same image is therefore correct on a D4s_v5 and a D16s_v5 alike.
+#
+# __REDIS_URL__ is substituted by vmss.bicep (replace()) before base64 encoding.
+# ============================================================================
+
+package_update: true
+packages:
+  - git
+  - curl
+  - ca-certificates
+  - python3-venv
+
+write_files:
+  # ---- queue-depth custom-metric publisher (deployed, run by a systemd timer) --
+  # Reads Redis LLEN over the ingest queues and POSTs the total to Azure Monitor
+  # via the VMSS managed identity. Drives the autoscale rules in autoscale.sh.
+  - path: /opt/gchat/deploy/publish_queue_depth.py
+    permissions: '0755'
+    # Placed here as a stable path; the real file is published with the repo at
+    # server/deploy/publish_queue_depth.py and symlinked in runcmd below.
+    content: |
+      # Replaced by the repo copy at /opt/gchat/server/deploy/publish_queue_depth.py
+      # (see runcmd symlink). This placeholder keeps the path valid pre-clone.
+      import os
+      os.execv("/usr/bin/env", ["env", "python3",
+               "/opt/gchat/server/deploy/publish_queue_depth.py"])
+
+  # ---- systemd: the self-tuning CPU-lane Celery worker ------------------------
+  - path: /etc/systemd/system/gchat-worker.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=danta-search ingestion worker (self-tuned CPU lane)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=gchat
+      WorkingDirectory=/opt/gchat/server
+      Environment=REDIS_URL=__REDIS_URL__
+      # NO -c FLAG: worker_concurrency comes from compute_ingestion_knobs() via
+      # CELERY_WORKER_CONCURRENCY (config.py proxies it through the policy layer).
+      # CPU lane = clean + parquet (prefork). See worker-cpu.sh / README.md for
+      # the prefork/gevent split once celery_app.py grows the task_routes entry.
+      ExecStart=/home/gchat/.local/bin/uv run celery -A app.worker.celery_app worker \
+                -Q ingest_high,ingest_normal,ingest_low -n gchat@%%H
+      Restart=always
+      RestartSec=5
+      # Give in-flight tasks time to finish on scale-in; acks_late re-queues any
+      # task the worker is killed mid-flight.
+      TimeoutStopSec=120
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # ---- systemd: queue-depth metric publisher (oneshot + timer) ---------------
+  - path: /etc/systemd/system/gchat-queue-metric.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Publish Celery queue depth to Azure Monitor (custom metric)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      User=gchat
+      WorkingDirectory=/opt/gchat/server
+      Environment=REDIS_URL=__REDIS_URL__
+      # AZURE_REGION + VMSS_RESOURCE_ID are written below from IMDS at boot.
+      EnvironmentFile=/opt/gchat/deploy/metric.env
+      ExecStart=/home/gchat/.local/bin/uv run python deploy/publish_queue_depth.py --once
+
+  - path: /etc/systemd/system/gchat-queue-metric.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Run the queue-depth publisher every 60s
+
+      [Timer]
+      OnBootSec=60
+      OnUnitActiveSec=60
+      AccuracySec=5s
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  # uv (installed for the gchat user that runs the worker).
+  - su - gchat -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+  # Clone or pull the repo into /opt/gchat (idempotent on instance reimage).
+  - test -d /opt/gchat/.git || git clone https://github.com/danta/G-CHAT- /opt/gchat
+  - git -C /opt/gchat pull --ff-only || true
+  - chown -R gchat:gchat /opt/gchat
+  # Resolve runtime deps (uv reads server/.python-version + pyproject.toml).
+  - su - gchat -c 'cd /opt/gchat/server && /home/gchat/.local/bin/uv sync'
+  # Point the stable /opt/gchat/deploy publisher path at the repo copy.
+  - ln -sf /opt/gchat/server/deploy/publish_queue_depth.py /opt/gchat/deploy/publish_queue_depth.py
+  # Derive region + VMSS resource id from IMDS so the publisher needs no secrets.
+  - mkdir -p /opt/gchat/deploy
+  - |
+    REGION=$(curl -s -H Metadata:true "http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text")
+    RES_ID=$(curl -s -H Metadata:true "http://169.254.169.254/metadata/instance/compute/resourceId?api-version=2021-02-01&format=text")
+    # resourceId on a VMSS instance is the instance; trim the trailing
+    # /virtualMachines/<n> to get the scale-set id the metric must target.
+    VMSS_ID=$(printf '%s' "$RES_ID" | sed -E 's#/virtualMachines/[0-9]+$##')
+    printf 'AZURE_REGION=%s\nVMSS_RESOURCE_ID=%s\n' "$REGION" "$VMSS_ID" > /opt/gchat/deploy/metric.env
+  - chown -R gchat:gchat /opt/gchat/deploy
+  # Start the worker and the metric timer.
+  - systemctl daemon-reload
+  - systemctl enable --now gchat-worker.service
+  - systemctl enable --now gchat-queue-metric.timer

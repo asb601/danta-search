@@ -1,0 +1,11 @@
+{
+  "_comment": "Event Grid trigger. The Azure subscription (eventgrid_functions.sh) is already filtered to Microsoft.Storage.BlobCreated on the uploads container, so this binding receives one invocation per uploaded blob.",
+  "scriptFile": "__init__.py",
+  "bindings": [
+    {
+      "type": "eventGridTrigger",
+      "name": "event",
+      "direction": "in"
+    }
+  ]
+}
