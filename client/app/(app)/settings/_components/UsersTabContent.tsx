@@ -86,7 +86,7 @@ const ROLES: { value: string; label: string; color: string }[] = [
   { value: "admin",     label: "Admin",     color: "text-primary" },
   { value: "developer", label: "Developer", color: "text-violet-400" },
   { value: "manager",   label: "Manager",   color: "text-cyan-400" },
-  { value: "user",      label: "Member",    color: "text-muted-foreground" },
+  { value: "user",      label: "Member",    color: "text-[#737373]" },
 ];
 
 function RoleDropdown({

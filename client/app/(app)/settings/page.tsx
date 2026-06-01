@@ -4,10 +4,11 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft, LogOut, UserCircle, Database, ScrollText,
-  Tag, Users, Shield, Server, CheckCircle2,
+  Tag, Users, Shield, Sun, Moon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/components/auth-provider";
+import { useTheme } from "@/components/theme-provider";
 import { cn } from "@/lib/utils";
 import { capabilitiesFor } from "@/lib/roles";
 
@@ -28,6 +29,7 @@ type Tab = "profile" | "users" | "domains" | "containers" | "logs";
 
 export default function SettingsPage() {
   const { user, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const router = useRouter();
   const [tab, setTab] = useState<Tab>("profile");
 
@@ -89,15 +91,38 @@ export default function SettingsPage() {
             )}
           </div>
 
-          <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.96 }}
-            onClick={logout}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12px] font-medium text-[#dc2626] bg-[#dc2626]/6 hover:bg-[#dc2626]/12 border border-[#dc2626]/15 transition-colors"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            Sign out
-          </motion.button>
+          <div className="flex items-center gap-2">
+            {/* Theme toggle */}
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.93 }}
+              onClick={toggleTheme}
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              className="relative w-14 h-7 rounded-full border border-[#e0dfd9] bg-[#f1f0ec] transition-colors overflow-hidden"
+              style={theme === "dark" ? { background: "#272725", borderColor: "#2e2d2a" } : {}}
+            >
+              {/* Track icons */}
+              <Sun className="absolute left-1.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-amber-500" />
+              <Moon className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-indigo-400" />
+              {/* Thumb */}
+              <motion.div
+                animate={{ x: theme === "dark" ? 28 : 2 }}
+                transition={{ type: "spring", stiffness: 500, damping: 36 }}
+                className="absolute top-1 w-5 h-5 rounded-full bg-white shadow-[0_1px_4px_rgba(0,0,0,0.18)]"
+                style={theme === "dark" ? { background: "#f0efe9" } : {}}
+              />
+            </motion.button>
+
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={logout}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12px] font-medium text-[#dc2626] bg-[#dc2626]/6 hover:bg-[#dc2626]/12 border border-[#dc2626]/15 transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sign out
+            </motion.button>
+          </div>
         </div>
 
         {/* Tab bar */}

@@ -1,19 +1,25 @@
 import type { Metadata } from "next";
-import { Bricolage_Grotesque, DM_Sans } from "next/font/google";
+import { Instrument_Serif, Syne } from "next/font/google";
 import "./globals.css";
+import { ThemeProvider } from "@/components/theme-provider";
 
-const bricolage = Bricolage_Grotesque({
+/* ── Fonts ──────────────────────────────────────────────────────────────────
+   Instrument Serif  — editorial optical serif; almost zero usage in AI tools
+   Syne              — geometric sans with character; distinctive at every size
+─────────────────────────────────────────────────────────────────────────── */
+const instrumentSerif = Instrument_Serif({
   subsets: ["latin"],
   variable: "--font-display",
   display: "swap",
-  weight: ["400", "500", "600", "700", "800"],
+  weight: "400",
+  style: ["normal", "italic"],
 });
 
-const dmSans = DM_Sans({
+const syne = Syne({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
-  weight: ["300", "400", "500", "600"],
+  weight: ["400", "500", "600", "700", "800"],
 });
 
 export const metadata: Metadata = {
@@ -25,8 +31,10 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${bricolage.variable} ${dmSans.variable}`}>
-      <body className="min-h-screen">{children}</body>
+    <html lang="en" className={`${instrumentSerif.variable} ${syne.variable}`}>
+      <body className="min-h-screen">
+        <ThemeProvider>{children}</ThemeProvider>
+      </body>
     </html>
   );
 }

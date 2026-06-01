@@ -7,7 +7,6 @@ import { cn } from "@/lib/utils";
 import { useChat } from "./_hooks/useChat";
 import { AssistantMessage } from "./_components/AssistantMessage";
 import { ConversationSidebar } from "./_components/ConversationSidebar";
-import { ConversationTopBar } from "./_components/ConversationTopBar";
 import { ContainerPicker } from "./_components/ContainerPicker";
 
 const PROMPTS = ["Summarise sales last month", "Show top 10 customers", "Compare Q1 vs Q2"];
@@ -30,38 +29,27 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-full bg-white overflow-hidden">
-      {/* ── Mobile-only drawer sidebar ─────────────────────────────── */}
-      {/* Hidden on sm+; appears as fixed overlay drawer on mobile     */}
-      <div className="sm:hidden">
-        <ConversationSidebar
-          conversations={conversations}
-          activeId={activeConvId}
-          onSelect={(id) => { loadConversation(id); setSidebarOpen(false); }}
-          onNew={() => { startNewChat(); setSidebarOpen(false); }}
-          onDelete={deleteConversation}
-          onRename={renameConversation}
-          isOpen={sidebarOpen}
-          onToggle={() => setSidebarOpen(false)}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-        />
-      </div>
 
-      {/* ── Main chat column ───────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col min-w-0 w-full">
+      {/* ── Conversation sidebar (desktop: inline panel; mobile: drawer) ── */}
+      <ConversationSidebar
+        conversations={conversations}
+        activeId={activeConvId}
+        onSelect={(id) => { loadConversation(id); setSidebarOpen(false); }}
+        onNew={() => { startNewChat(); setSidebarOpen(false); }}
+        onDelete={deleteConversation}
+        onRename={renameConversation}
+        isOpen={sidebarOpen}
+        onToggle={() => setSidebarOpen(false)}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+      />
 
-        {/* ── Desktop: conversation top bar ─────────────────────────── */}
-        <ConversationTopBar
-          conversations={conversations}
-          activeId={activeConvId}
-          onSelect={loadConversation}
-          onNew={startNewChat}
-        />
+      {/* ── Main chat column ─────────────────────────────────────────── */}
+      <div className="flex-1 flex flex-col min-w-0 w-full overflow-hidden">
 
-        {/* ── App top bar (container picker + mobile menu) ──────────── */}
+        {/* ── Top bar: container picker + mobile sidebar toggle ──────── */}
         <div className="app-topbar px-3 sm:px-4">
           <div className="flex items-center gap-2 min-w-0">
-            {/* Mobile-only hamburger: show always (topbar isn't visible on mobile) */}
             <AnimatePresence>
               {!sidebarOpen && (
                 <motion.button
@@ -223,14 +211,13 @@ export default function ChatPage() {
         {/* ── Input bar ─────────────────────────────────────────────── */}
         <div className="border-t border-[#e5e5e5] bg-white px-3 sm:px-4 pt-3 pb-3">
           <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
-            <motion.div
-              animate={{
-                borderColor: inputFocused ? "#c4c4c4" : "#e5e5e5",
+            <div
+              className="flex items-end gap-2 border rounded-2xl px-3 py-2 transition-all duration-150"
+              style={{
+                borderColor: inputFocused ? "var(--border-strong)" : "var(--border)",
                 boxShadow: inputFocused ? "0 0 0 3px rgba(10,10,10,0.06)" : "0 1px 3px rgba(0,0,0,0.06)",
-                backgroundColor: inputFocused ? "#ffffff" : "#f9f9f9",
+                backgroundColor: inputFocused ? "var(--bg)" : "var(--surface)",
               }}
-              transition={{ duration: 0.15 }}
-              className="flex items-end gap-2 border rounded-2xl px-3 py-2"
             >
               <textarea
                 value={input}
@@ -279,7 +266,7 @@ export default function ChatPage() {
                   </motion.button>
                 )}
               </AnimatePresence>
-            </motion.div>
+            </div>
           </form>
           <p className="text-center text-[11px] text-[#c4c4c4] mt-2">
             AI may make mistakes — verify important information.

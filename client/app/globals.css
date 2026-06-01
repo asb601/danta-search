@@ -11,14 +11,14 @@
    DESIGN TOKENS
 ───────────────────────────────────────── */
 :root {
-  --bg:             #ffffff;
-  --fg:             #0a0a0a;
-  --fg-muted:       #737373;
-  --fg-subtle:      #a3a3a3;
-  --surface:        #f9f9f9;
-  --surface-raised: #f4f4f4;
-  --border:         #e5e5e5;
-  --border-strong:  #c4c4c4;
+  --bg:             #f8f7f4;   /* warm off-white — not AI-generic pure white */
+  --fg:             #1a1918;   /* warm near-black */
+  --fg-muted:       #6e6d6a;
+  --fg-subtle:      #9e9d9a;
+  --surface:        #f1f0ec;   /* warm light gray surface */
+  --surface-raised: #eae9e4;   /* slightly darker card */
+  --border:         #e0dfd9;   /* warm gray border */
+  --border-strong:  #c2c1ba;   /* warm strong border */
 
   /* Status */
   --success:    #16a34a;
@@ -135,7 +135,8 @@
   *, *::before, *::after { @apply border-border; }
 
   body {
-    @apply bg-white text-[#0a0a0a];
+    background-color: var(--bg);
+    color: var(--fg);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -143,7 +144,7 @@
 
   h1, h2, h3, h4, h5, h6 {
     font-family: var(--font-display);
-    letter-spacing: -0.03em;
+    letter-spacing: -0.025em;
   }
 
   ::-webkit-scrollbar { width: 4px; height: 4px; }
@@ -689,3 +690,150 @@
     box-shadow: 0 0 0 3px rgba(10,10,10,0.06);
   }
 }
+
+/* ═══════════════════════════════════════════════
+   DARK MODE
+   Applied when html.dark is set by ThemeProvider.
+   Overrides CSS variables AND the hardcoded Tailwind
+   arbitrary-value classes used across all components —
+   so zero per-page changes are needed.
+═══════════════════════════════════════════════ */
+
+html.dark {
+  color-scheme: dark;
+
+  /* ── Token overrides ── */
+  --bg:             #131312;
+  --fg:             #f0efe9;
+  --fg-muted:       #8a8984;
+  --fg-subtle:      #5c5c58;
+  --surface:        #1e1e1c;
+  --surface-raised: #272725;
+  --border:         #2e2d2a;
+  --border-strong:  #48473f;
+
+  /* Tailwind compat */
+  --background:         var(--bg);
+  --foreground:         var(--fg);
+  --card:               var(--surface);
+  --card-foreground:    var(--fg);
+  --popover:            var(--surface);
+  --popover-foreground: var(--fg);
+  --muted:              var(--surface);
+  --muted-foreground:   var(--fg-muted);
+  --accent:             var(--surface-raised);
+  --accent-foreground:  var(--fg);
+  --input:              var(--border);
+  --sidebar:            var(--surface);
+  --sidebar-border:     var(--border);
+  --border:             var(--border);
+}
+
+/* ── Page background & body ── */
+html.dark body { background-color: var(--bg); color: var(--fg); }
+
+/* ── Hardcoded white backgrounds → dark bg ── */
+html.dark .bg-white { background-color: var(--bg); }
+html.dark .bg-\[\#f8f7f4\] { background-color: var(--bg); }
+html.dark .bg-\[\#fafaf7\] { background-color: var(--bg); }
+html.dark .bg-\[\#ffffff\] { background-color: var(--bg); }
+
+/* Re-preserve bg-white inside intentionally-dark containers
+   (Dynamic Island active pill, black buttons, etc.) */
+html.dark .bg-\[\#0a0a0a\] .bg-white,
+html.dark .bg-\[\#1a1918\] .bg-white,
+html.dark .bg-\[\#080808\] .bg-white { background-color: #ffffff; }
+
+/* ── Surface backgrounds ── */
+html.dark .bg-\[\#f9f9f9\] { background-color: var(--surface); }
+html.dark .bg-\[\#f1f0ec\] { background-color: var(--surface); }
+html.dark .bg-\[\#f4f4f4\] { background-color: var(--surface-raised); }
+html.dark .bg-\[\#eae9e4\] { background-color: var(--surface-raised); }
+html.dark .bg-\[\#ebebeb\] { background-color: var(--surface-raised); }
+html.dark .bg-\[\#f0f0f0\] { background-color: var(--surface-raised); }
+html.dark .bg-white\/70   { background-color: rgba(30,30,28,0.7); }
+html.dark .bg-white\/12   { background-color: rgba(255,255,255,0.12); }
+
+/* ── Text colors ── */
+html.dark .text-\[\#0a0a0a\] { color: var(--fg); }
+html.dark .text-\[\#1a1918\] { color: var(--fg); }
+html.dark .text-\[\#737373\] { color: var(--fg-muted); }
+html.dark .text-\[\#6e6d6a\] { color: var(--fg-muted); }
+html.dark .text-\[\#a3a3a3\] { color: var(--fg-subtle); }
+html.dark .text-\[\#9e9d9a\] { color: var(--fg-subtle); }
+html.dark .text-\[\#c4c4c4\] { color: #48473f; }
+html.dark .text-\[\#525252\] { color: #a0a09a; }
+
+/* ── Borders ── */
+html.dark .border-\[\#e5e5e5\] { border-color: var(--border); }
+html.dark .border-\[\#e0dfd9\] { border-color: var(--border); }
+html.dark .border-\[\#d4d4d4\] { border-color: var(--border-strong); }
+html.dark .border-\[\#c2c1ba\] { border-color: var(--border-strong); }
+html.dark .border-\[\#a3a3a3\] { border-color: var(--border-strong); }
+
+/* ── Input / form fields in dark ── */
+html.dark input,
+html.dark textarea {
+  background-color: var(--surface);
+  color: var(--fg);
+  border-color: var(--border);
+}
+html.dark input::placeholder,
+html.dark textarea::placeholder { color: var(--fg-subtle); }
+
+/* ── Topbar / sidebar shell ── */
+html.dark .app-topbar {
+  background-color: var(--bg);
+  border-color: var(--border);
+}
+
+/* ── Dynamic Island: keep its bg-[#0a0a0a] dark, text adaptation ── */
+html.dark .text-white\/60 { color: rgba(240,239,233,0.6); }
+html.dark .text-white\/70 { color: rgba(240,239,233,0.7); }
+html.dark .text-white\/90 { color: rgba(240,239,233,0.9); }
+
+/* ── Chat bubble ── */
+html.dark .bubble-user {
+  background: linear-gradient(135deg, #2a2927 0%, #222220 100%);
+  color: var(--fg);
+  border-color: var(--border);
+}
+html.dark .bubble-assistant {
+  background-color: var(--surface);
+  border-color: var(--border);
+  color: var(--fg);
+}
+html.dark .bubble-avatar {
+  background-color: var(--surface-raised);
+  border-color: var(--border);
+}
+
+/* ── Scrollbar ── */
+html.dark ::-webkit-scrollbar-thumb { background: var(--border-strong); }
+
+/* ── Placeholder text ── */
+html.dark .placeholder\:text-\[\#a3a3a3\]::placeholder { color: var(--fg-subtle); }
+
+/* ── Landing page specific ──────────────────────────────────────────────── */
+/* The landing page hero/dark sections (bg-[#0a0a0a] etc.) are intentionally
+   dark — don't override them. Only the white/light sections flip.           */
+html.dark .page-section { border-color: var(--border); }
+html.dark .step-card     { border-color: var(--border); }
+
+/* Landing: feature tabs background */
+html.dark .bg-\[\#f8f7f4\] { background-color: var(--bg); }
+
+/* Landing: search bar / demo input */
+html.dark .max-w-xl.bg-white   { background-color: var(--surface); }
+html.dark .shadow-sm.bg-white  { background-color: var(--surface); }
+
+/* ── Dashboard page sidebar ── */
+html.dark .border-r.bg-\[\#f9f9f9\] { background-color: var(--surface); }
+
+/* ── Framer Motion animated border/bg (inline styles) —
+   These use motion.div animate={{...}} so CSS can't easily target them.
+   The values fed to the animation already reference #e5e5e5 / #f9f9f9;
+   in dark mode the motion.div doesn't update. This is acceptable since
+   the interactive input focus animation is a micro-detail.               ──*/
+
+/* ── ResultsAccordion / DataTable already use CSS vars — no overrides needed ─ */

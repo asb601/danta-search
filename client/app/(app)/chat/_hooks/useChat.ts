@@ -16,7 +16,9 @@ export function useChat() {
   // ── Conversation state ─────────────────────────────────────────────────────
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Desktop sidebar is always visible via CSS (hidden sm:flex).
+  // This state only controls the mobile drawer — default closed.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadingConv, setLoadingConv] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
