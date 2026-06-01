@@ -153,6 +153,9 @@ class AISettingsBody(BaseModel):
     embeddings_deployment: str | None = None
     fallback_deployment: str | None = "gpt-4o-mini"
     api_version: str | None = None
+    # Per-org PostgreSQL DSN (encrypted at rest). chat_endpoint is the OpenAI
+    # base URL and is kept separate.
+    postgres_url: str | None = None
 
 
 class StorageBody(BaseModel):
@@ -306,6 +309,22 @@ async def upsert_ai_settings(
     row.embeddings_deployment = body.embeddings_deployment
     row.fallback_deployment = body.fallback_deployment or "gpt-4o-mini"
     row.api_version = body.api_version
+    row.postgres_url = body.postgres_url
+
+    # Validate the live org Postgres URL by opening a short-lived connection
+    # (then closing it) BEFORE advancing onboarding state. Never log the DSN.
+    if body.postgres_url:
+        import asyncpg  # noqa: PLC0415
+
+        try:
+            _conn = await asyncpg.connect(body.postgres_url, timeout=5)
+            await _conn.close()
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not connect to the provided Postgres URL",
+            )
+
     await db.commit()
 
     state = await advance_state(org, "ai_configured", db)
@@ -643,10 +662,49 @@ async def get_onboarding_state(
     user: User = Depends(_org_admin_guard()),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return the org's onboarding state + a per-step checklist."""
+    """Return the org's onboarding state in the shape the wizard consumes:
+    completed_steps / current_step / completed + prefill blocks (no secrets)."""
     org = await _load_owned_org(db, user)
+
+    # State machine order → which client StepKeys are finished.
+    _ORDER = ["created", "ai_configured", "storage_connected",
+              "domains_created", "users_added", "completed"]
+    try:
+        idx = _ORDER.index(org.onboarding_state or "created")
+    except ValueError:
+        idx = 0
+    # StepKey -> the state index at which that step becomes complete.
+    _THRESHOLD = {"ai_settings": 1, "storage": 2, "domains": 3, "users": 4}
+    completed_steps = [k for k, t in _THRESHOLD.items() if idx >= t]
+    completed = org.onboarding_state == "completed"
+    # The next required step to land on (access_control is optional).
+    current_step = "complete"
+    for step in ("ai_settings", "storage", "domains", "users"):
+        if step not in completed_steps:
+            current_step = step
+            break
+
+    # AI-settings prefill — NEVER echo the secret keys, only non-secret fields.
+    ai_row = (
+        await db.execute(
+            select(OrgAISettings).where(OrgAISettings.organization_id == org.id)
+        )
+    ).scalars().first()
+    ai_settings = {
+        "configured": idx >= 1,
+        "chat_endpoint": getattr(ai_row, "chat_endpoint", None) if ai_row else None,
+        "chat_deployment": getattr(ai_row, "chat_deployment", None) if ai_row else None,
+        "api_version": getattr(ai_row, "api_version", None) if ai_row else None,
+        "postgres_url": getattr(ai_row, "postgres_url", None) if ai_row else None,
+    }
+
     return {
         "organization_id": org.id,
         "state": org.onboarding_state,
-        "checklist": build_checklist(org),
+        "current_step": current_step,
+        "completed_steps": completed_steps,
+        "completed": completed,
+        "ai_settings": ai_settings,
+        "storage": {"configured": idx >= 2},
+        "checklist": build_checklist(org),  # kept for backward-compat
     }

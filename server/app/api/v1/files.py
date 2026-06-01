@@ -16,6 +16,7 @@ from app.core.logger import upload_logger, blob_logger, db_logger, ingest_logger
 from app.dependencies import get_current_user, require_admin, require_developer
 from app.services.audit_log import record_audit_event_safe
 from app.services.ingestion_config import IngestStatus, is_auto_ingest_file, parquet_blob_path_for
+from app.services.org_access import platform_admin_has_container_grant
 from app.worker.ingest_tasks import run_ingest_pipeline
 from app.models.background_job import BackgroundJob
 from app.models.container import ContainerConfig
@@ -29,8 +30,14 @@ router = APIRouter(prefix="/files", tags=["files"])
 
 async def _assert_file_access(file: File, user: User, db: AsyncSession) -> None:
     """Raise 403 if a non-admin user with no allowed_domains tries to access a file,
-    or if the file's folder domain is outside the user's allowed domains."""
+    or if the file's folder domain is outside the user's allowed domains.
+
+    Grant-aware FULL access: a platform admin holding an active grant for the
+    organization that owns this file's container bypasses the domain filter
+    entirely (read+write scoped to that org's containers)."""
     if user.is_admin:
+        return
+    if await platform_admin_has_container_grant(user, file.container_id, db):
         return
     if not user.allowed_domains:
         raise HTTPException(status_code=403, detail="No domain access assigned")
@@ -120,10 +127,19 @@ async def get_upload_url(
 
     # Domain scope: block upload to folders outside developer's allowed domains.
     # Also capture the target folder so we can root the blob under its prefix.
+    # Grant-aware FULL write access: a platform admin with an active grant for
+    # the target container's org may write regardless of the folder domain.
+    has_grant = await platform_admin_has_container_grant(admin, body.container_id, db)
+
     folder: Folder | None = None
     if body.folder_id:
         folder = await db.get(Folder, body.folder_id)
-        if folder and folder.domain_tag and admin.allowed_domains and folder.domain_tag not in admin.allowed_domains:
+        if (
+            not has_grant
+            and folder and folder.domain_tag
+            and admin.allowed_domains
+            and folder.domain_tag not in admin.allowed_domains
+        ):
             raise HTTPException(status_code=403, detail="Not authorized to upload to this domain folder")
 
     config = await _get_container_config(db, body.container_id)
@@ -287,8 +303,15 @@ async def confirm_upload(
         folder = result.scalar_one_or_none()
         if not folder:
             raise HTTPException(status_code=404, detail="Folder not found")
-        # Domain scope: block upload to folders outside developer's allowed domains
-        if folder.domain_tag and admin.allowed_domains and folder.domain_tag not in admin.allowed_domains:
+        # Domain scope: block upload to folders outside developer's allowed domains.
+        # Bypassed for a platform admin with an active grant for this container's org.
+        has_grant = await platform_admin_has_container_grant(admin, body.container_id, db)
+        if (
+            not has_grant
+            and folder.domain_tag
+            and admin.allowed_domains
+            and folder.domain_tag not in admin.allowed_domains
+        ):
             raise HTTPException(status_code=403, detail="Not authorized to upload to this domain folder")
         parent_domain_tag = folder.domain_tag
 
@@ -479,6 +502,10 @@ async def delete_file(
     file = result.scalar_one_or_none()
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
+
+    # Grant-aware access: admins, domain-authorised developers, and platform
+    # admins holding an active grant for this file's container org may delete.
+    await _assert_file_access(file, admin, db)
 
     # Remove original + parquet blobs from Azure Blob Storage
     blob_name = file.blob_path or file.id

@@ -5,15 +5,11 @@ import { useEffect, useCallback, useState } from "react";
 import {
   MessageSquare,
   FolderOpen,
-  LogOut,
-  Database,
   UserCircle,
-  ScrollText,
   LayoutDashboard,
 } from "lucide-react";
 import { motion } from "framer-motion";
-import { Building2 } from "lucide-react";
-import { NavLink, MobileNavLink } from "@/components/nav-link";
+import { IslandNavLink, MobileNavLink } from "@/components/nav-link";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { useIdleTimeout } from "@/hooks/use-idle-timeout";
 import { capabilitiesFor, getRole } from "@/lib/roles";
@@ -58,13 +54,33 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
       try {
         const res = await apiFetch("/api/onboarding/state");
         if (!res.ok) {
-          // Can't determine → don't trap the owner; let normal routing apply.
+          // A 403 onboarding gate ({ onboarding_required: true }) means the
+          // owner must finish the wizard — block and redirect to setup.
+          if (res.status === 403) {
+            try {
+              const body = await res.clone().json();
+              if (body?.onboarding_required === true) {
+                if (!cancelled) setOwnerOnboarding("blocked");
+                return;
+              }
+            } catch {
+              /* not JSON — fall through */
+            }
+          }
+          // Otherwise can't determine → don't trap the owner; normal routing.
           if (!cancelled) setOwnerOnboarding("ok");
           return;
         }
-        const data = (await res.json()) as { state?: string };
+        const data = (await res.json()) as {
+          state?: string;
+          completed?: boolean;
+          onboarding_required?: boolean;
+        };
         if (cancelled) return;
-        setOwnerOnboarding(data.state === "completed" ? "ok" : "blocked");
+        // Completed via either the legacy `state === "completed"` signal or an
+        // explicit `completed` flag. Anything else (not-completed) → blocked.
+        const done = data.state === "completed" || data.completed === true;
+        setOwnerOnboarding(done ? "ok" : "blocked");
       } catch {
         if (!cancelled) setOwnerOnboarding("ok");
       }
@@ -138,114 +154,73 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     return <div className="h-screen bg-white">{children}</div>;
   }
 
-  const caps = capabilitiesFor(user);
-
-  const navItems: NavItem[] = [
-    { href: "/chat",            icon: MessageSquare,   label: "Chat"       },
-    { href: "/folders",         icon: FolderOpen,      label: "Folders"    },
-    { href: "/dashboards",      icon: LayoutDashboard, label: "Dashboards" },
-    ...(caps.canManageOrganizations
-      ? [{ href: "/admin/organizations", icon: Building2, label: "Organizations" }]
-      : []),
-    ...(user.is_admin || user.role === "developer"
-      ? [{ href: "/admin/containers", icon: Database,   label: "Containers" }]
-      : []),
-    ...(user.is_admin || user.role === "developer" || user.role === "manager" || user.role === "user"
-      ? [{ href: "/admin/logs",       icon: ScrollText, label: "Logs"       }]
-      : []),
-    { href: "/profile",         icon: UserCircle,      label: "Profile"    },
+  // Main nav — Settings consolidates Containers / Logs / Profile / Org
+  const mainNavItems: NavItem[] = [
+    { href: "/chat",       icon: MessageSquare,   label: "Chat"       },
+    { href: "/folders",    icon: FolderOpen,      label: "Folders"    },
+    { href: "/dashboards", icon: LayoutDashboard, label: "Dashboards" },
+    { href: "/settings",   icon: UserCircle,      label: "Settings"   },
   ];
 
-  const roleLabel = user.is_admin
-    ? { text: "Admin",     cls: "bg-[#0a0a0a]/8 text-[#0a0a0a]" }
-    : user.role === "developer"
-    ? { text: "Developer", cls: "bg-violet-500/10 text-violet-600" }
-    : user.role === "manager"
-    ? { text: "Manager",   cls: "bg-cyan-500/10 text-cyan-700" }
-    : null;
+  // Mobile keeps same 4 items
+  const mobileNavItems = mainNavItems;
 
   return (
     <div className="flex flex-col h-screen bg-white overflow-hidden">
 
-      {/* ── Desktop top nav bar ──────────────────────────────────── */}
-      <motion.header
-        initial={{ opacity: 0, y: -8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3, ease: "easeOut" }}
-        className="hidden md:flex items-center gap-0 h-[52px] shrink-0 border-b border-[#e5e5e5] bg-white px-4 relative z-30"
+      {/* ── Dynamic Island (desktop only, fixed floating) ─────────── */}
+      <motion.div
+        initial={{ opacity: 0, scale: 0.82, y: -12 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        transition={{ type: "spring", stiffness: 260, damping: 22, delay: 0.05 }}
+        className="hidden md:flex fixed top-3 left-1/2 -translate-x-1/2 z-50 items-center gap-0.5 bg-[#0a0a0a] rounded-full px-1.5 py-1.5"
+        style={{
+          boxShadow: "0 2px 24px rgba(0,0,0,0.28), 0 0 0 1px rgba(255,255,255,0.07), inset 0 1px 0 rgba(255,255,255,0.06)",
+        }}
       >
-        {/* Brand */}
-        <div className="flex items-center gap-2 mr-5 shrink-0">
-          <div
-            className="w-6 h-6 rounded-lg bg-[#0a0a0a] flex items-center justify-center"
-            style={{ boxShadow: "0 1px 4px rgba(0,0,0,0.18)" }}
-          >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+        {/* Brand mark */}
+        <div className="flex items-center gap-1.5 pl-1.5 pr-2 mr-0.5">
+          <div className="w-5 h-5 rounded-full bg-white/12 border border-white/10 flex items-center justify-center">
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
               <circle cx="6" cy="6" r="3.5" stroke="white" strokeWidth="1.5"/>
               <circle cx="6" cy="6" r="1.25" fill="white"/>
             </svg>
           </div>
           <span
-            className="text-[14px] font-bold text-[#0a0a0a] tracking-tight"
-            style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.025em" }}
+            className="text-[13px] font-bold text-white/80 tracking-tight"
+            style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}
           >
             danta
           </span>
         </div>
 
-        {/* Nav divider */}
-        <div className="w-px h-4 bg-[#e5e5e5] mr-3 shrink-0" />
+        {/* Separator */}
+        <div className="w-px h-4 bg-white/10 mx-1 shrink-0" />
 
         {/* Nav items */}
-        <nav className="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto" style={{ scrollbarWidth: "none" }}>
-          {navItems.map((item, i) => (
-            <motion.div
-              key={item.href}
-              initial={{ opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.06 + i * 0.04, duration: 0.22, ease: "easeOut" }}
-            >
-              <NavLink {...item} />
-            </motion.div>
-          ))}
-        </nav>
-
-        {/* Right side — user + sign out */}
-        <div className="flex items-center gap-2 ml-3 shrink-0">
-          {roleLabel && (
-            <motion.span
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ delay: 0.3, duration: 0.2 }}
-              className={`text-[10px] font-semibold tracking-wide uppercase px-2 py-0.5 rounded-full ${roleLabel.cls}`}
-            >
-              {roleLabel.text}
-            </motion.span>
-          )}
-
-          <div className="w-px h-4 bg-[#e5e5e5]" />
-
-          <motion.button
-            whileHover={{ scale: 1.04 }}
-            whileTap={{ scale: 0.94 }}
-            onClick={logout}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] text-[#a3a3a3] hover:text-[#dc2626] hover:bg-[#dc2626]/6 transition-colors"
-            title="Sign out"
+        {mainNavItems.map((item, i) => (
+          <motion.div
+            key={item.href}
+            initial={{ opacity: 0, y: -3 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.12 + i * 0.05, duration: 0.2 }}
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline">Sign out</span>
-          </motion.button>
-        </div>
-      </motion.header>
+            <IslandNavLink {...item} />
+          </motion.div>
+        ))}
+      </motion.div>
+
+      {/* Spacer so content doesn't hide under the island */}
+      <div className="hidden md:block h-[58px] shrink-0" />
 
       {/* ── Page content ─────────────────────────────────────────── */}
       <main className="flex-1 overflow-hidden pb-14 md:pb-0">
         {children}
       </main>
 
-      {/* ── Mobile bottom nav (unchanged) ────────────────────────── */}
+      {/* ── Mobile bottom nav ────────────────────────────────────── */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-[#e5e5e5] flex items-stretch z-50">
-        {navItems.map((item) => (
+        {mobileNavItems.map((item) => (
           <MobileNavLink key={item.href} {...item} />
         ))}
       </nav>

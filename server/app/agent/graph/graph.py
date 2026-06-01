@@ -1122,6 +1122,20 @@ async def _build_agent_context(
     except Exception as exc:
         pipeline_logger.warning("contract_load_in_context_error", error=str(exc)[:200])
 
+    # Resolve per-org AI settings (keys/deployments + live DB DSN) once, here
+    # where we have the db session + org context. Resolved BEFORE the tool block
+    # so the live org-DB tools can be registered alongside the Parquet tools.
+    # Falls back to global config when the flag is off, org_id is None, or no
+    # OrgAISettings row exists. Never raises.
+    _org_ai = None
+    try:
+        from app.services.org_ai_resolver import resolve_org_ai_settings
+
+        _org_ai = await resolve_org_ai_settings(org_id, db)
+    except Exception as exc:  # global fallback must always work
+        pipeline_logger.warning("org_ai_resolve_error", error=str(exc)[:200])
+        _org_ai = None
+
     # Build tools
     all_tools = []
     all_tools.extend(build_sql_tools(
@@ -1165,6 +1179,28 @@ async def _build_agent_context(
         file_identities=file_identity_map,
     ))
 
+    # ── Live read-only org Postgres data source ─────────────────────────────
+    # Conditionally registered: only when ORG_LIVE_DB_ENABLED is on AND the
+    # resolved org AI settings carry a non-empty postgres_url. Introspection is
+    # fetched once (snapshotted into list_org_database). Guarded so any failure
+    # (connect/introspect) never breaks normal chat — the Parquet tools remain.
+    try:
+        from app.core.config import get_settings as _gs  # noqa: PLC0415
+
+        _org_dsn = (_org_ai or {}).get("postgres_url") if _org_ai else None
+        if _gs().ORG_LIVE_DB_ENABLED and _org_dsn:
+            from app.core.org_postgres_client import introspect as _org_introspect
+            from app.agent.tools.org_postgres import build_org_postgres_tools
+
+            _org_introspection = await _org_introspect(_org_dsn)
+            all_tools.extend(build_org_postgres_tools(_org_dsn, _org_introspection))
+            pipeline_logger.info(
+                "org_live_db_tools_registered",
+                table_count=len(_org_introspection),
+            )
+    except Exception as exc:
+        pipeline_logger.warning("org_live_db_tools_error", error=str(exc)[:200])
+
     # ── GATE A: BUSINESS FEASIBILITY (the BA reflex) ─────────────────────────
     # Deterministic, in-memory check over the finalized shortlist. The temporal
     # check can short-circuit (exact date math); polarity/completeness produce
@@ -1203,18 +1239,6 @@ async def _build_agent_context(
             )
     except Exception as exc:
         pipeline_logger.warning("feasibility_gate_error", error=str(exc)[:200])
-
-    # Resolve per-org AI settings (keys/deployments) once, here where we have the
-    # db session + org context. Falls back to global config when the flag is off,
-    # org_id is None, or no OrgAISettings row exists. Never raises.
-    _org_ai = None
-    try:
-        from app.services.org_ai_resolver import resolve_org_ai_settings
-
-        _org_ai = await resolve_org_ai_settings(org_id, db)
-    except Exception as exc:  # global fallback must always work
-        pipeline_logger.warning("org_ai_resolve_error", error=str(exc)[:200])
-        _org_ai = None
 
     # Build graph and system prompt concurrently — both are pure CPU computation
     # with no shared mutable state. Overlapping them hides whichever is slower.

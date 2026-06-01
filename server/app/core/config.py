@@ -84,6 +84,17 @@ class Settings(BaseSettings):
     ORG_AI_KEYS_ENABLED: bool = True
     ONBOARDING_REQUIRED: bool = True
 
+    # ORG_LIVE_DB_ENABLED — gate for the live read-only org Postgres data source.
+    #   Naturally gated: the org_postgres tools only activate when an org actually
+    #   has a non-empty postgres_url resolved from OrgAISettings. When True, a
+    #   resolved DSN registers two read-only LangChain tools (list_org_database,
+    #   run_org_sql) alongside the Parquet tools; failures never break normal chat.
+    # ORG_DB_QUERY_TIMEOUT_SECONDS — statement/connection timeout for live queries.
+    # ORG_DB_MAX_ROWS — hard cap on rows returned by a live read-only SELECT.
+    ORG_LIVE_DB_ENABLED: bool = True
+    ORG_DB_QUERY_TIMEOUT_SECONDS: int = 15
+    ORG_DB_MAX_ROWS: int = 1000
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 

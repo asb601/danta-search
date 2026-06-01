@@ -1,7 +1,8 @@
 "use client";
 
 // Step 2 — AI settings. PUT /api/onboarding/ai-settings
-// chat / embeddings / fallback API keys (+ optional endpoint/deployment/api_version).
+// chat / embeddings / fallback API keys + postgres_url
+// (+ optional chat_endpoint/deployment/api_version).
 
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
@@ -23,9 +24,7 @@ export function StepAiSettings({
   const [embeddingsKey, setEmbeddingsKey] = useState("");
   const [fallbackKey, setFallbackKey] = useState("");
   const [chatEndpoint, setChatEndpoint] = useState(pre?.chat_endpoint ?? "");
-  const [embeddingsEndpoint, setEmbeddingsEndpoint] = useState(
-    pre?.embeddings_endpoint ?? "",
-  );
+  const [postgresUrl, setPostgresUrl] = useState(pre?.postgres_url ?? "");
   const [deployment, setDeployment] = useState(pre?.chat_deployment ?? "");
   const [apiVersion, setApiVersion] = useState(pre?.api_version ?? "");
 
@@ -33,6 +32,8 @@ export function StepAiSettings({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // Inline error attached to the Postgres URL field (e.g. 422 connect failure).
+  const [postgresError, setPostgresError] = useState<string | null>(null);
 
   const alreadyConfigured = !!pre?.configured;
 
@@ -40,11 +41,16 @@ export function StepAiSettings({
     e.preventDefault();
     setError(null);
     setSuccess(null);
+    setPostgresError(null);
 
     // When not yet configured, keys are required. When re-editing, allow leaving
     // a key blank to keep the existing stored value.
     if (!alreadyConfigured && (!chatKey.trim() || !embeddingsKey.trim())) {
       setError("Chat and embeddings API keys are required.");
+      return;
+    }
+    if (!alreadyConfigured && !postgresUrl.trim()) {
+      setError("Postgres URL is required.");
       return;
     }
 
@@ -55,8 +61,7 @@ export function StepAiSettings({
       if (embeddingsKey.trim()) body.embeddings_api_key = embeddingsKey.trim();
       if (fallbackKey.trim()) body.fallback_api_key = fallbackKey.trim();
       if (chatEndpoint.trim()) body.chat_endpoint = chatEndpoint.trim();
-      if (embeddingsEndpoint.trim())
-        body.embeddings_endpoint = embeddingsEndpoint.trim();
+      if (postgresUrl.trim()) body.postgres_url = postgresUrl.trim();
       if (deployment.trim()) body.chat_deployment = deployment.trim();
       if (apiVersion.trim()) body.api_version = apiVersion.trim();
 
@@ -67,6 +72,12 @@ export function StepAiSettings({
       });
       if (!res.ok) {
         const msg = await safeError(res);
+        // A 422 means the postgres_url could not connect — surface it inline on
+        // the Postgres URL field and do NOT advance.
+        if (res.status === 422) {
+          setPostgresError(msg);
+          return;
+        }
         throw new Error(msg);
       }
       setSuccess("AI settings saved.");
@@ -142,6 +153,31 @@ export function StepAiSettings({
         />
       </Field>
 
+      <Field
+        label="Postgres URL"
+        htmlFor="postgres-url"
+        required={!alreadyConfigured}
+        hint="PostgreSQL connection string for this organization's metadata database."
+        error={postgresError}
+      >
+        <input
+          id="postgres-url"
+          type="text"
+          autoComplete="off"
+          className="field-input"
+          placeholder={
+            alreadyConfigured
+              ? "•••••••• (unchanged)"
+              : "postgresql://user:pass@host:5432/db"
+          }
+          value={postgresUrl}
+          onChange={(e) => {
+            setPostgresUrl(e.target.value);
+            if (postgresError) setPostgresError(null);
+          }}
+        />
+      </Field>
+
       {/* Advanced (endpoint / deployment / api version) */}
       <button
         type="button"
@@ -158,7 +194,7 @@ export function StepAiSettings({
       {showAdvanced && (
         <div className="space-y-5 pl-1 border-l-2 border-[#e5e5e5] ml-1 pt-1">
           <div className="pl-4 space-y-5">
-            <Field label="Chat endpoint" htmlFor="chat-ep">
+            <Field label="OpenAI base URL" htmlFor="chat-ep">
               <input
                 id="chat-ep"
                 type="url"
@@ -166,16 +202,6 @@ export function StepAiSettings({
                 placeholder="https://<resource>.openai.azure.com"
                 value={chatEndpoint}
                 onChange={(e) => setChatEndpoint(e.target.value)}
-              />
-            </Field>
-            <Field label="Embeddings endpoint" htmlFor="emb-ep">
-              <input
-                id="emb-ep"
-                type="url"
-                className="field-input"
-                placeholder="https://<resource>.openai.azure.com"
-                value={embeddingsEndpoint}
-                onChange={(e) => setEmbeddingsEndpoint(e.target.value)}
               />
             </Field>
             <Field label="Deployment name" htmlFor="deployment">

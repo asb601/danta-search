@@ -38,6 +38,8 @@ class OrgAISettings(Base):
     fallback_api_key: Mapped[str | None] = mapped_column(
         EncryptedText, nullable=True
     )
+    # Per-org PostgreSQL DSN (carries a DB password → encrypted at rest).
+    postgres_url: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
 
     # ── Endpoints / deployments (non-secret) ────────────────────────────────
     chat_endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)

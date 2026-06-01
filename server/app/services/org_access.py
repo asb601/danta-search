@@ -79,6 +79,56 @@ async def user_can_access_org(user: User, org_id: str, db: AsyncSession) -> bool
     return len(await _assigned_domains(user.id, org_id, db)) > 0
 
 
+async def platform_admin_has_container_grant(
+    user: User, container_id: str | None, db: AsyncSession
+) -> bool:
+    """Whether `user` is a platform admin holding an active grant for the
+    organization that owns `container_id`.
+
+    Used by the file/folder guards to extend FULL (read+write) access to a
+    granted org's containers, bypassing the per-domain filter.
+    """
+    if not container_id:
+        return False
+    if not (getattr(user, "is_platform_admin", False) or user.role == "platform_admin"):
+        return False
+
+    from app.models.container import ContainerConfig
+
+    org_id = (
+        await db.execute(
+            select(ContainerConfig.organization_id).where(
+                ContainerConfig.id == container_id
+            )
+        )
+    ).scalar_one_or_none()
+    if not org_id:
+        return False
+    return await _has_active_platform_grant(user.id, org_id, db)
+
+
+async def can_write_org(user: User, org_id: str, db: AsyncSession) -> bool:
+    """Whether `user` may WRITE (upload/delete/modify) within organization `org_id`.
+
+    True when:
+      * the user is a platform admin holding an *active* PlatformAdminGrant for
+        that org, OR
+      * the user is the org_owner / org_admin of that org (org_id == user.org).
+    """
+    if org_id is None:
+        return False
+
+    # Platform admins: only through an explicit active grant for this org.
+    if getattr(user, "is_platform_admin", False) or user.role == "platform_admin":
+        return await _has_active_platform_grant(user.id, org_id, db)
+
+    # Org owners / admins: only their own org.
+    if user.role in _ORG_ADMIN_ROLES:
+        return getattr(user, "organization_id", None) == org_id
+
+    return False
+
+
 async def effective_domains_for(
     user: User, org_id: str, db: AsyncSession
 ) -> list[str] | None:

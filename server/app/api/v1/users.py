@@ -7,8 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logger import auth_logger
-from app.dependencies import get_current_user, require_admin
+from app.dependencies import get_current_user, require_admin, require_platform_admin
 from app.services.audit_log import record_audit_event_safe
+from app.services.org_provisioning import provision_owner_org
+from app.models.access_request import AccessRequest
 from app.models.file import File
 from app.models.folder import Folder
 from app.models.organization import Organization
@@ -46,6 +48,14 @@ class _RoleBody(BaseModel):
 
 class _OrgAssignBody(BaseModel):
     organization_id: str | None  # None = detach (turn into platform admin)
+
+
+class _GrantBody(BaseModel):
+    # "owner" → promote to org_owner + provision an Organization (Google-SSO client).
+    # "admin" → promote to internal platform admin (no organization).
+    role: str
+    # Optional org name used when role == "owner".
+    org_name: str | None = None
 
 
 @router.get("/domains")
@@ -113,6 +123,117 @@ async def list_users(
     ]
     auth_logger.info("users_list_complete", count=len(users), duration_ms=round((time.perf_counter() - start) * 1000, 2))
     return users
+
+
+@router.get("/pending")
+async def list_pending_users(
+    admin: User = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Users with a pending AccessRequest, including their proposed org_name.
+
+    Frozen contract:
+      [{id, email, name, org_name, status}]
+    where id/email/name/status come from the AccessRequest's user and org_name
+    from the request itself.
+    """
+    rows = (
+        await db.execute(
+            select(AccessRequest)
+            .where(AccessRequest.status == "pending")
+            .order_by(AccessRequest.requested_at)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": r.user.id,
+            "email": r.user.email,
+            "name": r.user.name,
+            "org_name": r.org_name,
+            "status": r.status,
+        }
+        for r in rows
+    ]
+
+
+@router.patch("/{user_id}/grant")
+async def grant_user(
+    user_id: str,
+    body: _GrantBody,
+    admin: User = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Grant a pending user a role (platform admin only).
+
+    body.role:
+      "owner" → provision an Organization + promote to org_owner (Google-SSO).
+      "admin" → promote to internal platform admin (is_platform_admin=True).
+
+    Any pending AccessRequest for the user is marked approved.
+    """
+    role = (body.role or "").strip().lower()
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=400, detail="role must be one of: 'owner', 'admin'")
+
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    new_org_id: str | None = None
+    try:
+        if role == "owner":
+            # Prefer the approver's explicit org_name; fall back to the name the
+            # requester proposed at submit time; finally the email local-part.
+            req_for_name = (
+                await db.execute(
+                    select(AccessRequest).where(
+                        AccessRequest.user_id == user_id,
+                        AccessRequest.status == "pending",
+                    )
+                )
+            ).scalar_one_or_none()
+            org_name = (
+                (body.org_name or "").strip()
+                or ((req_for_name.org_name or "").strip() if req_for_name else "")
+                or None
+            )
+            org = await provision_owner_org(db, user, org_name)
+            new_org_id = org.id
+        else:  # role == "admin"
+            user.role = "admin"
+            user.is_platform_admin = True
+            user.is_admin = True
+            user.allowed_domains = []
+
+        # Mark any pending access request for this user approved.
+        await db.execute(
+            update(AccessRequest)
+            .where(
+                AccessRequest.user_id == user_id,
+                AccessRequest.status == "pending",
+            )
+            .values(status="approved", reviewed_by_id=admin.id)
+        )
+
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    auth_logger.info(
+        "user_granted",
+        user_id=user_id,
+        granted_role=role,
+        org_id=new_org_id,
+        by=admin.email,
+    )
+    return {
+        "id": user.id,
+        "role": user.role,
+        "is_admin": user.is_admin,
+        "is_platform_admin": user.is_platform_admin,
+        "organization_id": user.organization_id,
+    }
 
 
 @router.patch("/{user_id}/toggle-admin")

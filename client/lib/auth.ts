@@ -79,6 +79,21 @@ export async function fetchMe(): Promise<User | null> {
   try {
     const res = await apiFetch("/api/auth/me", { signal: controller.signal });
     if (res.status === 401 || res.status === 403) {
+      // EXEMPT the onboarding gate: a 403 with { onboarding_required: true } is
+      // NOT an invalid session — the org owner just hasn't finished onboarding.
+      // Keep the token so the layout can redirect to /onboarding/setup instead
+      // of logging the user out.
+      if (res.status === 403) {
+        try {
+          const body = await res.clone().json();
+          if (body?.onboarding_required === true) {
+            const cached = getCachedUser();
+            if (cached) return cached;
+          }
+        } catch {
+          /* not JSON / no body — fall through to normal logout */
+        }
+      }
       clearToken();
       return null; // Definitive: token is invalid
     }

@@ -13,8 +13,10 @@ export default function OnboardingPage() {
   const router = useRouter();
 
   const [status, setStatus] = useState<AccessStatus>("loading");
+  const [orgName, setOrgName] = useState("");
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Admins go straight to chat
   useEffect(() => {
@@ -50,16 +52,35 @@ export default function OnboardingPage() {
   }, [loading, user, router]);
 
   const handleSubmit = async () => {
+    setSubmitError(null);
+    if (!orgName.trim()) {
+      setSubmitError("Organization name is required.");
+      return;
+    }
     setSubmitting(true);
     try {
-      await apiFetch("/api/access-requests/me", {
+      const res = await apiFetch("/api/access-requests/me", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: message.trim() || null }),
+        body: JSON.stringify({
+          org_name: orgName.trim(),
+          message: message.trim() || null,
+        }),
       });
+      if (!res.ok) {
+        let detail = "Failed to submit request.";
+        try {
+          const body = await res.json();
+          if (typeof body?.detail === "string") detail = body.detail;
+        } catch {
+          /* ignore parse errors */
+        }
+        setSubmitError(detail);
+        return;
+      }
       setStatus("pending");
     } catch {
-      // stay on form, user can retry
+      setSubmitError("Network error. Please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -105,6 +126,18 @@ export default function OnboardingPage() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">
+                  Organization name
+                </label>
+                <input
+                  type="text"
+                  value={orgName}
+                  onChange={(e) => setOrgName(e.target.value)}
+                  placeholder="e.g. Acme Corp"
+                  className="w-full px-3 py-2 rounded-xl border border-border bg-surface text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-1.5">
                   Message <span className="text-muted-foreground font-normal">(optional)</span>
                 </label>
                 <textarea
@@ -117,9 +150,13 @@ export default function OnboardingPage() {
               </div>
             </div>
 
+            {submitError && (
+              <p className="text-sm text-destructive">{submitError}</p>
+            )}
+
             <button
               onClick={handleSubmit}
-              disabled={submitting}
+              disabled={submitting || !orgName.trim()}
               className="w-full py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium disabled:opacity-40 hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
             >
               {submitting ? (

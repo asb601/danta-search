@@ -44,6 +44,8 @@ def _global_settings_dict() -> dict[str, Any]:
         "fallback_api_key": api_key,
         "fallback_deployment": settings.AZURE_OPENAI_DEPLOYMENT_MINI or "gpt-4o-mini",
         "api_version": api_version,
+        # No global per-org DB DSN; live DB-routing resolves per-org only.
+        "postgres_url": None,
     }
 
 
@@ -104,4 +106,7 @@ async def resolve_org_ai_settings(
         "fallback_deployment": _pick(row.fallback_deployment, "fallback_deployment")
         or "gpt-4o-mini",
         "api_version": _pick(row.api_version, "api_version"),
+        # Per-org DB DSN (encrypted at rest); resolved + returned for later
+        # live DB-routing. No global fallback.
+        "postgres_url": _pick(row.postgres_url, "postgres_url"),
     }

@@ -186,6 +186,7 @@ async def lifespan(app: FastAPI):
         ("org_ai_settings_upgrade", "org_ai_settings"),
         ("platform_admin_grant_upgrade", "platform_admin_grant"),
         ("local_auth_upgrade", "local_auth"),
+        ("access_org_ai_upgrade", "access_org_ai"),
     ]:
         try:
             _mod = __import__(f"app.migrations.{_mod_name}", fromlist=["migrate"])

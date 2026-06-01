@@ -19,6 +19,8 @@ class AccessRequest(Base):
     # "pending" | "approved" | "declined"
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Org name the requester proposes; used as the Organization name on approval.
+    org_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     requested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

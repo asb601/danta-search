@@ -83,6 +83,7 @@ export interface OnboardingState {
     embeddings_endpoint?: string | null;
     chat_deployment?: string | null;
     api_version?: string | null;
+    postgres_url?: string | null;
     configured?: boolean | null;
   } | null;
   storage?: {

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.logger import folder_logger, db_logger
 from app.dependencies import get_current_user, require_admin, require_developer
+from app.services.org_access import platform_admin_has_container_grant
 from app.api.v1.files import _file_to_out
 from app.models.file import File
 from app.models.folder import Folder
@@ -34,9 +35,16 @@ async def get_folder_contents(
 
     is_root = folder_id == "root"
 
+    # Grant-aware FULL access: a platform admin holding an active grant for the
+    # organization that owns `container_id` browses that org's containers without
+    # the per-domain filter (read access scoped to the granted org).
+    full_access = bool(user.is_admin)
+    if not full_access and container_id:
+        full_access = await platform_admin_has_container_grant(user, container_id, db)
+
     # Members with no assigned domains see nothing — empty folder until a higher
     # role grants them at least one domain.
-    if not user.is_admin and not user.allowed_domains:
+    if not full_access and not user.allowed_domains:
         return FolderContents(folders=[], files=[])
     # Resolve effective domain restriction by walking ancestors. A subfolder
     # without its own domain_tag inherits the tag of its nearest tagged
@@ -59,7 +67,7 @@ async def get_folder_contents(
     # Non-root folder access check: if user has domain restrictions, verify they
     # can access this specific folder (or any tagged ancestor) before listing
     # its contents.
-    if not is_root and user.allowed_domains:
+    if not full_access and not is_root and user.allowed_domains:
         eff_tag = await _effective_domain_tag(folder_id)
         if eff_tag and eff_tag not in user.allowed_domains:
             raise HTTPException(status_code=403, detail="Access to this folder is restricted")
@@ -79,7 +87,7 @@ async def get_folder_contents(
     #   - At root: untagged folders are hidden.
     #   - Inside an authorised folder: untagged subfolders inherit the parent's
     #     domain and are shown (admin created them inside the domain folder).
-    if user.allowed_domains:
+    if not full_access and user.allowed_domains:
         if is_root:
             # Root-level — must be explicitly tagged with an allowed domain.
             folder_stmt = folder_stmt.where(
@@ -115,7 +123,7 @@ async def get_folder_contents(
     # Domain scope: only show files in folders the user is allowed to access.
     # Rule: domain-restricted users NEVER see root-level files (no domain tag)
     # and NEVER see files in untagged non-root folders at root browsing level.
-    if user.allowed_domains:
+    if not full_access and user.allowed_domains:
         if is_root:
             # Domain users should not see any root-level (no-folder) files.
             # Root files have no domain tag — they are admin/system artefacts.

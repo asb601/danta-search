@@ -46,19 +46,25 @@ interface AccessRequestItem {
   user_picture: string | null;
   status: string;
   message: string | null;
+  org_name: string | null;
   requested_at: string;
 }
 
-interface AccessRequestItem {
+/** Pending requester awaiting a role grant. Backend contract:
+ *  GET /api/users/pending -> [{id,email,name,org_name,status}] */
+interface PendingUser {
   id: string;
-  user_id: string;
-  user_email: string;
-  user_name: string | null;
-  user_picture: string | null;
+  email: string;
+  name: string | null;
+  org_name: string | null;
   status: string;
-  message: string | null;
-  requested_at: string;
 }
+
+/** The two grantable roles, shown verbatim in the grant dropdown. */
+const GRANT_ROLES: { value: "owner" | "admin"; label: string }[] = [
+  { value: "owner", label: "Organization owner" },
+  { value: "admin", label: "Application admin" },
+];
 
 /* ── fetchers ────────────────────────────────────────────────────────────── */
 
@@ -77,6 +83,12 @@ const domainsFetcher = async (): Promise<string[]> => {
 
 const accessRequestsFetcher = async (): Promise<AccessRequestItem[]> => {
   const res = await apiFetch("/api/access-requests");
+  if (!res.ok) return [];
+  return res.json();
+};
+
+const pendingUsersFetcher = async (): Promise<PendingUser[]> => {
+  const res = await apiFetch("/api/users/pending");
   if (!res.ok) return [];
   return res.json();
 };
@@ -484,13 +496,90 @@ function RoleDropdown({
   );
 }
 
+/* ── Grant-role dropdown (pending requesters) ────────────────────────────── */
+/* Exactly two options: "owner" (Organization owner) and "admin" (Application
+ * admin). Selecting one fires the grant callback. */
+
+function GrantRoleDropdown({
+  disabled,
+  onSelect,
+}: {
+  disabled: boolean;
+  onSelect: (role: "owner" | "admin") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((p) => !p)}
+        className={cn(
+          "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium border transition-colors",
+          "bg-[#0a0a0a] text-white border-[#0a0a0a] hover:opacity-90",
+          disabled && "opacity-50 cursor-not-allowed"
+        )}
+      >
+        {disabled ? (
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        ) : (
+          <UserCheck className="w-3.5 h-3.5" />
+        )}
+        Grant role
+        {!disabled && <ChevronDown className="w-2.5 h-2.5 ml-0.5" />}
+      </button>
+
+      {open && (
+        <div className="absolute z-30 mt-1 right-0 w-52 rounded-xl border border-[#e5e5e5] bg-white shadow-[0_4px_20px_rgba(0,0,0,0.1)] overflow-hidden">
+          {GRANT_ROLES.map((r) => (
+            <button
+              key={r.value}
+              type="button"
+              onClick={() => {
+                onSelect(r.value);
+                setOpen(false);
+              }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-left text-[#0a0a0a] hover:bg-[#f4f4f4] transition-colors"
+            >
+              {r.value === "owner" ? (
+                <Shield className="w-3.5 h-3.5 text-[#0a0a0a] shrink-0" />
+              ) : (
+                <ShieldOff className="w-3.5 h-3.5 text-[#737373] shrink-0" />
+              )}
+              <span>{r.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Users tab (admin only) ──────────────────────────────────────────────── */
 
 function UsersTab({ currentUserId }: { currentUserId: string }) {
   const { data: users, mutate } = useSWR("users-list", usersFetcher, {
     revalidateOnFocus: false,
   });
-  const { data: pendingRequests, mutate: mutateRequests } = useSWR(
+  // Pending requesters awaiting a role grant (GET /api/users/pending).
+  const { data: pendingUsers, mutate: mutatePending } = useSWR(
+    "users-pending",
+    pendingUsersFetcher,
+    { revalidateOnFocus: true, refreshInterval: 30000 },
+  );
+  // Access requests kept only to map a pending user → its request id for Decline.
+  const { data: accessRequests, mutate: mutateRequests } = useSWR(
     "access-requests",
     accessRequestsFetcher,
     { revalidateOnFocus: true, refreshInterval: 30000 },
@@ -499,6 +588,7 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
   const handleSetRole = useCallback(
     async (userId: string, role: string) => {
@@ -526,22 +616,72 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
     [handleSetRole]
   );
 
-  const handleReview = useCallback(
-    async (requestId: string, action: "approve" | "decline") => {
-      setReviewingId(requestId);
+  const extractError = async (res: Response): Promise<string> => {
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === "string") return body.detail;
+      if (Array.isArray(body?.detail)) {
+        return body.detail
+          .map((d: { msg?: string }) => d?.msg)
+          .filter(Boolean)
+          .join("; ");
+      }
+    } catch {
+      /* ignore parse errors */
+    }
+    return `Request failed (${res.status}).`;
+  };
+
+  // Grant a role to a pending requester. PATCH /api/users/{id}/grant with a
+  // JSON body {role, org_name?}. role is one of "owner" | "admin".
+  const handleGrant = useCallback(
+    async (userId: string, role: "owner" | "admin", orgName: string | null) => {
+      setReviewError(null);
+      setReviewingId(userId);
       try {
-        const res = await apiFetch(`/api/access-requests/${requestId}/${action}`, {
+        const res = await apiFetch(`/api/users/${userId}/grant`, {
           method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            role,
+            org_name: orgName ?? undefined,
+          }),
         });
-        if (res.ok) {
-          mutateRequests();
-          mutate(); // refresh users list too
+        if (!res.ok) {
+          setReviewError(await extractError(res));
+          return;
         }
+        mutatePending();
+        mutateRequests();
+        mutate(); // refresh users list too
       } finally {
         setReviewingId(null);
       }
     },
-    [mutate, mutateRequests]
+    [mutate, mutatePending, mutateRequests]
+  );
+
+  // Decline stays a bodyless PATCH on the access-request id.
+  const handleDecline = useCallback(
+    async (requestId: string) => {
+      setReviewError(null);
+      setReviewingId(requestId);
+      try {
+        const res = await apiFetch(`/api/access-requests/${requestId}/decline`, {
+          method: "PATCH",
+        });
+        if (!res.ok) {
+          setReviewError(await extractError(res));
+          return;
+        }
+        mutatePending();
+        mutateRequests();
+        mutate();
+      } finally {
+        setReviewingId(null);
+      }
+    },
+    [mutate, mutatePending, mutateRequests]
   );
 
   const handleDeleteUser = useCallback(
@@ -569,8 +709,8 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
   return (
     <div className="space-y-6 max-w-xl">
 
-      {/* ── Pending access requests ── */}
-      {pendingRequests && pendingRequests.length > 0 && (
+      {/* ── Pending requesters → grant a role ── */}
+      {pendingUsers && pendingUsers.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <Clock className="w-3.5 h-3.5 text-amber-500" />
@@ -578,68 +718,63 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
               Pending requests
             </p>
             <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-amber-500/12 text-amber-600">
-              {pendingRequests.length}
+              {pendingUsers.length}
             </span>
           </div>
 
-          {pendingRequests.map((req) => {
-            const reviewing = reviewingId === req.id;
+          {reviewError && (
+            <p className="text-[12px] text-[#dc2626]">{reviewError}</p>
+          )}
+
+          {pendingUsers.map((p) => {
+            const reviewing = reviewingId === p.id;
+            // Map this pending user → its access-request id (for Decline).
+            const request = accessRequests?.find((r) => r.user_id === p.id);
+            const declining = request ? reviewingId === request.id : false;
             return (
               <motion.div
-                key={req.id}
+                key={p.id}
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 className="flex items-start justify-between gap-4 px-4 py-3 rounded-xl border border-amber-200 bg-amber-50/60"
               >
                 <div className="flex items-start gap-3 min-w-0">
-                  {req.user_picture ? (
-                    <img
-                      src={req.user_picture}
-                      alt=""
-                      className="w-9 h-9 rounded-full border border-[#e5e5e5] mt-0.5 shrink-0"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="w-9 h-9 rounded-full bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center shrink-0 mt-0.5">
-                      <UserCircle className="w-5 h-5 text-[#a3a3a3]" />
-                    </div>
-                  )}
+                  <div className="w-9 h-9 rounded-full bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center shrink-0 mt-0.5">
+                    <UserCircle className="w-5 h-5 text-[#a3a3a3]" />
+                  </div>
                   <div className="min-w-0">
                     <p className="text-[13px] font-medium text-[#0a0a0a] truncate">
-                      {req.user_name || req.user_email}
+                      {p.name || p.email}
                     </p>
-                    <p className="text-[11px] text-[#737373] truncate">{req.user_email}</p>
-                    {req.message && (
-                      <p className="text-[11px] text-[#737373] mt-1 italic">
-                        &ldquo;{req.message}&rdquo;
+                    <p className="text-[11px] text-[#737373] truncate">{p.email}</p>
+                    {p.org_name && (
+                      <p className="text-[11px] text-[#737373] truncate mt-0.5">
+                        Org: <span className="font-medium text-[#0a0a0a]">{p.org_name}</span>
                       </p>
                     )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0 mt-0.5">
-                  <button
-                    onClick={() => handleReview(req.id, "approve")}
-                    disabled={reviewing}
-                    title="Approve"
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-green-500/10 text-green-700 hover:bg-green-500/18 transition-colors disabled:opacity-40"
-                  >
-                    {reviewing ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <UserCheck className="w-3.5 h-3.5" />
-                    )}
-                    Approve
-                  </button>
-                  <button
-                    onClick={() => handleReview(req.id, "decline")}
-                    disabled={reviewing}
-                    title="Decline"
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-[#dc2626]/8 text-[#dc2626] hover:bg-[#dc2626]/15 transition-colors disabled:opacity-40"
-                  >
-                    <UserX className="w-3.5 h-3.5" />
-                    Decline
-                  </button>
+                  <GrantRoleDropdown
+                    disabled={reviewing || declining}
+                    onSelect={(role) => handleGrant(p.id, role, p.org_name)}
+                  />
+                  {request && (
+                    <button
+                      onClick={() => handleDecline(request.id)}
+                      disabled={reviewing || declining}
+                      title="Decline"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-[#dc2626]/8 text-[#dc2626] hover:bg-[#dc2626]/15 transition-colors disabled:opacity-40"
+                    >
+                      {declining ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <UserX className="w-3.5 h-3.5" />
+                      )}
+                      Decline
+                    </button>
+                  )}
                 </div>
               </motion.div>
             );
@@ -649,7 +784,7 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
 
       {/* ── Existing users ── */}
       <div className="space-y-3">
-        {pendingRequests && pendingRequests.length > 0 && (
+        {pendingUsers && pendingUsers.length > 0 && (
           <p className="text-[11px] font-semibold text-[#a3a3a3] uppercase tracking-widest">Members</p>
         )}
       {users.map((u, idx) => {

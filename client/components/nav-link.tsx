@@ -12,8 +12,8 @@ interface NavLinkProps {
   label: string;
 }
 
-/** Horizontal top-bar nav link — used in the app shell top nav */
-export function NavLink({ href, icon: Icon, label }: NavLinkProps) {
+/** Inside the Dynamic Island — dark background, white text */
+export function IslandNavLink({ href, icon: Icon, label }: NavLinkProps) {
   const pathname = usePathname();
   const isActive = pathname === href || pathname.startsWith(href + "/");
 
@@ -21,24 +21,25 @@ export function NavLink({ href, icon: Icon, label }: NavLinkProps) {
     <Link
       href={href}
       className={cn(
-        "relative flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[13px] font-medium transition-colors duration-150 whitespace-nowrap",
-        isActive ? "text-white" : "text-[#737373] hover:text-[#0a0a0a] hover:bg-[#f4f4f4]"
+        "relative flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-[13px] font-medium transition-colors duration-150 whitespace-nowrap select-none",
+        isActive ? "text-[#0a0a0a]" : "text-white/60 hover:text-white/90"
       )}
     >
       {isActive && (
         <motion.span
-          layoutId="topnav-active-pill"
-          className="absolute inset-0 rounded-full bg-[#0a0a0a]"
-          style={{ boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 1px 4px rgba(0,0,0,0.12)" }}
-          transition={{ type: "spring", stiffness: 420, damping: 36 }}
+          layoutId="island-active-pill"
+          className="absolute inset-0 rounded-full bg-white"
+          style={{ boxShadow: "0 1px 4px rgba(0,0,0,0.12)" }}
+          transition={{ type: "spring", stiffness: 420, damping: 34 }}
         />
       )}
-      <Icon className={cn("w-3.5 h-3.5 shrink-0 relative z-10", isActive ? "text-white" : "text-[#a3a3a3]")} />
+      <Icon className={cn("w-3.5 h-3.5 shrink-0 relative z-10", isActive ? "text-[#0a0a0a]" : "text-white/50")} />
       <span className="relative z-10">{label}</span>
     </Link>
   );
 }
 
+/** Mobile bottom nav link */
 export function MobileNavLink({ href, icon: Icon, label }: NavLinkProps) {
   const pathname = usePathname();
   const isActive = pathname === href || pathname.startsWith(href + "/");
@@ -55,10 +56,16 @@ export function MobileNavLink({ href, icon: Icon, label }: NavLinkProps) {
         <motion.span
           layoutId="mobile-nav-indicator"
           className="absolute top-0 left-1/2 -translate-x-1/2 w-6 h-0.5 rounded-full bg-[#0a0a0a]"
+          transition={{ type: "spring", stiffness: 420, damping: 34 }}
         />
       )}
       <Icon className="w-5 h-5" />
       <span className={cn("text-[10px]", isActive ? "font-semibold" : "font-normal")}>{label}</span>
     </Link>
   );
+}
+
+/** Legacy — kept for any remaining usage */
+export function NavLink({ href, icon: Icon, label }: NavLinkProps) {
+  return <IslandNavLink href={href} icon={Icon} label={label} />;
 }

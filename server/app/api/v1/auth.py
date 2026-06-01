@@ -74,12 +74,18 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         # First ever user becomes admin automatically
         any_user = await db.execute(select(User.id).limit(1))
         is_first_user = any_user.scalar_one_or_none() is None
+        # New Google users default to role="owner" (pending). This is a label
+        # only — they still have NO organization_id and must request access /
+        # be granted by a platform admin before they can reach any data. This
+        # grants no access on its own.
         user = User(
             email=email,
             name=name,
             picture=picture,
             is_admin=is_first_user,
+            is_platform_admin=is_first_user,
             auth_provider="google",
+            role="platform_admin" if is_first_user else "owner",
         )
         db.add(user)
 
