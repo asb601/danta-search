@@ -124,7 +124,6 @@ export default function ProfilePage() {
           </div>
           <h1
             className="text-[17px] font-bold text-[#0a0a0a]"
-            style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}
           >
             Profile
           </h1>
@@ -236,7 +235,6 @@ function ProfileTab() {
           <div className="min-w-0">
             <p
               className="text-[18px] font-bold text-[#0a0a0a] truncate"
-              style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}
             >
               {user.name || "—"}
             </p>
@@ -353,7 +351,7 @@ function DomainPickerModal({
         className="w-full max-w-sm bg-white border border-[#e5e5e5] rounded-2xl shadow-xl p-6 space-y-4"
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-[15px] font-bold text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}>Edit Departments</h2>
+          <h2 className="text-[15px] font-bold text-[#0a0a0a]">Edit Departments</h2>
           <button onClick={onClose} className="p-1.5 rounded-lg text-[#a3a3a3] hover:text-[#0a0a0a] hover:bg-[#f4f4f4] transition-colors">
             <X className="w-4 h-4" />
           </button>
@@ -1458,7 +1456,7 @@ function FilePickerModal({
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#e5e5e5]">
           <div>
-            <h2 className="text-[15px] font-bold text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}>Add Files to {domain}</h2>
+            <h2 className="text-[15px] font-bold text-[#0a0a0a]">Add Files to {domain}</h2>
             <p className="text-[11px] text-[#a3a3a3] mt-0.5">
               {selected.size} file{selected.size !== 1 ? "s" : ""} selected
             </p>

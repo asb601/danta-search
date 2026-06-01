@@ -82,11 +82,11 @@ const pendingUsersFetcher = async (): Promise<PendingUser[]> => {
 
 /* ── Role dropdown component ─────────────────────────────────────────────── */
 
+// This is the platform-admin Users page: a person is either the Organization
+// OWNER or an application ADMIN — those are the only two assignable roles here.
 const ROLES: { value: string; label: string; color: string }[] = [
-  { value: "admin",     label: "Admin",     color: "text-primary" },
-  { value: "developer", label: "Developer", color: "text-violet-400" },
-  { value: "manager",   label: "Manager",   color: "text-cyan-400" },
-  { value: "user",      label: "Member",    color: "text-[#737373]" },
+  { value: "owner", label: "Owner", color: "text-[#0a0a0a]" },
+  { value: "admin", label: "Admin", color: "text-[#0a0a0a]" },
 ];
 
 function RoleDropdown({
@@ -110,7 +110,7 @@ function RoleDropdown({
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const current = ROLES.find((r) => r.value === currentRole) ?? ROLES[3];
+  const current = ROLES.find((r) => r.value === currentRole) ?? ROLES[0];
 
   return (
     <div className="relative" ref={ref}>
@@ -263,17 +263,19 @@ export default function UsersTabContent({ currentUserId }: { currentUserId: stri
     async (userId: string, role: string) => {
       setChangingRoleId(userId);
       try {
-        const res = await apiFetch(`/api/users/${userId}/role`, {
+        // Owner|admin assignment goes through the grant endpoint (owner →
+        // provision/reuse org + org_owner; admin → application platform admin).
+        const res = await apiFetch(`/api/users/${userId}/grant`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ role }),
         });
-        if (res.ok) mutate();
+        if (res.ok) { mutate(); mutatePending(); }
       } finally {
         setChangingRoleId(null);
       }
     },
-    [mutate]
+    [mutate, mutatePending]
   );
 
   const extractError = async (res: Response): Promise<string> => {
@@ -450,7 +452,7 @@ export default function UsersTabContent({ currentUserId }: { currentUserId: stri
       {users.map((u, idx) => {
         const isCurrent = u.id === currentUserId;
         const changing = changingRoleId === u.id;
-        const roleLabel = u.role === "admin" ? "Admin" : u.role === "developer" ? "Developer" : u.role === "manager" ? "Manager" : "Member";
+        const roleLabel = (u.role === "org_owner" || u.role === "owner") ? "Owner" : (u.role === "admin" || u.role === "platform_admin" || u.role === "org_admin") ? "Admin" : u.role === "manager" ? "Manager" : "Member";
 
         return (
           <motion.div
@@ -499,7 +501,7 @@ export default function UsersTabContent({ currentUserId }: { currentUserId: stri
                 </span>
               ) : (
                 <RoleDropdown
-                  currentRole={u.role || (u.is_admin ? "admin" : "user")}
+                  currentRole={(u.role === "org_owner" || u.role === "owner") ? "owner" : "admin"}
                   disabled={changing}
                   onChange={(role) => handleSetRole(u.id, role)}
                 />

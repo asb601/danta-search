@@ -237,7 +237,7 @@ export default function HomePage() {
                 <circle cx="6" cy="6" r="1.25" fill="white" />
               </svg>
             </div>
-            <span className="text-[14px] font-semibold tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
+            <span className="text-[14px] font-semibold tracking-tight">
               danta-search
             </span>
           </Link>
@@ -543,7 +543,7 @@ export default function HomePage() {
                   <div className="w-10 h-10 rounded-xl bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center mb-4 sm:mb-5">
                     <activeFeature.icon className="w-5 h-5 text-[#0a0a0a]" />
                   </div>
-                  <h3 className="text-[18px] sm:text-[22px] font-bold mb-3 text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.025em" }}>
+                  <h3 className="text-[18px] sm:text-[22px] font-bold mb-3 text-[#0a0a0a]">
                     {activeFeature.title}
                   </h3>
                   <p className="text-[13.5px] sm:text-[14.5px] text-[#737373] leading-relaxed mb-5 sm:mb-6">{activeFeature.body}</p>
@@ -573,7 +573,7 @@ export default function HomePage() {
             <span className="section-label text-white/30 block mb-8">Customer story</span>
             <blockquote
               className="text-2xl sm:text-3xl md:text-[42px] font-bold text-white leading-[1.18] mb-8 max-w-3xl mx-auto"
-              style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.03em" }}
+              style={{ letterSpacing: "-0.03em" }}
             >
               "We cut our weekly reporting time by 80%. danta-search just gets our data."
             </blockquote>
@@ -614,7 +614,7 @@ export default function HomePage() {
       {/* ── FOOTER ── */}
       <footer className="border-t border-[#e5e5e5] px-4 sm:px-6 py-5">
         <div className="page-container flex flex-col sm:flex-row items-center justify-between gap-4">
-          <span className="text-[13.5px] font-semibold tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
+          <span className="text-[13.5px] font-semibold tracking-tight">
             danta-search
           </span>
           <nav className="flex flex-wrap justify-center gap-4 sm:gap-6">

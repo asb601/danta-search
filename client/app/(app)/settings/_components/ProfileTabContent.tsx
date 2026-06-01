@@ -50,7 +50,7 @@ function DomainPickerModal({ current, onClose }: { current: string[]; onClose: (
         className="w-full max-w-sm bg-white border border-[#e5e5e5] rounded-2xl shadow-xl p-6 space-y-4"
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-[15px] font-bold text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}>Edit Departments</h2>
+          <h2 className="text-[15px] font-bold text-[#0a0a0a] tracking-tight">Edit Departments</h2>
           <button onClick={onClose} className="p-1.5 rounded-lg text-[#a3a3a3] hover:text-[#0a0a0a] hover:bg-[#f4f4f4] transition-colors">
             <X className="w-4 h-4" />
           </button>
@@ -117,7 +117,7 @@ export default function ProfileTabContent() {
             <span className={cn("absolute -bottom-1 -right-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white", roleCls)}>{roleLabel}</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[18px] font-bold text-[#0a0a0a] truncate" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}>{user.name || "—"}</p>
+            <p className="text-[18px] font-bold text-[#0a0a0a] truncate tracking-tight">{user.name || "—"}</p>
             <p className="text-[13px] text-[#737373] truncate mt-0.5">{user.email}</p>
           </div>
         </div>

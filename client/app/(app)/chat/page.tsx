@@ -104,7 +104,6 @@ export default function ChatPage() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.1, duration: 0.4 }}
                 className="text-[20px] font-bold text-[#0a0a0a] mb-2"
-                style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.025em" }}
               >
                 Start a conversation
               </motion.h2>

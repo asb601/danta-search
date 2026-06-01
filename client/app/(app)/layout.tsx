@@ -166,53 +166,42 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const mobileNavItems = mainNavItems;
 
   return (
-    <div className="flex flex-col h-screen bg-white overflow-hidden">
+    <div className="flex flex-col h-screen overflow-hidden" style={{ backgroundColor: "var(--bg)" }}>
 
-      {/* ── Dynamic Island (desktop only, fixed floating) ─────────── */}
-      <motion.div
-        initial={{ opacity: 0, scale: 0.82, y: -12 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        transition={{ type: "spring", stiffness: 260, damping: 22, delay: 0.05 }}
-        className="hidden md:flex fixed top-3 left-1/2 -translate-x-1/2 z-50 items-center gap-0.5 rounded-full px-1.5 py-1.5"
+      {/* ── Top bar (desktop) ────────────────────────────────────── */}
+      <motion.header
+        initial={{ opacity: 0, y: -8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3, ease: "easeOut" }}
+        className="hidden md:flex items-center h-12 px-4 border-b shrink-0 z-50"
         style={{
-          background: "linear-gradient(180deg, #2c2b28 0%, #1a1918 100%)",
-          boxShadow: "0 4px 32px rgba(0,0,0,0.22), 0 0 0 1px rgba(255,255,255,0.05), inset 0 1px 0 rgba(255,255,255,0.08)",
+          backgroundColor: "var(--bg)",
+          borderColor: "var(--border)",
         }}
       >
-        {/* Brand mark */}
-        <div className="flex items-center gap-1.5 pl-1.5 pr-2 mr-0.5">
-          <div className="w-5 h-5 rounded-full bg-white/12 border border-white/10 flex items-center justify-center">
-            <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-              <circle cx="6" cy="6" r="3.5" stroke="white" strokeWidth="1.5"/>
-              <circle cx="6" cy="6" r="1.25" fill="white"/>
+        {/* Brand */}
+        <div className="flex items-center gap-2 mr-8">
+          <div
+            className="w-6 h-6 rounded-lg flex items-center justify-center"
+            style={{ backgroundColor: "var(--fg)" }}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <circle cx="6" cy="6" r="3.5" stroke="var(--bg)" strokeWidth="1.5"/>
+              <circle cx="6" cy="6" r="1.25" fill="var(--bg)"/>
             </svg>
           </div>
-          <span
-            className="text-[13px] font-bold text-white/80 tracking-tight"
-            style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}
-          >
+          <span className="text-[14px] font-bold tracking-tight" style={{ color: "var(--fg)" }}>
             danta
           </span>
         </div>
 
-        {/* Separator */}
-        <div className="w-px h-4 bg-white/10 mx-1 shrink-0" />
-
         {/* Nav items */}
-        {mainNavItems.map((item, i) => (
-          <motion.div
-            key={item.href}
-            initial={{ opacity: 0, y: -3 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.12 + i * 0.05, duration: 0.2 }}
-          >
-            <IslandNavLink {...item} />
-          </motion.div>
-        ))}
-      </motion.div>
-
-      {/* Spacer so content doesn't hide under the island */}
-      <div className="hidden md:block h-[58px] shrink-0" />
+        <nav className="flex items-center gap-0.5">
+          {mainNavItems.map((item) => (
+            <IslandNavLink key={item.href} {...item} />
+          ))}
+        </nav>
+      </motion.header>
 
       {/* ── Page content ─────────────────────────────────────────── */}
       <main className="flex-1 overflow-hidden pb-14 md:pb-0">
@@ -220,7 +209,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
       </main>
 
       {/* ── Mobile bottom nav ────────────────────────────────────── */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-[#e5e5e5] flex items-stretch z-50">
+      <nav
+        className="md:hidden fixed bottom-0 left-0 right-0 flex items-stretch z-50 border-t"
+        style={{ backgroundColor: "var(--bg)", borderColor: "var(--border)" }}
+      >
         {mobileNavItems.map((item) => (
           <MobileNavLink key={item.href} {...item} />
         ))}

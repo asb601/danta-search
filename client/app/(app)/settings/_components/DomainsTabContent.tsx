@@ -290,7 +290,7 @@ function FilePickerModal({
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#e5e5e5]">
           <div>
-            <h2 className="text-[15px] font-bold text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}>Add Files to {domain}</h2>
+            <h2 className="text-[15px] font-bold text-[#0a0a0a] tracking-tight">Add Files to {domain}</h2>
             <p className="text-[11px] text-[#a3a3a3] mt-0.5">
               {selected.size} file{selected.size !== 1 ? "s" : ""} selected
             </p>

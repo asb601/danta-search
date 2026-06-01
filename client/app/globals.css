@@ -27,10 +27,9 @@
   --danger-bg:  #fee2e2;
   --warning:    #d97706;
 
-  /* Fonts */
-  --font-display: var(--font-display), "Bricolage Grotesque", sans-serif;
-  --font-sans:    var(--font-sans), "DM Sans", sans-serif;
-  --font-mono:    "JetBrains Mono", "Fira Code", monospace;
+  /* Fonts — --font-sans is set by Next.js font loader (Plus Jakarta Sans).
+     One family for everything; headings just use heavier weights. */
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
 
   /* Shape */
   --radius-sm:  6px;
@@ -115,7 +114,6 @@
   --color-subtle-foreground:  var(--fg-subtle);
   --font-sans:    var(--font-sans);
   --font-mono:    var(--font-mono);
-  --font-display: var(--font-display);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -143,7 +141,8 @@
   }
 
   h1, h2, h3, h4, h5, h6 {
-    font-family: var(--font-display);
+    font-family: var(--font-sans);
+    font-weight: 700;
     letter-spacing: -0.025em;
   }
 
@@ -242,29 +241,29 @@
   /* ── TYPOGRAPHY ── */
 
   .display-xl {
-    font-family: var(--font-display);
+    font-family: var(--font-sans);
     font-size: clamp(52px, 7vw, 88px);
     font-weight: 800;
     line-height: 1.01;
-    letter-spacing: -0.045em;
+    letter-spacing: -0.035em;
     color: var(--fg);
   }
 
   .display-lg {
-    font-family: var(--font-display);
+    font-family: var(--font-sans);
     font-size: clamp(36px, 5vw, 64px);
-    font-weight: 700;
+    font-weight: 800;
     line-height: 1.05;
-    letter-spacing: -0.04em;
+    letter-spacing: -0.03em;
     color: var(--fg);
   }
 
   .display-md {
-    font-family: var(--font-display);
+    font-family: var(--font-sans);
     font-size: clamp(24px, 3.5vw, 44px);
     font-weight: 700;
     line-height: 1.1;
-    letter-spacing: -0.035em;
+    letter-spacing: -0.025em;
     color: var(--fg);
   }
 
@@ -359,10 +358,10 @@
   }
 
   .step-number {
-    font-family: var(--font-display);
+    font-family: var(--font-sans);
     font-size: 52px;
     font-weight: 800;
-    letter-spacing: -0.05em;
+    letter-spacing: -0.04em;
     line-height: 1;
     color: var(--border);
     margin-bottom: 20px;
@@ -774,14 +773,14 @@ textarea::placeholder { color: var(--fg-subtle); }
 html.dark {
   color-scheme: dark;
 
-  --bg:             #131312;
-  --fg:             #f0efe9;
-  --fg-muted:       #8a8984;
-  --fg-subtle:      #5c5c58;
-  --surface:        #1c1c1a;
-  --surface-raised: #252523;
-  --border:         #2e2d2a;
-  --border-strong:  #48473f;
+  --bg:             #0e0e0e;
+  --fg:             #e8e8e6;
+  --fg-muted:       #9a9a96;
+  --fg-subtle:      #616160;
+  --surface:        #171717;
+  --surface-raised: #1f1f1e;
+  --border:         #2a2a28;
+  --border-strong:  #3d3d3a;
 
   --background:         var(--bg);
   --foreground:         var(--fg);

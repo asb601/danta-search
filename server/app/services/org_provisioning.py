@@ -53,6 +53,21 @@ async def provision_owner_org(
 
     Flushes (org.id populated) but does not commit — caller commits.
     """
+    # Idempotent: if this user already owns an organization, reuse it instead of
+    # creating a duplicate (e.g. re-granting "owner" from the Users page).
+    existing = (
+        await db.execute(
+            select(Organization).where(Organization.owner_user_id == user.id)
+        )
+    ).scalars().first()
+    if existing is not None:
+        user.role = "org_owner"
+        user.is_admin = True
+        user.auth_provider = "google"
+        user.organization_id = existing.id
+        user.allowed_domains = []
+        return existing
+
     name = (
         (org_name or "").strip()
         or (user.email or "").split("@")[0]

@@ -1,21 +1,9 @@
 import type { Metadata } from "next";
-import { Instrument_Serif, Syne } from "next/font/google";
+import { Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 
-/* ── Fonts ──────────────────────────────────────────────────────────────────
-   Instrument Serif  — editorial optical serif; almost zero usage in AI tools
-   Syne              — geometric sans with character; distinctive at every size
-─────────────────────────────────────────────────────────────────────────── */
-const instrumentSerif = Instrument_Serif({
-  subsets: ["latin"],
-  variable: "--font-display",
-  display: "swap",
-  weight: "400",
-  style: ["normal", "italic"],
-});
-
-const syne = Syne({
+const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
@@ -31,7 +19,7 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${instrumentSerif.variable} ${syne.variable}`}>
+    <html lang="en" className={jakarta.variable}>
       <body className="min-h-screen">
         <ThemeProvider>{children}</ThemeProvider>
       </body>

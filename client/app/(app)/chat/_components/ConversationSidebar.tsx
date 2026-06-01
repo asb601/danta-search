@@ -96,7 +96,6 @@ export function ConversationSidebar({
       <div className="px-3 pt-3.5 pb-2.5 border-b border-[#e5e5e5] flex items-center justify-between gap-2 shrink-0">
         <span
           className="text-[13px] font-semibold text-[#0a0a0a] truncate"
-          style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.01em" }}
         >
           Conversations
         </span>

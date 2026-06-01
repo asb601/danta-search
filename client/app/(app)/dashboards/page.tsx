@@ -75,7 +75,7 @@ export default function DashboardsWorkspace() {
           {/* Header */}
           <div className="flex items-start sm:items-center justify-between gap-3 mb-5 sm:mb-7">
             <div>
-              <h1 className="text-[20px] sm:text-[22px] font-bold text-[#0a0a0a]" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.028em" }}>
+              <h1 className="text-[20px] sm:text-[22px] font-bold text-[#0a0a0a]">
                 Dashboards
               </h1>
               <p className="text-[12px] sm:text-[13px] text-[#737373] mt-0.5 hidden sm:block">
@@ -114,7 +114,7 @@ export default function DashboardsWorkspace() {
               <div className="w-12 h-12 rounded-2xl bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center mb-4">
                 <LayoutDashboard className="w-5 h-5 text-[#0a0a0a]" />
               </div>
-              <p className="text-[15px] font-semibold text-[#0a0a0a] mb-1" style={{ fontFamily: "var(--font-display)" }}>
+              <p className="text-[15px] font-semibold text-[#0a0a0a] mb-1">
                 No dashboards yet
               </p>
               <p className="text-[13px] text-[#737373] mb-5">Create your first dashboard from a natural-language prompt.</p>
@@ -193,7 +193,7 @@ function DashboardCard({ d, onOpen, onPin, onRename, onDuplicate, onDelete }: {
           <button onClick={onOpen} className="text-left min-w-0 flex-1">
             <div className="flex items-center gap-1.5 mb-0.5">
               {d.is_pinned && <Pin className="w-3 h-3 text-[#0a0a0a] fill-[#0a0a0a] shrink-0" />}
-              <h3 className="text-[13.5px] font-semibold text-[#0a0a0a] truncate" style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.01em" }}>
+              <h3 className="text-[13.5px] font-semibold text-[#0a0a0a] truncate">
                 {d.title}
               </h3>
             </div>

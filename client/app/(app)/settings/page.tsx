@@ -78,8 +78,7 @@ export default function SettingsPage() {
             </motion.button>
             <div className="w-px h-3.5 bg-[#e5e5e5]" />
             <h1
-              className="text-[17px] font-bold text-[#0a0a0a]"
-              style={{ fontFamily: "var(--font-display)", letterSpacing: "-0.02em" }}
+              className="text-[17px] font-bold text-[#0a0a0a] tracking-tight"
             >
               Settings
             </h1>
