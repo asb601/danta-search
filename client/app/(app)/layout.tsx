@@ -173,9 +173,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
         initial={{ opacity: 0, scale: 0.82, y: -12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         transition={{ type: "spring", stiffness: 260, damping: 22, delay: 0.05 }}
-        className="hidden md:flex fixed top-3 left-1/2 -translate-x-1/2 z-50 items-center gap-0.5 bg-[#0a0a0a] rounded-full px-1.5 py-1.5"
+        className="hidden md:flex fixed top-3 left-1/2 -translate-x-1/2 z-50 items-center gap-0.5 rounded-full px-1.5 py-1.5"
         style={{
-          boxShadow: "0 2px 24px rgba(0,0,0,0.28), 0 0 0 1px rgba(255,255,255,0.07), inset 0 1px 0 rgba(255,255,255,0.06)",
+          background: "linear-gradient(180deg, #2c2b28 0%, #1a1918 100%)",
+          boxShadow: "0 4px 32px rgba(0,0,0,0.22), 0 0 0 1px rgba(255,255,255,0.05), inset 0 1px 0 rgba(255,255,255,0.08)",
         }}
       >
         {/* Brand mark */}

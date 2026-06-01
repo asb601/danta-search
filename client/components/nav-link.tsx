@@ -22,18 +22,21 @@ export function IslandNavLink({ href, icon: Icon, label }: NavLinkProps) {
       href={href}
       className={cn(
         "relative flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-[13px] font-medium transition-colors duration-150 whitespace-nowrap select-none",
-        isActive ? "text-[#0a0a0a]" : "text-white/60 hover:text-white/90"
+        isActive ? "" : "text-white/60 hover:text-white/90"
       )}
+      style={isActive ? { color: "var(--fg)" } : undefined}
     >
       {isActive && (
         <motion.span
           layoutId="island-active-pill"
-          className="absolute inset-0 rounded-full bg-white"
-          style={{ boxShadow: "0 1px 4px rgba(0,0,0,0.12)" }}
+          className="absolute inset-0 rounded-full"
+          style={{ backgroundColor: "var(--bg)", boxShadow: "0 1px 6px rgba(0,0,0,0.15)" }}
           transition={{ type: "spring", stiffness: 420, damping: 34 }}
         />
       )}
-      <Icon className={cn("w-3.5 h-3.5 shrink-0 relative z-10", isActive ? "text-[#0a0a0a]" : "text-white/50")} />
+      <Icon className={cn("w-3.5 h-3.5 shrink-0 relative z-10", isActive ? "text-[#1a1918]" : "text-white/50")}
+        style={isActive ? { color: "var(--fg)" } : undefined}
+      />
       <span className="relative z-10">{label}</span>
     </Link>
   );
