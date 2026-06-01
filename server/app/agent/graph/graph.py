@@ -1170,10 +1170,27 @@ async def _build_agent_context(
     try:
         from app.services.erp.feasibility_gate import evaluate_feasibility  # noqa: PLC0415
 
+        # Scope the temporal check to the query's PRIMARY-SUBJECT files (resolver
+        # pins + top retrieval hits), not the whole shortlist. This stops an
+        # unrelated master/GL table's coverage from masking that the SUBJECT
+        # (e.g. sales orders) does not cover the requested period. Fall back to
+        # the full shortlist when no subject subset can be identified.
+        _subject_catalog = catalog
+        try:
+            _top_ids = {meta.file_id for meta, _ in (retrieved_with_scores or [])[:6]}
+            _subject = [
+                e for e in catalog
+                if e.get("file_id") in _top_ids or e.get("blob_path") in resolver_pinned_blobs
+            ]
+            if _subject:
+                _subject_catalog = _subject
+        except Exception:
+            _subject_catalog = catalog
+
         _feasibility = evaluate_feasibility(
             query=query,
             constraints=getattr(intent_plan, "constraints", None),
-            catalog=catalog,
+            catalog=_subject_catalog,
         )
         if _feasibility.advisory_notes:
             _advisory_block = "--- FEASIBILITY ADVISORIES ---\n" + "\n".join(

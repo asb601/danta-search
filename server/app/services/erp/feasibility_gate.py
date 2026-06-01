@@ -43,8 +43,10 @@ def _enabled() -> bool:
 
 
 def _shadow() -> bool:
-    # Default to shadow mode — must be explicitly turned off to enforce.
-    return bool(getattr(get_settings(), "ERP_FEASIBILITY_GATE_SHADOW", True))
+    # Enforce by default now that the check is subject-scoped (only the query's
+    # primary-subject files) and sentinel-safe. Set ERP_FEASIBILITY_GATE_SHADOW
+    # =true to revert to log-only.
+    return bool(getattr(get_settings(), "ERP_FEASIBILITY_GATE_SHADOW", False))
 
 
 def _today() -> date:
@@ -163,8 +165,18 @@ def _month_end(d: date) -> date:
     return date(d.year, d.month + 1, 1) - timedelta(days=1)
 
 
+# ERP "valid-to infinity" sentinels (SAP 9999-12-31, Oracle 4712-12-31). A
+# master/effective-dated table whose validity runs to one of these is NOT
+# evidence of transactional coverage for a past period — counting it would make
+# the gate think every period is "covered". Treat such windows as unusable.
+_SENTINEL_YEAR = 2400
+
+
 def _file_window(entry: dict) -> tuple[date, date] | None:
-    """Extract a file's date coverage from a catalog entry, defensively."""
+    """Extract a file's date coverage from a catalog entry, defensively.
+
+    Returns None (file contributes no usable coverage) when dates are missing
+    OR when the end is an open-ended ERP sentinel (year ≥ 2400)."""
     start = _as_date(entry.get("date_range_start"))
     end = _as_date(entry.get("date_range_end"))
     if not (start or end):
@@ -172,6 +184,11 @@ def _file_window(entry: dict) -> tuple[date, date] | None:
         if isinstance(dr, dict):
             start = _as_date(dr.get("start"))
             end = _as_date(dr.get("end"))
+    # Drop open-ended sentinel windows — they are not transactional coverage.
+    if end and end.year >= _SENTINEL_YEAR:
+        return None
+    if start and start.year >= _SENTINEL_YEAR:
+        return None
     if start and not end:
         end = start
     if end and not start:
