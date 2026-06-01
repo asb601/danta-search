@@ -20,6 +20,9 @@
   --border:         #e0dfd9;   /* warm gray border */
   --border-strong:  #c2c1ba;   /* warm strong border */
 
+  /* Surfaces */
+  --gradient-surface: linear-gradient(145deg, var(--bg) 0%, var(--surface) 100%);
+
   /* Status */
   --success:    #16a34a;
   --success-bg: #dcfce7;
@@ -192,7 +195,7 @@
     font-family: var(--font-sans);
     font-size: 13.5px;
     font-weight: 500;
-    color: #0a0a0a;
+    color: var(--fg);
     background: transparent;
     border: 1.5px solid var(--border);
     border-radius: var(--radius);
@@ -291,7 +294,7 @@
     top: 0;
     z-index: 50;
     border-bottom: 1px solid var(--border);
-    background: rgba(255,255,255,0.85);
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
   }
@@ -643,14 +646,14 @@
   /* ── GRID BACKGROUND ── */
   .grid-bg {
     background-image:
-      linear-gradient(to right, #e5e5e5 1px, transparent 1px),
-      linear-gradient(to bottom, #e5e5e5 1px, transparent 1px);
+      linear-gradient(to right, var(--border) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--border) 1px, transparent 1px);
     background-size: 52px 52px;
   }
 
   /* ── GRADIENT TEXT ── */
   .gradient-text {
-    background: linear-gradient(135deg, #0a0a0a 0%, #525252 100%);
+    background: linear-gradient(135deg, var(--fg) 0%, var(--fg-muted) 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -825,6 +828,19 @@ html.dark .bubble-avatar {
 html.dark .text-white\/60 { color: rgba(240,239,233,0.6); }
 html.dark .text-white\/70 { color: rgba(240,239,233,0.7); }
 html.dark .text-white\/90 { color: rgba(240,239,233,0.9); }
+
+/* ── dark: btn-black needs contrast against dark bg ── */
+html.dark .btn-black {
+  background: linear-gradient(180deg, #f0efe9 0%, #d8d7d0 100%);
+  color: #0e0e0e;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+html.dark .btn-black:hover { opacity: 0.92; }
+
+/* ── dark: btn-outline needs visible border ── */
+html.dark .btn-outline {
+  border-color: var(--border-strong);
+}
 
 /* ── dark: scrollbar ── */
 html.dark ::-webkit-scrollbar-thumb { background: var(--border-strong); }

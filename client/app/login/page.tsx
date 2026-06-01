@@ -65,8 +65,8 @@ export default function LoginPage() {
           <div className="flex flex-col items-center mb-8">
             <div className="w-12 h-12 rounded-xl bg-primary flex items-center justify-center mb-4 shadow-md">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-                <circle cx="12" cy="12" r="8" stroke="white" strokeWidth="2" />
-                <circle cx="12" cy="12" r="3" fill="white" />
+                <circle cx="12" cy="12" r="8" stroke="var(--bg)" strokeWidth="2" />
+                <circle cx="12" cy="12" r="3" fill="var(--bg)" />
               </svg>
             </div>
             <h1 className="text-xl font-bold text-foreground tracking-tight">

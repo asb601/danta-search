@@ -45,7 +45,7 @@ function TypingHero() {
   }, [displayed, phase, queryIdx]);
 
   return (
-    <span className="text-[#0a0a0a]">
+    <span className="text-[color:var(--fg)]">
       {displayed}
       <span className="cursor-blink" />
     </span>
@@ -219,7 +219,7 @@ export default function HomePage() {
   const activeFeature = FEATURES.find((f) => f.id === activeTab)!;
 
   return (
-    <div className="flex flex-col min-h-screen bg-white text-[#0a0a0a]">
+    <div className="flex flex-col min-h-screen bg-white text-[color:var(--fg)]">
 
       {/* ── NAV ── */}
       <motion.header
@@ -231,10 +231,10 @@ export default function HomePage() {
         <div className="page-container flex items-center justify-between h-14 px-4 sm:px-6">
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2 shrink-0">
-            <div className="w-6 h-6 rounded-lg bg-[#0a0a0a] flex items-center justify-center shrink-0">
+            <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: "var(--fg)" }}>
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                <circle cx="6" cy="6" r="3.5" stroke="white" strokeWidth="1.5" />
-                <circle cx="6" cy="6" r="1.25" fill="white" />
+                <circle cx="6" cy="6" r="3.5" stroke="var(--bg)" strokeWidth="1.5" />
+                <circle cx="6" cy="6" r="1.25" fill="var(--bg)" />
               </svg>
             </div>
             <span className="text-[14px] font-semibold tracking-tight">
@@ -330,7 +330,7 @@ export default function HomePage() {
                 className="mt-4 section-label"
               >
                 Handles files up to{" "}
-                <span className="text-[#0a0a0a]">10 GB+</span>
+                <span className="text-[color:var(--fg)]">10 GB+</span>
                 {" "}· Excel · CSV · PDF · DOCX
               </motion.p>
             </motion.div>
@@ -541,9 +541,9 @@ export default function HomePage() {
                 {/* Text side */}
                 <div className="p-6 sm:p-8 md:p-10">
                   <div className="w-10 h-10 rounded-xl bg-[#f4f4f4] border border-[#e5e5e5] flex items-center justify-center mb-4 sm:mb-5">
-                    <activeFeature.icon className="w-5 h-5 text-[#0a0a0a]" />
+                    <activeFeature.icon className="w-5 h-5 text-[color:var(--fg)]" />
                   </div>
-                  <h3 className="text-[18px] sm:text-[22px] font-bold mb-3 text-[#0a0a0a]">
+                  <h3 className="text-[18px] sm:text-[22px] font-bold mb-3 text-[color:var(--fg)]">
                     {activeFeature.title}
                   </h3>
                   <p className="text-[13.5px] sm:text-[14.5px] text-[#737373] leading-relaxed mb-5 sm:mb-6">{activeFeature.body}</p>
@@ -562,7 +562,7 @@ export default function HomePage() {
         </section>
 
         {/* ── TESTIMONIAL ── */}
-        <section className="bg-[#0a0a0a] py-14 sm:py-24 px-4 sm:px-6">
+        <section className="py-14 sm:py-24 px-4 sm:px-6" style={{ backgroundColor: "var(--fg)" }}>
           <motion.div
             initial={{ opacity: 0, y: 24 }}
             whileInView={{ opacity: 1, y: 0 }}
@@ -570,14 +570,14 @@ export default function HomePage() {
             transition={{ duration: 0.65, ease: "easeOut" }}
             className="page-container text-center"
           >
-            <span className="section-label text-white/30 block mb-8">Customer story</span>
+            <span className="section-label block mb-8 text-[color:var(--bg)] opacity-30">Customer story</span>
             <blockquote
-              className="text-2xl sm:text-3xl md:text-[42px] font-bold text-white leading-[1.18] mb-8 max-w-3xl mx-auto"
+              className="text-2xl sm:text-3xl md:text-[42px] font-bold text-[color:var(--bg)] leading-[1.18] mb-8 max-w-3xl mx-auto"
               style={{ letterSpacing: "-0.03em" }}
             >
               "We cut our weekly reporting time by 80%. danta-search just gets our data."
             </blockquote>
-            <cite className="text-[13px] text-white/35 not-italic tracking-wide">
+            <cite className="text-[13px] text-[color:var(--bg)] opacity-35 not-italic tracking-wide">
               — Chief Financial Officer · Manufacturing Enterprise · 2,400 employees
             </cite>
           </motion.div>
@@ -622,7 +622,7 @@ export default function HomePage() {
               <Link key={l} href="#" className="nav-link text-[12px]">{l}</Link>
             ))}
           </nav>
-          <span className="text-[12px] text-[#a3a3a3]">© 2026 danta-search</span>
+          <span className="text-[12px] text-[color:var(--fg-subtle)]">© 2026 danta-search</span>
         </div>
       </footer>
     </div>
