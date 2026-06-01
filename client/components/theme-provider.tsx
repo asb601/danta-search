@@ -23,15 +23,12 @@ export function useTheme() {
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>("light");
 
-  // On mount: read from localStorage, fallback to system preference
+  // On mount: read from localStorage only — default is light
   useEffect(() => {
     const stored = localStorage.getItem("danta-theme") as Theme | null;
     if (stored === "dark" || stored === "light") {
       applyTheme(stored);
       setThemeState(stored);
-    } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-      applyTheme("dark");
-      setThemeState("dark");
     }
   }, []);
 
