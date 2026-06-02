@@ -23,7 +23,12 @@ from app.agent.tools.sql_safety import validate_and_normalise
 import app.services.sql_repair as _repair
 from app.services.execution_guards import ExecutionGuard, ExecutionGuardError
 from app.services.file_identity import FileIdentityMap
-from app.services.logical_sql import SQLCanonicalizationError, canonicalize_logical_sql
+from app.services.logical_sql import (
+    SQLCanonicalizationError,
+    SQLAuthorizationError,
+    SQLParseError,
+    canonicalize_logical_sql,
+)
 from app.services.sql_plan_signature import compute_plan_signature as _compute_plan_sig
 
 try:
@@ -243,6 +248,7 @@ def build_sql_tools(
             except Exception as _dp_exc:
                 pipeline_logger.warning("gate_b_dry_plan_error", error=str(_dp_exc)[:200])
 
+        canonical = None
         if file_identities is not None:
             try:
                 canonical = canonicalize_logical_sql(
@@ -272,12 +278,22 @@ def build_sql_tools(
                 sql = canonical.executable_sql
             except SQLCanonicalizationError as ve:
                 error_msg = str(ve)
-                _attempt.update({"status": "authorization_error", "error": error_msg})
+                # Type the failure truthfully. A parse/dialect error is the model's
+                # fault, NOT an access-control denial — surfacing it as an auth
+                # error misleads the user (and the ACL metric). Only a genuine
+                # authorization failure increments the blob-ACL metric.
+                if isinstance(ve, SQLAuthorizationError):
+                    status = "authorization_error"
+                    metrics.inc("sql_blob_acl_denied")
+                elif isinstance(ve, SQLParseError):
+                    status = "sql_parse_error"
+                else:
+                    status = "sql_resolution_error"
+                _attempt.update({"status": status, "error": error_msg})
                 state_store["execution_failure"] = {
-                    "status": "authorization_error",
+                    "status": status,
                     "error": error_msg,
                 }
-                metrics.inc("sql_blob_acl_denied")
                 return json.dumps({"error": error_msg, "fatal_execution_error": True})
 
         try:
@@ -295,8 +311,13 @@ def build_sql_tools(
         # Checks: SQL length, JOIN count, Cartesian joins, file scan count.
         # Raises ExecutionGuardError when a structural safety limit is breached.
         # These are structural checks only — no cost model, no query planning.
+        # Count distinct LOGICAL tables (not partition paths) so a multi-month
+        # logical table's partition fan-out isn't mistaken for cross-domain scan.
+        _logical_table_count = (
+            len(set(canonical.referenced_tables)) if canonical is not None else None
+        )
         try:
-            _guard.check_pre_execution(sql)
+            _guard.check_pre_execution(sql, logical_table_count=_logical_table_count)
         except ExecutionGuardError as ge:
             pipeline_logger.error("execution_guard_rejected", reason=str(ge)[:200], sql_preview=sql[:200])
             error_msg = str(ge)

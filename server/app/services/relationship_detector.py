@@ -31,6 +31,7 @@ million-file scale, a shared label is a candidate signal, not proof.
 """
 from __future__ import annotations
 
+import math
 import uuid
 
 from sqlalchemy import select
@@ -45,6 +46,23 @@ from app.services.relationship_index import (
 )
 from app.services.semantic_policy import get_semantic_policy
 from app.services.semantic_roles import is_relationship_role
+
+
+def join_confidence(overlap_pct: float, min_cardinality: int, policy) -> float:
+    """Confidence for a value-overlap join edge.
+
+    A blend of value overlap and log-scaled cardinality, clamped to the
+    fingerprint band. A high-overlap HIGH-cardinality key (Vendor_ID) scores
+    above the approval floor; a high-overlap TINY-domain coincidence does not —
+    so approval is driven by evidence, never by a column's name.
+    """
+    ref = max(policy.confidence_cardinality_reference, 10.0)
+    norm_card = min(1.0, math.log10(max(min_cardinality, 1)) / math.log10(ref))
+    raw = (
+        policy.confidence_overlap_weight * max(0.0, min(overlap_pct, 1.0))
+        + policy.confidence_cardinality_weight * norm_card
+    )
+    return min(policy.fingerprint_max_confidence, max(policy.fingerprint_min_confidence, raw))
 
 
 def _canonical_match(match: dict) -> dict:
@@ -132,12 +150,15 @@ async def detect_relationships(
 
     for match in matches:
         overlap_pct = float(match["overlap_pct"] or 0.0)
-        if overlap_pct < policy.min_value_overlap:
+        min_card = max(min(int(match.get("card_a") or 0), int(match.get("card_b") or 0)), 1)
+        # Edge-creation gate: reject non-referential document keys (near-zero
+        # overlap) and coincidental overlap on tiny domains. Value-driven only.
+        if overlap_pct < policy.min_join_overlap or min_card < policy.min_join_cardinality:
             continue
 
         canonical = _canonical_match(match)
         role = canonical["role"]
-        confidence = min(policy.fingerprint_max_confidence, max(policy.fingerprint_min_confidence, overlap_pct))
+        confidence = join_confidence(overlap_pct, min_card, policy)
         join_type = "INNER JOIN" if overlap_pct >= policy.inner_join_overlap else "LEFT JOIN"
 
         existing = await db.execute(

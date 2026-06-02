@@ -179,7 +179,7 @@ class ExecutionGuard:
 
     # ── Pre-execution (structural, raises on violation) ────────────────────────
 
-    def check_pre_execution(self, sql: str) -> None:
+    def check_pre_execution(self, sql: str, logical_table_count: int | None = None) -> None:
         """
         Run all structural safety checks before execution.
 
@@ -188,11 +188,17 @@ class ExecutionGuard:
         Execution order:
           1. SQL length  — character count, always regex (not SQL-structural).
           2. Structural  — AST-primary when sqlglot parses; regex fallback.
-          3. Scan files  — az:// blob-path count, always regex (no AST needed).
+          3. Scan files  — distinct logical-table count when known, else az:// path count.
+
+        logical_table_count, when provided by the canonicalizer, is the number of
+        distinct LOGICAL tables referenced. A single logical table legitimately
+        fans out to many physical partition paths (monthly/format files); the scan
+        limit guards cross-domain fan-out, so it must count logical tables, not
+        partitions, or it would reject every multi-period query.
         """
         self._check_sql_length(sql)
         self._run_structural_checks(sql)
-        self._check_scan_files(sql)
+        self._check_scan_files(sql, logical_table_count)
 
     def _run_structural_checks(self, sql: str) -> None:
         """
@@ -361,17 +367,24 @@ class ExecutionGuard:
                 "run them as separate queries."
             )
 
-    def _check_scan_files(self, sql: str) -> None:
-        paths = set(_AZ_PATH_RE.findall(sql))
-        if len(paths) > self._cfg.max_scan_files:
+    def _check_scan_files(self, sql: str, logical_table_count: int | None = None) -> None:
+        # Count logical tables when the canonicalizer told us how many; a single
+        # logical table's partition fan-out (many az:// paths) is not a violation.
+        if logical_table_count is not None:
+            count = logical_table_count
+            unit = "logical tables"
+        else:
+            count = len(set(_AZ_PATH_RE.findall(sql)))
+            unit = "files"
+        if count > self._cfg.max_scan_files:
             chat_logger.warning(
                 "execution_guard_too_many_scan_files",
-                file_count=len(paths),
+                file_count=count,
                 limit=self._cfg.max_scan_files,
-                paths=list(paths)[:10],
+                unit=unit,
             )
             raise ExecutionGuardError(
-                f"Query references {len(paths)} files (limit {self._cfg.max_scan_files}). "
+                f"Query references {count} {unit} (limit {self._cfg.max_scan_files}). "
                 "Split into multiple focused queries, one per analytical domain."
             )
 

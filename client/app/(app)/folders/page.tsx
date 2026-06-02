@@ -266,60 +266,72 @@ export default function FoldersPage() {
 
   const [reingestLoading, setReingestLoading] = useState(false);
   const [reingestQuickLoading, setReingestQuickLoading] = useState(false);
+  const [reingestOrgWideLoading, setReingestOrgWideLoading] = useState(false);
 
-  const handleReingestAll = useCallback(async () => {
-    setReingestLoading(true);
-    try {
-      const res = await apiFetch("/api/admin/reingest-all?force_preprocess=true", { method: "POST" });
-      if (!res.ok) {
-        setReingestLoading(false);
-        return;
-      }
-      // Poll until all files are done re-ingesting
-      const poll = setInterval(async () => {
-        await mutate();
-        const freshItems = await contentsFetcher(swrKey);
-        const stillPending = freshItems.some(
-          (i) => i.type !== "folder" && (i.status === "pending" || i.status === "not_ingested")
-        );
-        if (!stillPending) {
-          clearInterval(poll);
-          setReingestLoading(false);
-          await mutate();
+  // One parameterized reingest-all runner. `forcePreprocess` toggles the
+  // clean/convert step; `allContainers` fans out org-wide. `setLoading` is the
+  // per-scope loading setter so each menu option shows its own spinner.
+  const runReingestAll = useCallback(
+    async (opts: {
+      forcePreprocess: boolean;
+      allContainers?: boolean;
+      setLoading: (v: boolean) => void;
+    }) => {
+      const { forcePreprocess, allContainers, setLoading } = opts;
+      setLoading(true);
+      try {
+        const params = new URLSearchParams({
+          force_preprocess: String(forcePreprocess),
+        });
+        if (allContainers) params.set("all_containers", "true");
+        const res = await apiFetch(`/api/admin/reingest-all?${params.toString()}`, {
+          method: "POST",
+        });
+        if (!res.ok) {
+          setLoading(false);
+          return;
         }
-      }, 5000);
-      // Safety: stop after 5 minutes
-      setTimeout(() => { clearInterval(poll); setReingestLoading(false); mutate(); }, 300_000);
-    } catch {
-      setReingestLoading(false);
-    }
-  }, [mutate, swrKey]);
+        // Poll until all files in the current view are done re-ingesting.
+        const poll = setInterval(async () => {
+          await mutate();
+          const freshItems = await contentsFetcher(swrKey);
+          const stillPending = freshItems.some(
+            (i) => i.type !== "folder" && (i.status === "pending" || i.status === "not_ingested")
+          );
+          if (!stillPending) {
+            clearInterval(poll);
+            setLoading(false);
+            await mutate();
+          }
+        }, 5000);
+        // Safety: stop after 5 minutes
+        setTimeout(() => { clearInterval(poll); setLoading(false); mutate(); }, 300_000);
+      } catch {
+        setLoading(false);
+      }
+    },
+    [mutate, swrKey]
+  );
 
-  const handleReingestAllQuick = useCallback(async () => {
-    setReingestQuickLoading(true);
-    try {
-      const res = await apiFetch("/api/admin/reingest-all?force_preprocess=false", { method: "POST" });
-      if (!res.ok) {
-        setReingestQuickLoading(false);
-        return;
-      }
-      const poll = setInterval(async () => {
-        await mutate();
-        const freshItems = await contentsFetcher(swrKey);
-        const stillPending = freshItems.some(
-          (i) => i.type !== "folder" && (i.status === "pending" || i.status === "not_ingested")
-        );
-        if (!stillPending) {
-          clearInterval(poll);
-          setReingestQuickLoading(false);
-          await mutate();
-        }
-      }, 5000);
-      setTimeout(() => { clearInterval(poll); setReingestQuickLoading(false); mutate(); }, 300_000);
-    } catch {
-      setReingestQuickLoading(false);
-    }
-  }, [mutate, swrKey]);
+  const handleReingestAll = useCallback(
+    () => runReingestAll({ forcePreprocess: true, setLoading: setReingestLoading }),
+    [runReingestAll]
+  );
+
+  const handleReingestAllQuick = useCallback(
+    () => runReingestAll({ forcePreprocess: false, setLoading: setReingestQuickLoading }),
+    [runReingestAll]
+  );
+
+  const handleReingestAllOrgWide = useCallback(
+    () =>
+      runReingestAll({
+        forcePreprocess: false,
+        allContainers: true,
+        setLoading: setReingestOrgWideLoading,
+      }),
+    [runReingestAll]
+  );
 
   const handleCreateFolder = useCallback(
     async (name: string) => {
@@ -403,6 +415,8 @@ export default function FoldersPage() {
       reingestLoading={reingestLoading}
       onReingestAllQuick={canWrite ? handleReingestAllQuick : undefined}
       reingestQuickLoading={reingestQuickLoading}
+      onReingestAllOrgWide={canWrite ? handleReingestAllOrgWide : undefined}
+      reingestOrgWideLoading={reingestOrgWideLoading}
       onMove={canWrite ? handleMove : undefined}
     />
   );

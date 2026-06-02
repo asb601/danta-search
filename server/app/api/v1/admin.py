@@ -41,6 +41,7 @@ from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
 from app.models.folder import Folder
 from app.models.user import User
+from app.models.container import ContainerConfig
 from app.worker.celery_app import celery_app
 from app.worker.ingest_tasks import run_ingest_pipeline
 
@@ -257,12 +258,19 @@ async def response_cache_clear(admin: User = Depends(require_admin)) -> dict:
 @router.post("/reingest-all")
 async def reingest_all(
     force_preprocess: bool = Query(True, description="When true (default), resets is_preprocessed=False so the clean stage re-runs preprocessing. Set to false to skip preprocessing for already-preprocessed files."),
+    all_containers: bool = Query(False, description="When true, reprocess every container in the caller's organization (the ERP KB spans all of an org's containers). Scope is always limited to the caller's org; a platform admin with no org reprocesses globally."),
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Wipe all metadata / analytics / relationships, reset every
     CSV/TXT/TSV file to not_ingested, and re-run the full pipeline.
+
+    Scope: the ERP knowledge base spans every container in an organization, so
+    this reprocesses ALL the caller's org containers. Scoping is enforced by
+    organization to prevent cross-tenant reprocessing — a non-platform admin can
+    never reach another org's data. A platform admin (organization_id is None)
+    operates globally.
 
     Concurrency safety:
       * Files already in an active state ('pending' / 'running') are NOT
@@ -272,12 +280,34 @@ async def reingest_all(
         endpoint is hit twice in quick succession, no file is processed
         twice in parallel.
     """
-    # Find all ingestable files
-    result = await db.execute(select(File))
+    # Scope files to the caller's org containers (cross-tenant isolation). A
+    # platform admin with no organization_id reprocesses globally.
+    org_id = getattr(admin, "organization_id", None)
+    file_query = select(File)
+    container_count: int | None = None
+    if org_id is not None:
+        container_ids = (
+            await db.execute(
+                select(ContainerConfig.id).where(ContainerConfig.organization_id == org_id)
+            )
+        ).scalars().all()
+        container_count = len(container_ids)
+        if not container_ids:
+            raise HTTPException(status_code=400, detail="No containers found for your organization.")
+        file_query = file_query.where(File.container_id.in_(container_ids))
+
+    result = await db.execute(file_query)
     all_files = list(result.scalars().all())
     ingestable = [f for f in all_files if is_supported_ingest_file(f.name)]
     if not ingestable:
         raise HTTPException(status_code=400, detail="No ingestable files found.")
+    ingest_logger.info(
+        "reingest_all_scope",
+        org_id=org_id,
+        all_containers=all_containers,
+        container_count=container_count,
+        file_count=len(ingestable),
+    )
 
     _assert_ingestion_queue_available()
 

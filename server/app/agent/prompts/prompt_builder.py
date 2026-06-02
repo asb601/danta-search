@@ -44,6 +44,13 @@ SYSTEM_PROMPT_TEMPLATE = """{file_override_note}You are a data analyst with read
 Runtime owns storage: never write blob paths, parquet filenames, physical storage
 URIs, or storage scan functions. Use only the logical table names
 shown below in FROM/JOIN clauses; the runtime resolves them to authorized files.
+Each logical table already spans all of its time periods — query the table name
+once; do NOT union per-month tables or assume a period is "missing" from one file.
+
+SQL dialect: the executor is DuckDB. Write DuckDB-valid SQL. Use date_diff('day', a, b)
+(not DATEDIFF), string_agg(x, ',') (not GROUP_CONCAT), and current_date. When a value
+already exists as a column (e.g. an aging/days/DSO column), use that column directly
+rather than recomputing it from current_date.
 
 Today's date: {today_iso} ({today_human}).
 Resolve every relative time expression in the user's question against THIS date,
@@ -117,6 +124,20 @@ status/category literal (e.g. do not assume a value 'Shipped' exists).
 \u2022 JOIN fails \u2192 re-examine the join column with inspect_column.
 \u2022 Column missing \u2192 search_catalog for an alternative table.
 Never retry the same query with only cosmetic changes \u2014 change the approach.
+
+TREND / DIVERGENCE QUESTIONS (one metric worsening while another rises, over time):
+\u2022 Normalise both metrics to ONE period grain before comparing. If one table is at
+  month/YYYYMM and another coarser, roll the finer up (quarter = 'Q' || CAST(CEIL(MONTH/3) AS INT)).
+  Never compare metrics at mismatched grains.
+\u2022 If the two metrics live in tables that do not share the comparison dimension, route
+  the metric-bearing table through the bridge table named in WORKFLOW TOPOLOGY to acquire
+  that dimension BEFORE grouping (e.g. a deliveries table lacking a region dimension joins
+  through an orders table that carries both the plant and the region).
+\u2022 Compute period-over-period change per dimension with a window:
+  metric - LAG(metric) OVER (PARTITION BY <dim> ORDER BY <period>).
+\u2022 "Divergence" = periods where the two deltas move in the worsening direction together;
+  rank by joint magnitude to find the sharpest period. Do NOT answer with two independent
+  aggregates \u2014 the question asks whether they track each other.
 
 TWO CORE PRINCIPLES (apply across all phases)
 A. Evidence is not transferable. Delivery status \u2260 approval status \u2260 payment status.
@@ -197,13 +218,23 @@ def build_parquet_note(
 
     if parquet_paths_all:
         lines = []
+        seen_logical: set[str] = set()
         for blob, pq in parquet_paths_all.items():
             entry = catalog_by_blob.get(blob)
             identity = file_identities.identity_for_blob(blob) if file_identities else None
             logical_table = identity.sql_name if identity else logical_name_from_path(blob)
+            # Consolidation: a logical table spans many partition blobs. Emit ONE
+            # line per logical table (not per month) so the model sees a single
+            # name with the TRUE coverage span — never 36 lines with conflicting
+            # single-month ranges (which previously triggered false "missing" claims).
+            if logical_table in seen_logical:
+                continue
+            seen_logical.add(logical_table)
             line = f"  {logical_table}"
             if identity and identity.sql_name != identity.logical_name:
                 line += f"  (display: {identity.logical_name})"
+            if identity and identity.partition_count > 1:
+                line += f"\n    Partitions: {identity.partition_count} (one logical table; query the name once)"
 
             desc = _neutralize_description(entry.get("ai_description") if entry else "")
             if desc:
@@ -218,11 +249,16 @@ def build_parquet_note(
             if key_metrics:
                 line += f"\n    Key metrics: {', '.join(key_metrics[:_DIM_METRIC_LIMIT])}"
 
-            # Surface date range so LLM knows what period the file covers
-            dr_start = entry.get("date_range_start") if entry else None
-            dr_end = entry.get("date_range_end") if entry else None
+            # Surface the AGGREGATE coverage window across all partitions (from
+            # the consolidated identity) so the model knows the full span, not one
+            # month. Fall back to the single entry's range when no identity.
+            if identity and (identity.coverage_start or identity.coverage_end):
+                dr_start, dr_end = identity.coverage_start, identity.coverage_end
+            else:
+                dr_start = entry.get("date_range_start") if entry else None
+                dr_end = entry.get("date_range_end") if entry else None
             if dr_start or dr_end:
-                line += f"\n    Date range: {dr_start or '?'} \u2192 {dr_end or '?'}"
+                line += f"\n    Date range (full coverage): {dr_start or '?'} \u2192 {dr_end or '?'}"
 
             # Surface column stats only for top-retrieved files to keep prompt
             # token load bounded. Lower-ranked files get date range only.
@@ -262,6 +298,9 @@ def build_parquet_note(
                 bp = entry["blob_path"]
                 identity = file_identities.identity_for_blob(bp) if file_identities else None
                 logical_table = identity.sql_name if identity else logical_name_from_path(bp)
+                if logical_table in seen_logical:
+                    continue
+                seen_logical.add(logical_table)
                 csv_line = f"  {logical_table}"
                 desc = _neutralize_description(entry.get("ai_description") or "")
                 if desc:

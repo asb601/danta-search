@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import re
 import threading
 import time
@@ -63,6 +64,7 @@ import traceback as _traceback
 from app.retrieval.embeddings import build_search_text
 from app.services.graph_health import score_graph_health
 from app.services.file_identity import FileIdentityMap, build_file_identity_map, normalise_identity_key
+from app.services.erp.negative_claim_gate import evaluate_negative_claim, honest_rewrite
 from app.services.trust_propagation import avg_ingestion_confidence as _avg_ing_conf
 from app.services.query_confidence import compute_confidence
 
@@ -85,6 +87,35 @@ def _files_used_from_store(store: dict, file_identities: FileIdentityMap | None)
             used.append(value)
             seen.add(value)
     return used
+
+
+def _gate_negative_claim(answer: str, store: dict, file_identity_map) -> str:
+    """Fix 4: block confident-but-unproven 'no data / missing' answers.
+
+    ENFORCED for the high-precision case (we did NOT scan the full logical table →
+    we may not claim the data is missing). The 'undiagnosed empty result' case is
+    shadow-logged unless GCHAT_NEGATIVE_CLAIM_ENFORCE is set, pending a soak.
+    Never raises. Used by BOTH the streaming and non-streaming answer paths.
+    """
+    try:
+        verdict = evaluate_negative_claim(answer=answer, store=store, file_identities=file_identity_map)
+        if not (verdict.is_negative_claim and not verdict.proven):
+            return answer
+        enforce_all = bool(os.getenv("GCHAT_NEGATIVE_CLAIM_ENFORCE"))
+        chat_logger.warning(
+            "negative_claim_unproven",
+            coverage_complete=verdict.coverage_complete,
+            missing_diagnostics=verdict.missing_diagnostics,
+            signals=verdict.signals,
+            enforced=enforce_all or not verdict.coverage_complete,
+        )
+        # Always enforce the incomplete-coverage case (highest precision); enforce
+        # the undiagnosed case only when the flag is set.
+        if not verdict.coverage_complete or enforce_all:
+            return honest_rewrite(verdict, verdict.signals.get("tables"))
+        return answer
+    except Exception:
+        return answer
 
 
 def _execution_failure_payload(
@@ -276,7 +307,10 @@ async def _get_approved_neighbor_ids(
                     SemanticRelationship.file_a_id.in_(seed_ids),
                     SemanticRelationship.file_b_id.in_(seed_ids),
                 ),
-                SemanticRelationship.status == "approved",
+                # Builder writes status="active" + approval_status="approved".
+                # Filtering status=="approved" matched nothing → neighbor
+                # injection never fired (same bug as graph_expand).
+                SemanticRelationship.status == "active",
                 SemanticRelationship.approval_status == "approved",
             )
             .limit(cap)
@@ -1389,6 +1423,10 @@ async def run_agent_query(
     # Extract results
     final_msgs = final_state["messages"]
     answer = extract_answer(final_msgs)
+
+    # Fix 4: block confident-but-unproven "no data / missing" answers.
+    answer = _gate_negative_claim(answer, store, ctx.get("file_identity_map"))
+
     sql_results = store.get("sql_results", [])
     tool_calls_made = final_state.get("tool_call_count", 0)
     total_ms = round((time.perf_counter() - pipeline_start) * 1000, 2)
@@ -1790,6 +1828,11 @@ async def run_agent_query_stream(
 
     # Polish pass — no-op currently, kept for future use
     final_answer = await _polish_answer(final_answer)
+
+    # Fix 4: gate unproven "no data / missing" claims on the streaming path too.
+    # Streamed tokens are progressive; the authoritative answer is in the `done`
+    # payload below, so rewriting final_answer here corrects what the client renders.
+    final_answer = _gate_negative_claim(final_answer, store, ctx.get("file_identity_map"))
 
     chart = infer_chart(final_answer, sql_results)
     sql_total_rows = store.get("sql_total_rows", len(sql_results))

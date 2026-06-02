@@ -79,7 +79,10 @@ async def graph_expand(
                 SemanticRelationship.file_a_id.in_(bounded_seed_ids),
                 SemanticRelationship.file_b_id.in_(bounded_seed_ids),
             ),
-            SemanticRelationship.status == "approved",
+            # The semantic-layer builder writes status="active" (lifecycle) and
+            # approval_status="approved" (trust). Filtering status=="approved"
+            # matched NOTHING, so one-hop expansion never fired. Match "active".
+            SemanticRelationship.status == "active",
             SemanticRelationship.approval_status == "approved",
             SemanticRelationship.confidence_score >= effective_min_conf,
         )

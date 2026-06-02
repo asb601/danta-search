@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ReprocessMenu } from "./ReprocessMenu";
+import { ReingestAllMenu } from "./ReingestAllMenu";
 
 /* ━━━ Types ━━━ */
 export type FileStatus = "indexed" | "failed" | "pending" | "not_ingested";
@@ -89,6 +90,8 @@ interface FileManagerViewProps {
   reingestLoading?: boolean;
   onReingestAllQuick?: () => void;
   reingestQuickLoading?: boolean;
+  onReingestAllOrgWide?: () => void;
+  reingestOrgWideLoading?: boolean;
   onMove?: (fileId: string, targetFolderId: string | null) => void;
 }
 
@@ -485,6 +488,8 @@ export default function FileManagerView({
   reingestLoading,
   onReingestAllQuick,
   reingestQuickLoading,
+  onReingestAllOrgWide,
+  reingestOrgWideLoading,
   onMove,
 }: FileManagerViewProps) {
   const items = files ?? [];
@@ -680,35 +685,15 @@ export default function FileManagerView({
                   ))}
                 </select>
               )}
-              {onReingestAllQuick && (
-                <button
-                  onClick={onReingestAllQuick}
-                  disabled={reingestQuickLoading}
-                  className={cn(
-                    "h-7 px-2.5 flex items-center gap-1.5 rounded-md text-xs font-medium transition-colors",
-                    reingestQuickLoading
-                      ? "text-amber-400/70 bg-amber-400/10 cursor-not-allowed"
-                      : "text-amber-400 hover:bg-amber-400/10"
-                  )}
-                >
-                  <Zap className={cn("w-3.5 h-3.5", reingestQuickLoading && "animate-pulse")} />
-                  {reingestQuickLoading ? "Ingesting…" : "Ingest All"}
-                </button>
-              )}
-              {onReingestAll && (
-                <button
-                  onClick={onReingestAll}
-                  disabled={reingestLoading}
-                  className={cn(
-                    "h-7 px-2.5 flex items-center gap-1.5 rounded-md text-xs font-medium transition-colors",
-                    reingestLoading
-                      ? "text-amber-400/70 bg-amber-400/10 cursor-not-allowed"
-                      : "text-amber-400 hover:bg-amber-400/10"
-                  )}
-                >
-                  <Zap className={cn("w-3.5 h-3.5", reingestLoading && "animate-pulse")} />
-                  {reingestLoading ? "Re-ingesting…" : "Preprocess + Ingest All"}
-                </button>
+              {(onReingestAllQuick || onReingestAll || onReingestAllOrgWide) && (
+                <ReingestAllMenu
+                  onQuick={onReingestAllQuick}
+                  onFull={onReingestAll}
+                  onOrgWide={onReingestAllOrgWide}
+                  quickLoading={reingestQuickLoading}
+                  fullLoading={reingestLoading}
+                  orgWideLoading={reingestOrgWideLoading}
+                />
               )}
               <ReprocessMenu containerId={selectedContainerId} />
               <div className="w-px h-4 bg-border" />

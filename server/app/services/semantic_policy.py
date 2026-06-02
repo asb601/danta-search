@@ -40,12 +40,31 @@ class SemanticPolicy:
 
     entity_with_pk_confidence: float = 0.80
     entity_unknown_grain_confidence: float = 0.45
-    approved_join_confidence: float = 0.80
+    # Lowered from 0.80: a genuine high-cardinality join key (e.g. Vendor_ID at
+    # ~79-83% value overlap) must be approvable. The cardinality guard + overlap
+    # floor below are the real false-positive defense, not the confidence floor.
+    approved_join_confidence: float = 0.72
     approved_join_min_overlap: float = 0.01
+
+    # Edge-creation gates (relationship_detector): a real join must clear BOTH a
+    # value-overlap floor and a minimum cardinality. This rejects non-referential
+    # document keys (PO_Number/Material_No ~0% overlap) and coincidental overlap
+    # on tiny enums — data-driven, never by column name.
+    min_join_overlap: float = 0.50
+    min_join_cardinality: int = 8
+    # Confidence = weighted blend of value overlap and (log-scaled) cardinality,
+    # so a high-overlap high-cardinality key scores above the approval floor while
+    # a high-overlap tiny-domain coincidence does not.
+    confidence_overlap_weight: float = 0.75
+    confidence_cardinality_weight: float = 0.25
+    confidence_cardinality_reference: float = 1000.0
 
     planner_join_min_confidence: float = 0.65
     planner_fast_path_confidence: float = 0.75
-    graph_expand_min_confidence: float = 0.85
+    # Aligned with approved_join_confidence (0.72): if expansion required MORE
+    # confidence than approval, approved joins would never reach the retrieval
+    # shortlist via one-hop expansion (silent narrowing).
+    graph_expand_min_confidence: float = 0.72
 
     planner_metric_bonus: float = 0.30
     planner_raw_intent_bonus: float = 0.20
