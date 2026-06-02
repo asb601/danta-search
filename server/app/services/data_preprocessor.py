@@ -851,9 +851,66 @@ def _process_excel_to_blob(
     warns:        list[str],
     profile:      CleaningProfile | None = None,
 ) -> dict:
-    if ext in (".xlsx", ".xlsm"):
-        return _process_xlsx_to_blob(raw_path, block_writer, is_large, warns, profile)
-    return _process_xls_to_blob(raw_path, block_writer, warns, profile)
+    # python-calamine (Rust) reads every supported workbook format natively
+    # (.xlsx / .xls / .xlsm / .xlsb) from the already-downloaded temp file —
+    # far faster and lower-memory than openpyxl/xlrd. A single code path now
+    # handles all of them; the legacy .xls (xlrd) branch is unified here.
+    return _process_xlsx_to_blob(raw_path, block_writer, is_large, warns, profile)
+
+
+def _calamine_cell_to_str(value) -> str:
+    """Render a calamine cell value as the same string openpyxl would have."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, bool):
+        # openpyxl yielded str(cell.value) → "True"/"False"
+        return "True" if value else "False"
+    if isinstance(value, float):
+        # Integral floats render without a trailing ".0" to match the typical
+        # openpyxl string projection of whole-number cells.
+        if value.is_integer():
+            return str(int(value))
+        return repr(value)
+    return str(value)
+
+
+def _open_calamine_best_sheet(raw_path: str):
+    """Open the workbook with calamine and pick the most-populated sheet.
+
+    Returns (sheet_data_rows, best_sheet_title) where sheet_data_rows is a
+    list[list] of raw cell values (already stringified is the caller's job).
+    Replicates the prior openpyxl behavior of choosing the sheet with the most
+    populated cells (the active/first sheet is often a cover page, not data).
+    """
+    from python_calamine import CalamineWorkbook  # noqa: PLC0415
+
+    wb = CalamineWorkbook.from_path(raw_path)
+    sheet_names = list(wb.sheet_names)
+
+    best_title: str | None = None
+    best_rows: list[list] | None = None
+    best_score = -1
+    for name in sheet_names:
+        try:
+            data = wb.get_sheet_by_name(name).to_python(skip_empty_area=True)
+        except Exception:
+            continue
+        nrows = len(data)
+        ncols = max((len(r) for r in data), default=0)
+        score = nrows * ncols
+        if score > best_score:
+            best_score = score
+            best_title = name
+            best_rows = data
+
+    if best_rows is None:
+        # Fall back to the first sheet even if empty so callers get a title.
+        best_title = sheet_names[0] if sheet_names else "Sheet1"
+        try:
+            best_rows = wb.get_sheet_by_name(best_title).to_python(skip_empty_area=True)
+        except Exception:
+            best_rows = []
+    return best_rows, best_title
 
 
 def _process_xlsx_to_blob(
@@ -864,56 +921,30 @@ def _process_xlsx_to_blob(
     profile:      CleaningProfile | None = None,
 ) -> dict:
     """
-    Stream .xlsx via openpyxl read_only=True, write directly to Azure block blob.
-    Peak disk: only the .xlsx download (no second clean file).
+    Read any Excel workbook (.xlsx/.xls/.xlsm/.xlsb) via python-calamine (Rust),
+    write the cleaned sibling CSV directly to the Azure block blob.
+
+    Memory: cell values are streamed row-by-row into per-chunk DataFrames and
+    written incrementally — no giant in-memory CSV string is built. Peak disk:
+    only the workbook download (no second local clean file).
+
+    Note: calamine returns the materialized cell grid for the selected sheet
+    (it does not expose hidden-row/hidden-column metadata the way openpyxl did,
+    so hidden cells are no longer filtered out — calamine reads all cells).
     """
-    import openpyxl
-    from openpyxl.utils import column_index_from_string  # noqa: PLC0415
+    # calamine parses the whole selected sheet in Rust; this is the single
+    # large structure and is far smaller than openpyxl's per-cell Python objects.
+    sheet_rows, best_sheet_title = _open_calamine_best_sheet(raw_path)
 
-    wb = openpyxl.load_workbook(raw_path, read_only=True, data_only=True)
-    # Prefer the sheet with the most populated cells — the active sheet is often
-    # a cover page or instructions tab, not the actual data.
-    _data_sheets   = [s for s in wb.worksheets if (s.max_row or 0) > 0]
-    ws             = max(_data_sheets, key=lambda s: (s.max_row or 0) * (s.max_column or 0)) \
-                     if _data_sheets else wb.active
-    best_sheet_title = ws.title
-
-    hidden_col_idx: set[int] = set()
-    try:
-        for col_letter, col_dim in ws.column_dimensions.items():
-            if col_dim.hidden:
-                try:
-                    hidden_col_idx.add(column_index_from_string(col_letter))
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    def _iter_visible_rows(ws_obj) -> Iterator[list[str]]:
-        for row in ws_obj.iter_rows():
-            row_num = row[0].row if row else None
-            if row_num is None:
-                continue
-            try:
-                rd = ws_obj.row_dimensions.get(row_num)
-                if rd and rd.hidden:
-                    continue
-            except Exception:
-                pass
-            yield [
-                str(cell.value) if cell.value is not None else ""
-                for j, cell in enumerate(row, start=1)
-                if j not in hidden_col_idx
-            ]
+    def _stringify_row(row) -> list[str]:
+        return [_calamine_cell_to_str(v) for v in row]
 
     # Collect header-scan rows
     head_buf: list[list[str]] = []
-    row_iter = _iter_visible_rows(ws)
-    for raw_row in row_iter:
-        head_buf.append(raw_row)
+    for raw_row in sheet_rows:
+        head_buf.append(_stringify_row(raw_row))
         if len(head_buf) >= HEADER_SCAN_ROWS:
             break
-    wb.close()
 
     if not head_buf:
         warns.append("Excel file appears empty")
@@ -938,33 +969,18 @@ def _process_xlsx_to_blob(
     n_cols        = len(headers)
     data_leftover = head_buf[header_row_idx + 1:]
 
-    # Re-open for the full streaming pass (use the same sheet identified above)
-    wb2 = openpyxl.load_workbook(raw_path, read_only=True, data_only=True)
-    ws2 = wb2[best_sheet_title] if best_sheet_title in wb2.sheetnames else wb2.active
-
     def _iter_data_rows() -> Iterator[list[str]]:
+        # First replay the already-scanned rows after the header row.
         for r in data_leftover:
             yield r[:n_cols] + [""] * max(0, n_cols - len(r))
-        skipped   = 0
-        skip_limit = header_row_idx + 1
-        for row in ws2.iter_rows():
-            row_num = row[0].row if row else None
-            if row_num is None:
-                continue
-            try:
-                rd = ws2.row_dimensions.get(row_num)
-                if rd and rd.hidden:
-                    continue
-            except Exception:
-                pass
+        # Then stream the remaining sheet rows, skipping the header-scan prefix.
+        skipped    = 0
+        skip_limit = len(head_buf)
+        for raw_row in sheet_rows:
             if skipped < skip_limit:
                 skipped += 1
                 continue
-            vals = [
-                str(cell.value) if cell.value is not None else ""
-                for j, cell in enumerate(row, start=1)
-                if j not in hidden_col_idx
-            ]
+            vals = _stringify_row(raw_row)
             yield vals[:n_cols] + [""] * max(0, n_cols - len(vals))
 
     # Sample for type detection
@@ -1053,7 +1069,6 @@ def _process_xlsx_to_blob(
         warns.append("Deduplication skipped for large Excel file to keep memory bounded")
 
     block_writer.commit()
-    wb2.close()
 
     return {
         "original_rows":     original_rows,

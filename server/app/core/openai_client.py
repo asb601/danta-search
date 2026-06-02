@@ -15,14 +15,75 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 
+import structlog
 from openai import AzureOpenAI
 
 from app.core.config import get_settings
 
+logger = structlog.get_logger("openai_client")
+
 _ai_client: AzureOpenAI | None = None
 _ai_deployment: str | None = None
 _client_lock = threading.Lock()
+
+# ── Per-org (Lane-LLM) sync client cache ────────────────────────────────────
+# Keyed by (endpoint, deployment, api_version) — NEVER by org_id. Two orgs that
+# resolve to the same endpoint+deployment+api_version share one client; an org
+# that points at its own endpoint/deployment gets its own. Keying on the
+# effective connection params (not org_id) avoids leaking org identity into the
+# cache key and lets identical configs share a client. NEVER log the api_key.
+# Mirrors the per-org mechanism in app/agent/llm.py (_org_client).
+_org_lock = threading.Lock()
+_org_clients: dict[tuple, AzureOpenAI] = {}
+
+
+def _org_chat_client(
+    *,
+    org_ai: dict[str, Any],
+    tier: str,
+) -> tuple[AzureOpenAI, str] | None:
+    """Build (and cache) a per-org SYNC AzureOpenAI client + deployment.
+
+    tier mapping (mirrors agent/llm.py get_llm vs get_llm_mini):
+      "standard"            -> chat_deployment   + chat_api_key   (primary lane)
+      anything else (high/  -> fallback_deployment + fallback_api_key
+       mini/fallback/...)      (the cheaper/secondary lane)
+
+    All tiers use the org's chat_endpoint + api_version. Returns None on any
+    problem so the caller falls back to the global legacy path (byte-identical).
+    The resolver already merges per-org values over global fallbacks, so a
+    partial OrgAISettings row still resolves to a complete, usable config.
+    """
+    try:
+        endpoint = org_ai.get("chat_endpoint") or ""
+        api_version = org_ai.get("api_version") or ""
+        if tier == "standard":
+            deployment = org_ai.get("chat_deployment") or ""
+            api_key = org_ai.get("chat_api_key") or ""
+        else:
+            deployment = org_ai.get("fallback_deployment") or ""
+            api_key = org_ai.get("fallback_api_key") or ""
+        if not (endpoint and deployment and api_key):
+            return None  # incomplete — use global legacy path
+
+        cache_key = (endpoint, deployment, api_version)
+        client = _org_clients.get(cache_key)
+        if client is None:
+            with _org_lock:
+                client = _org_clients.get(cache_key)
+                if client is None:
+                    client = AzureOpenAI(
+                        azure_endpoint=endpoint,
+                        api_key=api_key,
+                        api_version=api_version,
+                    )
+                    _org_clients[cache_key] = client
+        return client, deployment
+    except Exception as exc:  # noqa: BLE001 — never break the call
+        logger.warning("org_chat_client_build_failed", tier=tier, error=str(exc)[:200])
+        return None
 
 # ── Multi-lane (model_pool) sync state ──────────────────────────────────────
 # These are only ever touched when >1 chat deployment is configured. With the
@@ -123,8 +184,16 @@ def _cooldown_seconds() -> float:
     return 20.0
 
 
-def get_chat_client(*, tier: str = "standard") -> tuple[AzureOpenAI, str]:
+def get_chat_client(
+    *, tier: str = "standard", org_ai: dict[str, Any] | None = None
+) -> tuple[AzureOpenAI, str]:
     """Return (sync AzureOpenAI client, deployment_id) for a chat completion.
+
+    Per-org (Lane-LLM): when ``org_ai`` is provided AND ``org_ai["source"] ==
+    "org"`` AND it yields a complete config, a cached per-org SYNC client +
+    deployment is returned (tier maps standard->chat, else->fallback). When
+    ``org_ai`` is None / not org-sourced / incomplete, behaviour is byte-
+    identical to today: the model-pool / legacy single-deployment path below.
 
     Default (no/one chat deployment configured) -> the legacy single-deployment
     client, byte-identical to today's behaviour. With >1 chat deployment this
@@ -138,6 +207,12 @@ def get_chat_client(*, tier: str = "standard") -> tuple[AzureOpenAI, str]:
     call so a tripped lane is avoided on subsequent picks within the cooldown.
     The trip itself is recorded via ``report_chat_failure``.
     """
+    if org_ai is not None and org_ai.get("source") == "org":
+        org_client = _org_chat_client(org_ai=org_ai, tier=tier)
+        if org_client is not None:
+            return org_client
+        # Incomplete/failed org config -> fall through to the global path.
+
     deployments = _chat_deployments()
     if len(deployments) <= 1:
         # Default path: zero behaviour change.
@@ -166,6 +241,7 @@ def chat_complete_with_failover(
     messages,
     tier: str = "standard",
     max_attempts: int | None = None,
+    org_ai: dict[str, Any] | None = None,
     **create_kwargs,
 ):
     """Run a chat completion with intra-attempt multi-lane failover.
@@ -187,12 +263,16 @@ def chat_complete_with_failover(
     import openai as _openai  # noqa: PLC0415 — local to avoid import cost/cycles
 
     if max_attempts is None:
-        # One attempt per configured chat lane (min 1, capped to avoid runaway).
-        max_attempts = min(4, max(1, len(_chat_deployments())))
+        if org_ai is not None and org_ai.get("source") == "org":
+            # Per-org path is a single lane (one cached client) — one attempt.
+            max_attempts = 1
+        else:
+            # One attempt per configured chat lane (min 1, capped to avoid runaway).
+            max_attempts = min(4, max(1, len(_chat_deployments())))
 
     last_exc: Exception | None = None
     for _attempt in range(max_attempts):
-        client, deployment = get_chat_client(tier=tier)
+        client, deployment = get_chat_client(tier=tier, org_ai=org_ai)
         try:
             return client.chat.completions.create(
                 model=deployment, messages=messages, **create_kwargs

@@ -23,6 +23,7 @@ dependencies = [
     "pyarrow>=16.0.0",
     "openpyxl>=3.1.0",
     "xlrd>=2.0.0",
+    "python-calamine>=0.2.0",
     "charset-normalizer>=3.0.0",
     "clevercsv>=0.8.0",
     "tiktoken>=0.12.0",

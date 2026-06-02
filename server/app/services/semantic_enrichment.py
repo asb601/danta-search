@@ -150,6 +150,24 @@ async def run_semantic_enrichment_for_file(
 
     file = await db.get(File, file_id)
     filename = file.name if file else (metadata.blob_path or file_id)
+
+    # Resolve per-org AI settings (None → global path, byte-identical).
+    org_ai: dict[str, Any] | None = None
+    if metadata.container_id:
+        from app.models.container import ContainerConfig  # noqa: PLC0415
+
+        container = await db.get(ContainerConfig, metadata.container_id)
+        if container:
+            try:
+                org_id = getattr(container, "organization_id", None)
+                if org_id:
+                    from app.services.org_ai_resolver import (  # noqa: PLC0415
+                        resolve_org_ai_settings,
+                    )
+
+                    org_ai = await resolve_org_ai_settings(org_id, db)
+            except Exception:  # noqa: BLE001 — never block enrichment
+                org_ai = None
     roles: dict[str, str] = metadata.column_semantic_roles or {}
     existing_good_for: list[str] = list(metadata.good_for or [])
     current_description: str = metadata.ai_description or ""
@@ -181,6 +199,7 @@ async def run_semantic_enrichment_for_file(
         role_groups=role_groups,
         neighbors=neighbors,
         grain=grain,
+        org_ai=org_ai,
     )
 
     raw_additions: list[str] = result.get("additional_good_for", [])
@@ -192,7 +211,7 @@ async def run_semantic_enrichment_for_file(
     if new_additions:
         metadata.good_for = existing_good_for + new_additions
         metadata.search_text = build_search_text(metadata)
-        metadata.description_embedding = await embed_text(metadata.search_text)
+        metadata.description_embedding = await embed_text(metadata.search_text, org_ai=org_ai)
         await db.commit()
 
     duration = round((time.perf_counter() - start) * 1000, 2)

@@ -204,6 +204,17 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
             ingest_logger.warning("chain_skip", reason="container not found")
             return
 
+        # Resolve per-org AI settings once for this ingestion (None → global
+        # path, byte-identical to legacy behaviour).
+        _org_ai = None
+        try:
+            _org_id = getattr(container, "organization_id", None)
+            if _org_id:
+                from app.services.org_ai_resolver import resolve_org_ai_settings  # noqa: PLC0415
+                _org_ai = await resolve_org_ai_settings(_org_id, db)
+        except Exception:  # noqa: BLE001 — never block ingestion
+            _org_ai = None
+
         ingest_logger.info("chain_start", filename=file.name, blob_path=file.blob_path,
                            container=container.container_name)
 
@@ -500,6 +511,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                 columns_info=sample["columns_info"],
                 filename=file.name,
                 glossary=column_glossary or None,
+                org_ai=_org_ai,
             )
             metadata.column_semantic_roles = col_roles or None
             metadata.role_source = role_src
@@ -523,7 +535,7 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
         try:
             search_text = build_search_text(metadata)
             metadata.search_text = search_text
-            metadata.description_embedding = await embed_text(search_text)
+            metadata.description_embedding = await embed_text(search_text, org_ai=_org_ai)
             await db.commit()
             try:
                 from app.retrieval.opensearch_indexer import index_metadata_document  # noqa: PLC0415

@@ -69,7 +69,7 @@
   },
   "extensions": {
     "supported": ["csv", "txt", "tsv", "tab", "dat", "psv", "pipe", "dsv", "xlsx", "xls", "xlsm", "xlsb"],
-    "auto_ingest": ["csv", "txt", "tsv"],
+    "auto_ingest": ["csv", "txt", "tsv", "xlsx", "xls", "xlsm", "xlsb"],
     "text": ["csv", "txt", "tsv", "tab", "dat", "psv", "pipe", "dsv"],
     "excel": ["xlsx", "xls", "xlsm", "xlsb"],
     "parquet_sources": ["csv", "txt", "tsv", "tab", "dat", "psv", "pipe", "dsv"],

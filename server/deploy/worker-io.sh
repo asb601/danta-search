@@ -28,8 +28,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."   # -> server/
 
 IO_QUEUES="${IO_QUEUES:-ingest_io}"
-# gevent pool size: prefer the formula's io_concurrency; fall back to 64.
-IO_CONCURRENCY="${CELERY_WORKER_CONCURRENCY:-64}"
+# gevent pool size = the formula's IO knob (io_concurrency), NOT the CPU-lane
+# celery_worker_concurrency. Self-tunes to the VM; overridable via IO_CONCURRENCY.
+IO_CONCURRENCY="${IO_CONCURRENCY:-$(uv run python -c 'from app.services.resource_profile import get_resource_profile, compute_ingestion_knobs; print(compute_ingestion_knobs(get_resource_profile())["io_concurrency"])')}"
 
 exec uv run celery -A app.worker.celery_app worker \
   -P gevent \

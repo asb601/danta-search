@@ -289,6 +289,7 @@ class ErpClassifier:
         ai_description: str | None = None,
         column_semantic_roles: dict | None = None,
         tier: str = "standard",
+        org_ai: dict | None = None,
     ) -> ErpClassification:
         prompt = _build_prompt(
             filename=filename,
@@ -299,7 +300,7 @@ class ErpClassifier:
         )
 
         try:
-            raw, model_version = await asyncio.to_thread(self._call_llm, prompt, tier)
+            raw, model_version = await asyncio.to_thread(self._call_llm, prompt, tier, org_ai)
         except Exception as exc:  # never break ingestion
             ingest_logger.warning("erp_classification_llm_error", error=str(exc)[:200], file=filename)
             return ErpClassification.unknown(f"llm_error: {str(exc)[:120]}")
@@ -343,7 +344,9 @@ class ErpClassifier:
         return clf
 
     @staticmethod
-    def _call_llm(prompt: str, tier: str = "standard") -> tuple[str, str]:
+    def _call_llm(
+        prompt: str, tier: str = "standard", org_ai: dict | None = None
+    ) -> tuple[str, str]:
         """Blocking Azure OpenAI call. Returns (raw_text, deployment_name).
 
         Mirrors the ingestion description-call pattern: get_chat_client() →
@@ -358,10 +361,11 @@ class ErpClassifier:
         # deployment is reported back to the caller for telemetry; the helper
         # supplies the model= for the actual create call (and may pick a
         # different lane on failover when a multi-lane pool is configured).
-        _client, deployment = get_chat_client(tier=tier)
+        _client, deployment = get_chat_client(tier=tier, org_ai=org_ai)
         kwargs: dict[str, Any] = {
             "messages": [{"role": "user", "content": prompt}],
             "tier": tier,
+            "org_ai": org_ai,
             "temperature": 0,
         }
         try:
@@ -407,6 +411,7 @@ async def classify_file(
     ai_description: str | None = None,
     column_semantic_roles: dict | None = None,
     tier: str = "standard",
+    org_ai: dict | None = None,
 ) -> ErpClassification:
     """Convenience wrapper — one-shot classification with default config."""
     return await ErpClassifier().classify(
@@ -416,4 +421,5 @@ async def classify_file(
         ai_description=ai_description,
         column_semantic_roles=column_semantic_roles,
         tier=tier,
+        org_ai=org_ai,
     )

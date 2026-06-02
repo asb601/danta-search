@@ -73,6 +73,24 @@ def _next(payload: Payload, *, stage: str, **extra: Any) -> Payload:
     return merged
 
 
+async def _resolve_org_ai(db: AsyncSession, container: ContainerConfig) -> dict[str, Any] | None:
+    """Resolve per-org AI settings for a container's organization.
+
+    Returns the org_ai dict from resolve_org_ai_settings, or None on any
+    failure / when no organization is associated — None means "use the global
+    AI path", which is byte-identical to the legacy behaviour.
+    """
+    try:
+        org_id = getattr(container, "organization_id", None)
+        if not org_id:
+            return None
+        from app.services.org_ai_resolver import resolve_org_ai_settings  # noqa: PLC0415
+
+        return await resolve_org_ai_settings(org_id, db)
+    except Exception:  # noqa: BLE001 — resolution must never block ingestion
+        return None
+
+
 async def _load_file_and_container(db: AsyncSession, file_id: str) -> tuple[File, ContainerConfig]:
     file = await db.get(File, file_id)
     if not file or not file.blob_path:
@@ -421,6 +439,8 @@ async def ai_description_stage(payload: Payload) -> Payload:
                         container_name=container.container_name,
                     )
 
+        _org_ai = await _resolve_org_ai(db, container)
+
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         description = await generate_file_description(
             columns_info=metadata.columns_info or [],
@@ -428,6 +448,7 @@ async def ai_description_stage(payload: Payload) -> Payload:
             filename=file.name,
             domain_tag=domain_tag,
             column_glossary=column_glossary or None,
+            org_ai=_org_ai,
         )
 
         # ── Escalation hook (gated; default OFF => no-op) ─────────────────────
@@ -452,6 +473,7 @@ async def ai_description_stage(payload: Payload) -> Payload:
                     domain_tag=domain_tag,
                     column_glossary=column_glossary or None,
                     tier="high",
+                    org_ai=_org_ai,
                 )
 
         metadata.ai_description = description.get("summary", "")
@@ -524,6 +546,8 @@ async def ontology_stage(payload: Payload) -> Payload:
                 container_name=container.container_name,
             )
 
+        _org_ai = await _resolve_org_ai(db, container)
+
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
 
         escalation_enabled, _ = _escalation_policy()
@@ -537,6 +561,7 @@ async def ontology_stage(payload: Payload) -> Payload:
                 filename=file.name,
                 glossary=column_glossary or None,
                 semantic_config=container.semantic_config or None,
+                org_ai=_org_ai,
             )
             # Escalation hook: mini call failed JSON parse after inner retry —
             # retry ONCE at the high tier.
@@ -550,6 +575,7 @@ async def ontology_stage(payload: Payload) -> Payload:
                     glossary=column_glossary or None,
                     semantic_config=container.semantic_config or None,
                     tier="high",
+                    org_ai=_org_ai,
                 )
         else:
             from app.services.column_role_resolver import resolve_column_roles  # noqa: PLC0415
@@ -559,6 +585,7 @@ async def ontology_stage(payload: Payload) -> Payload:
                 filename=file.name,
                 glossary=column_glossary or None,
                 semantic_config=container.semantic_config or None,
+                org_ai=_org_ai,
             )
         metadata.column_semantic_roles = col_roles or None
         metadata.role_source = role_src
@@ -606,6 +633,8 @@ async def erp_classification_stage(payload: Payload) -> Payload:
         if not metadata:
             raise RuntimeError("metadata missing before erp_classification stage")
 
+        _org_ai = await _resolve_org_ai(db, container)
+
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
 
         from app.services.erp.classifier import classify_file, schema_fingerprint  # noqa: PLC0415
@@ -651,6 +680,7 @@ async def erp_classification_stage(payload: Payload) -> Payload:
                 sample_rows=metadata.sample_rows or [],
                 ai_description=metadata.ai_description,
                 column_semantic_roles=metadata.column_semantic_roles or {},
+                org_ai=_org_ai,
             )
 
             # ── Escalation hook (gated; default OFF => no-op) ─────────────────
@@ -676,6 +706,7 @@ async def erp_classification_stage(payload: Payload) -> Payload:
                         ai_description=metadata.ai_description,
                         column_semantic_roles=metadata.column_semantic_roles or {},
                         tier="high",
+                        org_ai=_org_ai,
                     )
                     # Keep the better result; never regress to a less-reliable one.
                     if escalated.is_reliable or escalated.confidence >= clf.confidence:
@@ -746,10 +777,16 @@ async def embedding_stage(payload: Payload) -> Payload:
         if not metadata:
             raise RuntimeError("metadata missing before embedding stage")
 
+        _org_ai = None
+        if metadata.container_id:
+            container = await db.get(ContainerConfig, metadata.container_id)
+            if container:
+                _org_ai = await _resolve_org_ai(db, container)
+
         ingest_logger.info("ingest_stage", stage=stage, status="started", file_id=file_id)
         search_text = build_search_text(metadata)
         metadata.search_text = search_text
-        metadata.description_embedding = await embed_text(search_text)
+        metadata.description_embedding = await embed_text(search_text, org_ai=_org_ai)
         await db.commit()
 
         dur = _ms(start)

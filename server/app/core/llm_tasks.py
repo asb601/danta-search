@@ -98,6 +98,7 @@ async def generate_file_description(
     domain_tag: str | None = None,
     column_glossary: dict[str, str] | None = None,
     tier: str = "standard",
+    org_ai: dict | None = None,
 ) -> dict:
     def _run() -> dict:
         settings = get_settings()
@@ -110,7 +111,7 @@ async def generate_file_description(
             for raw in retry_delay_items
             if str(raw).strip()
         ]
-        _, deployment = get_chat_client(tier=tier)
+        _, deployment = get_chat_client(tier=tier, org_ai=org_ai)
         cols_for_prompt = [
             {
                 "name": c["name"],
@@ -180,6 +181,7 @@ Sample rows: {json.dumps(sample_rows[:description_sample_rows], default=str)}"""
                 response = chat_complete_with_failover(
                     messages=[{"role": "user", "content": prompt}],
                     tier=tier,
+                    org_ai=org_ai,
                     max_completion_tokens=max_completion_tokens,
                     temperature=0,
                 )
@@ -378,6 +380,7 @@ async def enrich_semantic_description(
     neighbors: list,
     grain: str | None = None,
     tier: str = "standard",
+    org_ai: dict | None = None,
 ) -> dict:
     """Generate additional good_for phrases using workflow signals.
 
@@ -396,7 +399,7 @@ async def enrich_semantic_description(
         max_additions = max(
             1, int(getattr(settings, "INGEST_SEMANTIC_ENRICHMENT_MAX_ADDITIONS", 5))
         )
-        _, deployment = get_chat_client(tier=tier)
+        _, deployment = get_chat_client(tier=tier, org_ai=org_ai)
 
         groups_section = ""
         if role_groups:
@@ -470,6 +473,7 @@ async def enrich_semantic_description(
                 response = chat_complete_with_failover(
                     messages=[{"role": "user", "content": prompt}],
                     tier=tier,
+                    org_ai=org_ai,
                     max_completion_tokens=max_completion_tokens,
                     temperature=0,
                 )

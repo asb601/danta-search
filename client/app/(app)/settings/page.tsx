@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft, LogOut, UserCircle, Database, ScrollText,
-  Tag, Users, Shield, Sun, Moon,
+  Tag, Users, Shield, Sun, Moon, Building2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/components/auth-provider";
@@ -20,10 +20,11 @@ import AdminLogsPage from "../admin/logs/page";
 import ProfileTabContent from "./_components/ProfileTabContent";
 import UsersTabContent from "./_components/UsersTabContent";
 import DomainsTabContent from "./_components/DomainsTabContent";
+import OrganizationsTabContent from "./_components/OrganizationsTabContent";
 
 /* ── types ───────────────────────────────────────────────────────────────── */
 
-type Tab = "profile" | "users" | "domains" | "containers" | "logs";
+type Tab = "profile" | "users" | "organizations" | "domains" | "containers" | "logs";
 
 /* ── page ────────────────────────────────────────────────────────────────── */
 
@@ -48,6 +49,7 @@ export default function SettingsPage() {
   }[] = [
     { id: "profile",    label: "Profile",    icon: UserCircle },
     { id: "users",      label: "Users",      icon: Users,      platformAdminOnly: true },
+    { id: "organizations", label: "Organizations", icon: Building2, platformAdminOnly: true },
     { id: "domains",    label: "Domains",    icon: Tag,        adminOnly: true },
     { id: "containers", label: "Containers", icon: Database,   adminOnly: true },
     { id: "logs",       label: "Logs",       icon: ScrollText },
@@ -162,6 +164,7 @@ export default function SettingsPage() {
           >
             {tab === "profile"    && <ProfileTabContent />}
             {tab === "users"      && isPlatformAdmin && <UsersTabContent currentUserId={user.id} />}
+            {tab === "organizations" && isPlatformAdmin && <OrganizationsTabContent />}
             {tab === "domains"    && user.is_admin && <DomainsTabContent />}
             {tab === "containers" && <ContainersPage />}
             {tab === "logs"       && <AdminLogsPage />}

@@ -19,7 +19,7 @@ build_search_text(obj)    → str                    (canonical text for a file)
 from __future__ import annotations
 
 import threading
-from typing import Union
+from typing import Any, Union
 
 from openai import AsyncAzureOpenAI
 
@@ -32,6 +32,15 @@ from app.core.config import get_settings
 _embedding_client: AsyncAzureOpenAI | None = None
 _embedding_deployment: str | None = None
 _lock = threading.Lock()
+
+# ── Per-org embedding client cache ─────────────────────────────────────────
+# Org-RBAC (Lane-Embed): when an org supplies its own embeddings key/endpoint/
+# deployment we build a dedicated AsyncAzureOpenAI for it. Cached by the
+# (endpoint, deployment, api_version) tuple — NOT by org_id — so distinct orgs
+# pointing at the same Azure resource share one client, and the API key is
+# never used as a cache key or logged.
+_org_embedding_clients: dict[tuple[str, str, str], AsyncAzureOpenAI] = {}
+_org_lock = threading.Lock()
 
 _EMBED_DIMS = 1536
 
@@ -89,7 +98,38 @@ def _get_embedding_pool():
     return _embedding_pool
 
 
-def _get_embedding_client() -> tuple[AsyncAzureOpenAI, str]:
+def _get_embedding_client(
+    org_ai: dict[str, Any] | None = None,
+) -> tuple[AsyncAzureOpenAI, str]:
+    """Return (client, deployment) for embeddings.
+
+    When ``org_ai`` resolves to a fully-specified per-org configuration
+    (source == "org" AND embeddings_api_key + chat_endpoint +
+    embeddings_deployment all present) a dedicated AsyncAzureOpenAI is built
+    and cached by (endpoint, deployment, api_version). Otherwise — org_ai is
+    None, source != "org", or any required field is empty — the global
+    process-wide client is returned (byte-identical to the legacy path).
+    """
+    if org_ai and org_ai.get("source") == "org":
+        endpoint = org_ai.get("chat_endpoint")
+        api_key = org_ai.get("embeddings_api_key")
+        deployment = org_ai.get("embeddings_deployment")
+        api_version = org_ai.get("api_version") or get_settings().AZURE_OPENAI_API_VERSION
+        if endpoint and api_key and deployment:
+            cache_key = (endpoint, deployment, api_version)
+            client = _org_embedding_clients.get(cache_key)
+            if client is None:
+                with _org_lock:
+                    client = _org_embedding_clients.get(cache_key)
+                    if client is None:
+                        client = AsyncAzureOpenAI(
+                            azure_endpoint=endpoint,
+                            api_key=api_key,
+                            api_version=api_version,
+                        )
+                        _org_embedding_clients[cache_key] = client
+            return client, deployment
+
     global _embedding_client, _embedding_deployment
     if _embedding_client is None:
         with _lock:
@@ -110,19 +150,26 @@ def _get_embedding_client() -> tuple[AsyncAzureOpenAI, str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-async def embed_text(text: str) -> list[float]:
+async def embed_text(text: str, org_ai: dict[str, Any] | None = None) -> list[float]:
     """Embed a single string.  Returns a 1 536-dim float list."""
     if not text or not text.strip():
         return [0.0] * _EMBED_DIMS
-    results = await embed_batch([text])
+    results = await embed_batch([text], org_ai=org_ai)
     return results[0]
 
 
-async def embed_batch(texts: list[str]) -> list[list[float]]:
+async def embed_batch(
+    texts: list[str], org_ai: dict[str, Any] | None = None
+) -> list[list[float]]:
     """Embed up to 100 strings in one API call.
 
     Returns embeddings in the same order as `texts`.
     Empty / whitespace strings are replaced with zero vectors without an API call.
+
+    When ``org_ai`` resolves to a per-org embedding configuration, the non-pool
+    branch routes through that org's dedicated client. NOTE: the flag-gated
+    model-pool branch (embedding_pool_enabled, default OFF) is GLOBAL — org keys
+    are bypassed while that operator flag is on.
     """
     if not texts:
         return []
@@ -141,17 +188,41 @@ async def embed_batch(texts: list[str]) -> list[list[float]]:
         try:
             # Flag-gated pool path: route through ModelPool.aembed for weighted
             # selection + 429/timeout failover. Default OFF → legacy single client.
+            # The pool is GLOBAL by design; org keys are bypassed when on.
             pool = _get_embedding_pool()
             if pool is not None:
                 resp = await pool.aembed(inputs=cleaned)
+                embeddings = [item.embedding for item in resp.data]
             else:
-                client, deployment = _get_embedding_client()
+                client, deployment = _get_embedding_client(org_ai)
                 resp = await client.embeddings.create(
                     model=deployment,
                     input=cleaned,
                 )
-            for pos, item in enumerate(resp.data):
-                result[indices_to_embed[pos]] = item.embedding
+                embeddings = [item.embedding for item in resp.data]
+
+                # ── Dimension guard ──────────────────────────────────────────
+                # An org could point embeddings_deployment at a non-1536-dim
+                # model (e.g. text-embedding-3-large = 3072). A wrong-dimension
+                # vector would corrupt pgvector / OpenSearch. If any returned
+                # embedding is the wrong size when using an ORG client, fall
+                # back and re-embed the whole batch with the GLOBAL client.
+                used_org_client = bool(org_ai and org_ai.get("source") == "org") and (
+                    client is not _embedding_client
+                )
+                if used_org_client and any(
+                    len(e) != _EMBED_DIMS for e in embeddings
+                ):
+                    _log_embedding_dim_mismatch()
+                    g_client, g_deployment = _get_embedding_client(None)
+                    resp = await g_client.embeddings.create(
+                        model=g_deployment,
+                        input=cleaned,
+                    )
+                    embeddings = [item.embedding for item in resp.data]
+
+            for pos, embedding in enumerate(embeddings):
+                result[indices_to_embed[pos]] = embedding
         except Exception as exc:
             # DeploymentNotFound → deployment not yet created in Azure portal.
             # Other errors (rate limit, transient) also handled here.
@@ -159,6 +230,19 @@ async def embed_batch(texts: list[str]) -> list[list[float]]:
             _log_embedding_failure(exc)
 
     return result
+
+
+def _log_embedding_dim_mismatch() -> None:
+    """Warn that an org embedding deployment returned a non-1536-dim vector."""
+    try:
+        from app.core.logger import ingest_logger  # lazy import avoids circular dep
+        ingest_logger.warning(
+            "embedding_dim_mismatch",
+            hint="org embedding dim mismatch, falling back to global",
+            expected_dims=_EMBED_DIMS,
+        )
+    except Exception:
+        pass  # logging must never crash the ingestion pipeline
 
 
 def _log_embedding_failure(exc: Exception) -> None:

@@ -71,6 +71,7 @@ async def resolve_column_roles(
     glossary: dict[str, str] | None = None,
     semantic_config: dict[str, Any] | None = None,
     tier: str = "standard",
+    org_ai: dict | None = None,
 ) -> tuple[dict[str, str], str, dict[str, dict]]:
     """Resolve all columns to semantic roles via one LLM call.
 
@@ -91,7 +92,7 @@ async def resolve_column_roles(
 
     settings = get_settings()
     preview_items = max(0, int(settings.INGEST_ROLE_RESOLVER_PREVIEW_ITEMS))
-    roles, evidence = await _call_llm(columns_info, filename, glossary, semantic_config, tier=tier)
+    roles, evidence = await _call_llm(columns_info, filename, glossary, semantic_config, tier=tier, org_ai=org_ai)
     # Strip the parse-failure sentinel (additive; only present on JSON failure).
     evidence.pop("__parse_failed__", None)
     source = "llm_dynamic" if any(is_dynamic_role(role) for role in roles.values()) else "llm"
@@ -117,6 +118,7 @@ async def resolve_column_roles_with_signal(
     glossary: dict[str, str] | None = None,
     semantic_config: dict[str, Any] | None = None,
     tier: str = "standard",
+    org_ai: dict | None = None,
 ) -> tuple[dict[str, str], str, dict[str, dict], bool]:
     """Same as ``resolve_column_roles`` but also returns ``parse_failed``.
 
@@ -130,7 +132,7 @@ async def resolve_column_roles_with_signal(
 
     settings = get_settings()
     preview_items = max(0, int(settings.INGEST_ROLE_RESOLVER_PREVIEW_ITEMS))
-    roles, evidence = await _call_llm(columns_info, filename, glossary, semantic_config, tier=tier)
+    roles, evidence = await _call_llm(columns_info, filename, glossary, semantic_config, tier=tier, org_ai=org_ai)
     parse_failed = evidence.pop("__parse_failed__", None) is not None
     source = "llm_dynamic" if any(is_dynamic_role(role) for role in roles.values()) else "llm"
 
@@ -155,6 +157,7 @@ async def _call_llm(
     glossary: dict[str, str] | None,
     semantic_config: dict[str, Any] | None,
     tier: str = "standard",
+    org_ai: dict | None = None,
 ) -> tuple[dict[str, str], dict[str, dict]]:
     """Single LLM call — classifies ALL columns at once with full data profile.
 
@@ -255,7 +258,7 @@ Rules:
 """
 
     def _run() -> tuple[dict[str, str], dict[str, dict]]:
-        client, deployment = get_chat_client(tier=tier)
+        client, deployment = get_chat_client(tier=tier, org_ai=org_ai)
         prompt_tokens = count_tokens(prompt, deployment)
         # Larger budget: enriched format is ~2.5× larger than flat role strings
         completion_budget = max(600, min(max_completion_tokens, len(col_profiles) * 100))
@@ -269,6 +272,7 @@ Rules:
                 response = chat_complete_with_failover(
                     messages=[{"role": "user", "content": prompt}],
                     tier=tier,
+                    org_ai=org_ai,
                     max_completion_tokens=completion_budget,
                     temperature=0,
                 )

@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
 from app.core.logger import auth_logger
@@ -45,6 +46,9 @@ class OrgOut(BaseModel):
     container_id: str | None
     container_name: str | None = None
     user_count: int = 0
+    onboarding_state: str | None = None
+    slug: str | None = None
+    owner_email: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -102,16 +106,24 @@ async def list_organizations(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    # `Member` counts users belonging to the org (organization_id FK) and is the
+    # only join that may produce multiple rows per org → it drives the GROUP BY
+    # aggregate. `Owner` is a distinct alias joined on owner_user_id (1:1), so it
+    # cannot inflate the member count.
+    Member = aliased(User)
+    Owner = aliased(User)
     rows = (
         await db.execute(
             select(
                 Organization,
                 ContainerConfig.container_name,
-                func.count(User.id).label("user_count"),
+                func.count(Member.id).label("user_count"),
+                Owner.email.label("owner_email"),
             )
             .outerjoin(ContainerConfig, Organization.container_id == ContainerConfig.id)
-            .outerjoin(User, User.organization_id == Organization.id)
-            .group_by(Organization.id, ContainerConfig.container_name)
+            .outerjoin(Member, Member.organization_id == Organization.id)
+            .outerjoin(Owner, Owner.id == Organization.owner_user_id)
+            .group_by(Organization.id, ContainerConfig.container_name, Owner.email)
             .order_by(Organization.created_at)
         )
     ).all()
@@ -123,9 +135,12 @@ async def list_organizations(
             container_id=org.container_id,
             container_name=container_name,
             user_count=user_count or 0,
+            onboarding_state=org.onboarding_state,
+            slug=org.slug,
+            owner_email=owner_email,
             created_at=org.created_at,
         )
-        for org, container_name, user_count in rows
+        for org, container_name, user_count, owner_email in rows
     ]
 
 
@@ -147,12 +162,19 @@ async def get_organization(
             select(func.count(User.id)).where(User.organization_id == org_id)
         )
     ).scalar() or 0
+    owner_email = None
+    if org.owner_user_id:
+        owner = await db.get(User, org.owner_user_id)
+        owner_email = owner.email if owner else None
     return OrgOut(
         id=org.id,
         name=org.name,
         container_id=org.container_id,
         container_name=container_name,
         user_count=user_count,
+        onboarding_state=org.onboarding_state,
+        slug=org.slug,
+        owner_email=owner_email,
         created_at=org.created_at,
     )
 
