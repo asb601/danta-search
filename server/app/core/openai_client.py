@@ -113,11 +113,10 @@ def _legacy_client() -> tuple[AzureOpenAI, str]:
                 settings = get_settings()
                 endpoint = settings.AZURE_OPENAI_ENDPOINT or settings.AZURE_OPENAI_API_BASE
                 api_key = settings.AZURE_OPENAI_KEY or settings.AZURE_OPENAI_API_KEY
-                deployment = (
-                    settings.AZURE_OPENAI_DEPLOYMENT
-                    if settings.AZURE_OPENAI_DEPLOYMENT != "gpt-4"
-                    else settings.AZURE_OPENAI_MODEL
-                ) or settings.AZURE_OPENAI_DEPLOYMENT
+                # Cost control: chat_deployment() routes to gpt-4o-mini when
+                # DISABLE_GPT4O is set, so ingestion + every standard-tier call
+                # stops using gpt-4o. Falls back to the primary deployment.
+                deployment = settings.chat_deployment() or settings.AZURE_OPENAI_DEPLOYMENT
 
                 _ai_client = AzureOpenAI(
                     azure_endpoint=endpoint,
@@ -207,6 +206,11 @@ def get_chat_client(
     call so a tripped lane is avoided on subsequent picks within the cooldown.
     The trip itself is recorded via ``report_chat_failure``.
     """
+    # Cost control: when gpt-4o is disabled, never request the "high" (gpt-4o)
+    # lane in pool mode, and push the org path onto its fallback deployment.
+    if get_settings().DISABLE_GPT4O:
+        tier = "fallback"
+
     if org_ai is not None and org_ai.get("source") == "org":
         org_client = _org_chat_client(org_ai=org_ai, tier=tier)
         if org_client is not None:

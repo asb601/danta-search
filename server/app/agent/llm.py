@@ -106,11 +106,13 @@ def get_llm(org_ai: dict[str, Any] | None = None) -> AzureChatOpenAI:
     singleton is returned.
     """
     if org_ai and org_ai.get("source") == "org":
+        # When gpt-4o is disabled, use the org's fallback (cheaper) lane.
+        _disabled = get_settings().DISABLE_GPT4O
         client = _org_client(
             "primary", org_ai,
             endpoint_key="chat_endpoint",
-            deployment_key="chat_deployment",
-            api_key_key="chat_api_key",
+            deployment_key="fallback_deployment" if _disabled else "chat_deployment",
+            api_key_key="fallback_api_key" if _disabled else "chat_api_key",
             max_tokens=1500,
         )
         if client is not None:
@@ -120,7 +122,9 @@ def get_llm(org_ai: dict[str, Any] | None = None) -> AzureChatOpenAI:
     if _llm is None:
         with _lock:
             if _llm is None:
-                _llm = _make_llm(get_settings().AZURE_OPENAI_DEPLOYMENT)
+                # chat_deployment() routes to gpt-4o-mini when DISABLE_GPT4O is
+                # set, so this "primary" accessor never spins up gpt-4o.
+                _llm = _make_llm(get_settings().chat_deployment())
     return _llm
 
 

@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # Embedding model deployment
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = ""
 
+    # Cost control: when true, every gpt-4o ("primary"/"standard"/"high") chat
+    # call is routed to the gpt-4o-mini deployment instead — the heavy model is
+    # never used. Embeddings (text-embedding-3-small) are unaffected.
+    # Set DISABLE_GPT4O=false in .env to restore gpt-4o.
+    DISABLE_GPT4O: bool = True
+
     # .env aliases (AZURE_OPENAI_API_BASE / AZURE_OPENAI_API_KEY)
     AZURE_OPENAI_API_BASE: str = ""
     AZURE_OPENAI_API_KEY: str = ""
@@ -120,6 +126,21 @@ class Settings(BaseSettings):
     OPENSEARCH_REPLICAS: int = 0
 
     model_config = {"env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"), "extra": "ignore"}
+
+    def chat_deployment(self) -> str:
+        """Resolve the deployment for the primary/standard/high chat lane.
+
+        Cost control: when DISABLE_GPT4O is set, returns the gpt-4o-mini
+        deployment so the heavy model is never selected. Falls back to the
+        primary deployment if mini is not configured (so a misconfigured env
+        does not break chat). Preserves the legacy 'gpt-4'→model alias.
+        """
+        if self.DISABLE_GPT4O and self.AZURE_OPENAI_DEPLOYMENT_MINI:
+            return self.AZURE_OPENAI_DEPLOYMENT_MINI
+        primary = self.AZURE_OPENAI_DEPLOYMENT
+        if primary == "gpt-4" and self.AZURE_OPENAI_MODEL:
+            return self.AZURE_OPENAI_MODEL
+        return primary
 
     def __getattr__(self, name: str):
         if name.startswith("INGEST_") or name in _INGESTION_POLICY_PROXY_NAMES:
