@@ -1,59 +1,54 @@
 # PDF Agentic Graph RAG — Implementation Plan Index
 
-> **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans`. Execute phases **strictly in order**; each ends at a reviewer-board gate. **This index is authoritative — where a phase file disagrees with the Cross-Phase Contract below, this index wins.**
+> **For agentic workers:** REQUIRED SUB-SKILL: `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans`. Execute phases **in order**; each ends at a reviewer-board gate. **This index is authoritative — where a phase file disagrees with the Cross-Phase Contract below, this index wins.**
 
-**Spec:** `docs/superpowers/specs/2026-06-03-pdf-agentic-graph-rag-design.md`
-**Goal:** Upgrade `server/pdf_chat/` from a non-running scaffold into an agentic, grounded Graph-RAG system with value-evidenced cross-domain (PDF + CSV) reasoning, while cutting per-document token cost.
+**Spec:** `docs/superpowers/specs/2026-06-03-pdf-agentic-graph-rag-design.md` (v3)
+**Goal:** Turn `server/pdf_chat/` into an agentic, grounded Graph-RAG **comprehension** system — a per-tenant "superhuman memory" that works for any enterprise (information type varies, intent is fixed), with value-evidenced cross-domain (PDF+CSV) reasoning, at a tunable token cost.
 
 ---
 
 ## Phase plans (execute in this order)
 
-| # | Plan file | Tasks | Exit gate |
-|---|---|---|---|
-| 0+1 | `2026-06-03-pdf-phase0-1-foundations.md` | 18 | A PDF ingests end-to-end and answers with citations; token guards live; eval baseline recorded |
-| 2 | `2026-06-03-pdf-phase2-knowledge-graph.md` | 9 | Per-hop tenant isolation verified + faithfulness eval (edge precision, merge P/R, report groundedness) passes |
-| 3 | `2026-06-03-pdf-phase3-agentic-runtime.md` | 12 | Complex multi-hop answered; simple/cached bypass; negative-claim gate blocks unproven absence |
-| 4 | `2026-06-03-pdf-phase4-cross-domain-bridge.md` | 10 | One question spans a contract PDF + vendor CSV via a correct **value-evidenced** join |
-| 5 | `2026-06-03-pdf-phase5-hardening.md` | 9 | Per-tenant cost/observability, safe cascading delete, backoff, expanded CI eval gate |
+| Roadmap phase | Plan file | Notes |
+|---|---|---|
+| 0+1 Foundations / make-it-run | `2026-06-03-pdf-phase0-1-foundations.md` | + see addendum for model router & DeepDoc |
+| (cross-cut) Model router & DeepDoc | `2026-06-04-pdf-addendum-model-router-and-deepdoc.md` | extends Phase 0 (router) + Phase 1 (DeepDoc ONNX micro-components) |
+| 2 Knowledge graph | `2026-06-03-pdf-phase2-knowledge-graph.md` | extraction now routes through the model router; exit eval adds held-out-tenant test |
+| 3 Agentic runtime | `2026-06-03-pdf-phase3-agentic-runtime.md` | + `definitional` intent, conflict gate, provenance labels, `glossary_lookup` tool seam |
+| 4 Cross-domain bridge | `2026-06-03-pdf-phase4-cross-domain-bridge.md` | unchanged |
+| 5 Comprehension layer | `2026-06-04-pdf-phase5-comprehension.md` | **NEW — the superhuman-memory payload** |
+| 6 Hardening | `2026-06-03-pdf-phase5-hardening.md` | (file named "phase5-hardening" = roadmap Phase 6; + escalation-budget tracking) |
 
 ---
 
 ## Canonical Cross-Phase Contract (single source of truth)
 
-**C0 — Test command.** Run tests with `uv run --with pytest --with pytest-asyncio pytest <path> -q` from `server/` (pytest is NOT a project dependency). Pure tests run with no infra; infra tests are gated behind markers (`@pytest.mark.infra` / `neo4j` / `llm`) and excluded by default. Verified baseline: `pdf_chat/testing/test_ingestion.py` → 45 passed.
+**C0 — Test command.** `uv run --with pytest --with pytest-asyncio pytest <path> -q` from `server/` (pytest is not a project dep). Infra tests behind markers, excluded by default.
 
-**C1 — Tunables & logging (Phase 0 owns; all phases consume).** `server/pdf_chat/tunables.py` exposes `get_tunable(container_id, key, default)` (config + `pdf_graphrag_tunables` table) and `log_gate_decision(name, *, score, threshold, outcome, **ctx)`. **No score-comparison literal may appear in any `.py` file**; every gate/skip/cap/merge/route threshold resolves via `get_tunable` and logs via `log_gate_decision`. Entity/relationship/domain **types are never hardcoded dictionaries**.
+**C1 — Tunables & logging (Phase 0 owns).** `pdf_chat/tunables.py`: `get_tunable(container_id, key, default)` + `log_gate_decision(name, *, score, threshold, outcome, **ctx)`. **No score-comparison literal in any `.py`.** Types are never hardcoded dictionaries.
 
-**C2 — Neo4j searcher methods are owned by Phase 2.** `Neo4jSearcher` in `retrieval/neo4j_searcher.py` is rewritten in **Phase 2** to the Entity schema and defines `graph_traversal(...)`, `entity_neighbors(...)`, and `community_report_lookup(...)`, each enforcing per-hop tenant isolation (`ALL(n IN nodes(path) WHERE n.tenant_id=$tenant_id)`). **Phase 3 CONSUMES these — it does not redefine them.** If a Phase-3 task adds a searcher method that Phase 2 already created, treat it as a no-op/skip. Tool name `get_entity_neighbors` wraps searcher `entity_neighbors`.
+**C2 — Neo4j searcher methods owned by Phase 2.** `Neo4jSearcher.graph_traversal/entity_neighbors/community_report_lookup`, per-hop tenant isolation (`ALL(n IN nodes(path) WHERE n.tenant_id=$tenant_id)`). Phase 3 consumes, does not redefine. Tool `get_entity_neighbors` wraps searcher `entity_neighbors`.
 
-**C3 — Tool interface & registry (Phase 3 owns).** `agent/tools.py` defines `Tool` Protocol (`name: str; async def run(self, state, deps, **kwargs) -> list[dict]`), `TOOL_REGISTRY: dict[str, Tool]`, and `register_tool(tool)`. **Every tool — including Phase 4's `structured_query` — must implement this `Tool` Protocol** and register via `register_tool`. Phase 4's underlying `structured_query(deps, query) -> dict` is correct, but the object placed in `TOOL_REGISTRY` must be a `Tool`, not a raw LangChain `StructuredTool` (wrap it). Phase 3 does **not** implement `structured_query`.
+**C3 — Tool interface & registry (Phase 3 owns).** `agent/tools.py`: `Tool` Protocol (`name; async run(state,deps,**kw)->list[dict]`), `TOOL_REGISTRY`, `register_tool`. Every tool — `structured_query` (Phase 4) and `glossary_lookup` (Phase 5) — implements `Tool` and registers via `register_tool` (wrap any LangChain tool, never store a raw `StructuredTool`).
 
-**C4 — Agent entry point (Phase 3 exposes).** `agent/graph.py` exposes `run_pdf_query(query, *, tenant_id, container_id, ...)` returning a result with `.answer` and `.citations`. Phase 5's eval harness and the API route depend on this exact signature.
+**C4 — Agent entry point (Phase 3 exposes).** `agent/graph.py :: run_pdf_query(query, *, tenant_id, container_id, ...)` → result with `.answer`, `.citations`. Phase 5/6 + the API route depend on it.
 
-**C5 — Cross-domain bridge is value-evidenced only (Phase 4).** PDF `Entity` → `SemanticEntity` links ONLY via literal value reconciliation through `relationship_index.fingerprint_value` to a real master key. **No name-equality, no embedding-cosine join.** Sub-threshold ⇒ refuse + say so. `structured_query` delegates to `run_agent_query` passing `container_id`/`allowed_domains`/`user_id`, runs **strictly sequentially** (async session not concurrency-safe), and inherits the CSV-side feasibility + negative-claim gates.
+**C5 — Cross-domain bridge is value-evidenced only (Phase 4).** Via `relationship_index.fingerprint_value` to a real master key; no name/embedding join; sub-threshold ⇒ refuse. `structured_query` is sequential, passes `container_id`/`allowed_domains`/`user_id`, inherits CSV gates.
 
-**C6 — Grounding & honesty invariants (all phases).** No edge / community-report claim / synthesized claim without a source-span citation (else reject/refuse). A "no data / not found" claim requires proof of coverage + diagnosis — retrieval-empty ≠ absent. gpt-4o-mini only.
+**C6 — Grounding & honesty (all phases).** No edge/report/glossary/claim without a cited span. Honest absence (coverage + diagnosis). gpt-4o-mini bulk; per-hop tenant isolation. Relationships three-state (asserted/not-stated/conflicting).
 
----
+**C7 — Model router (Phase 0 owns; all phases consume).** `pdf_chat/model_router.py`: `select_model(*, task, container_id, signals) -> ModelChoice` and `escalation_allowed(container_id, signals) -> bool` (budget-capped). **Bulk = gpt-4o-mini.** Strong tier (tunable id, default `claude-sonnet-4-6`) only when the data-driven escalation gate fires AND the per-tenant escalation budget is not exhausted. **Opus is query-time-only, off by default; never bulk ingestion.** Embeddings = `text-embedding-3-small`. All model ids, gate thresholds, and budget caps are tunables — no literals.
 
-## Token-reduction scorecard (the user's explicit goal)
-
-Tracked because Full GraphRAG is the costly option; savings are architectural, not feature cuts:
-
-| Lever | Phase | Entry point |
-|---|---|---|
-| Prompt caching on extraction + synthesis system prompts | 0, 2 | biggest lever at ingest scale |
-| Batch embeddings | 0 | `embed_texts_batched` |
-| Query-embedding cache | 0 | `QueryEmbedder` + Redis |
-| Context token budget | 0 | `assemble_context` |
-| Idempotent extraction (chunk_fingerprint + prompt/model version) | 2 | never re-extract unchanged |
-| Amortized, cited community reports | 2 | built once at ingest |
-| Planner bypass + versioned response cache | 3, 4 | simple/cached queries skip the loop |
-| Adaptive rerank | 3 | skip when vector-confident |
+**C8 — Comprehension artifact (Phase 5 owns).** A versioned, Postgres-backed **Tenant Ontology** (entities, relationships, doc-taxonomy, temporal-coverage, metrics registries) + **glossary** (term → expansion/definition/variants/provenance `stated|inferred`). Read-only projections power the onboarding surface. Mirrors `server/app/services/semantic_layer_builder`. Learned per tenant; the INTENT layer (tools/planner/kinds) stays fixed code (spec invariant 6).
 
 ---
 
-## Reviewer-board gates (per phase)
+## Generality invariants (spec §3.6, §3.7)
+- **Stable intent over learned semantics**: domain meaning is per-tenant learned data, never code. New industry = learned data, not a code `if`.
+- **Linkage discovered, siloing valid**: no code requires an edge; disconnected graphs are correct; conflicts surfaced, never silently resolved.
 
-Before advancing past any phase, route the diff through the board (ai-architect-review, data-science-review, business-analyst-review, static-code-sentinel) under the delivery-manager. Phase 2 additionally requires the faithfulness eval to pass; Phase 4 additionally requires the bridge refuse-on-sub-threshold tests to pass.
+## Cost dial (spec §8)
+One-time ingestion ≈ `N_docs × pages/doc × $0.002 × (1 + escalation% × (strong_mult − 1))`. ~$40k/1M docs mini-only; keep escalation ≤3–5% (Sonnet ~20×, Opus ~90×). Set per-tenant escalation % to quote a client.
+
+## Reviewer-board gates
+Each phase routes its diff through the board (architect, data-science, business-analyst, static-code-sentinel) under the delivery-manager, plus SME for the comprehension layer. Phase 2 also gates on faithfulness eval **including a held-out unseen tenant**. Phase 4 gates on bridge refuse-on-sub-threshold tests.
