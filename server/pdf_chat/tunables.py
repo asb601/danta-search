@@ -80,6 +80,41 @@ TUNABLE_DEFAULTS: dict[str, Any] = {
     "deepdoc.column_max_k": 4,
     "deepdoc.tsr_min_confidence": 0.50,
     "deepdoc.rotation_min_confidence": 0.50,
+    # Phase 2 — Knowledge Graph (single source of truth for every kg.* dial).
+    # Each module already passes these as inline named defaults to get_tunable so
+    # it stays import-safe pre-integration; registering them here restores the
+    # single-source discoverability + per-container override rule (Spec §3 inv 4).
+    # Sectionizer (Task 2)
+    "kg.extraction.granularity": "section",
+    "kg.sectionize.heading_max_words": 8,
+    "kg.sectionize.heading_max_chars": 80,
+    # NER / value-overlap backbone (Task 3)
+    "kg.ner.max_candidates": 64,
+    "kg.link.min_token_len": 3,
+    "kg.link.max_value_fanout": 8,
+    # Section extraction + gleaning (Task 4)
+    "kg.gleaning.max_passes": 2,
+    "kg.gleaning.new_entity_floor": 1,
+    "kg.extraction.section_tag_cap": 5,
+    # Grounding gate (Task 6)
+    "kg.tag.min_confidence": 0.50,
+    # Short tokens (<= this normalized length) must word-boundary match in the
+    # cited span so a 2-char name ("HP"/"Q3") can't ground on an incidental
+    # substring. Longer tokens use plain substring containment.
+    "kg.ground.word_boundary_max_len": 3,
+    # Entity resolution (Task 7)
+    "kg.resolution.merge_band_quantile": 0.85,
+    "kg.resolution.merge_floor": 0.60,
+    "kg.resolution.cooccurrence_lift": 0.05,
+    # Card builder (Task 9)
+    "kg.card.section_tag_cap": 6,
+    "kg.card.summary_max_chars": 480,
+    # Communities + cited reports + PageRank (Task 10/11/12)
+    "kg.community.resolution": 1.0,
+    "kg.community.min_size": 3,
+    "kg.report.min_grounded_edges": 2,
+    # Multi-representation search (Task 1/8)
+    "kg.multivec.top_k": 12,
 }
 
 # Optional per-container DB override hook. Wired in Task 1b; until then None ⇒

@@ -39,6 +39,8 @@ dependencies = [
     "psutil>=5.9",
     "polars>=1.0.0",
     "gevent>=24.0.0",
+    "networkx>=3.0",
+    "scipy>=1.11",
 ]
 
 [build-system]

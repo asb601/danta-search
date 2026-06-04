@@ -77,6 +77,14 @@ class IngestDeps:
     blob_writer: Callable[..., Awaitable[str]]
     enqueue_fn: Callable[[str, str], Awaitable[None]]
     commit: Callable[[], Awaitable[None]] | None = None
+    # Phase 2 — OPTIONAL doc-level knowledge-graph build hook. Called by
+    # ``reconcile`` once (and only once) a document reaches a terminal indexed
+    # state. Signature: ``async (upload_id, doc_status) -> None``. Defaults to
+    # ``None`` so the control plane no-ops cleanly with no Neo4j/LLM/embedding
+    # infra present (mocks-only, guarded-degrade). Production wires this to a
+    # closure that loads the doc's persisted chunks and calls
+    # ``ingestion.construct_knowledge_graph(...)`` with the real backends.
+    kg_builder: Callable[[str, str], Awaitable[None]] | None = None
 
 
 @dataclass
@@ -263,4 +271,20 @@ async def reconcile(upload_id: str, deps: IngestDeps) -> str:
     await deps.upload_repo.set_status(upload_id, doc_status)
     if deps.commit is not None:
         await deps.commit()
+
+    # Phase 2 — doc-level KG build runs AFTER all pages settle (NOT per page),
+    # and ONLY for a document that actually has indexed content. Guarded so the
+    # control plane stays infra-free when no hook is wired (mocks-only). The hook
+    # owns loading the doc's persisted chunks + constructing the real backends and
+    # invoking ``ingestion.construct_knowledge_graph``; failures here never undo a
+    # successful page reconcile, so they are swallowed (logged best-effort).
+    if deps.kg_builder is not None and doc_status in (
+        DocStatus.INDEXED.value,
+        DocStatus.PARTIALLY_INDEXED.value,
+    ):
+        try:
+            await deps.kg_builder(upload_id, doc_status)
+        except Exception:  # pragma: no cover - hook is best-effort, never fatal
+            pass
+
     return doc_status
