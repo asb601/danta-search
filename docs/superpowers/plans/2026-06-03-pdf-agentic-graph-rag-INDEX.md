@@ -13,7 +13,7 @@
 |---|---|---|
 | 0+1 Foundations / make-it-run | `2026-06-03-pdf-phase0-1-foundations.md` | + see addendum for model router & DeepDoc |
 | (cross-cut) Model router & DeepDoc | `2026-06-04-pdf-addendum-model-router-and-deepdoc.md` | extends Phase 0 (router) + Phase 1 (DeepDoc ONNX micro-components) |
-| 2 Knowledge graph | `2026-06-03-pdf-phase2-knowledge-graph.md` | extraction now routes through the model router; exit eval adds held-out-tenant test |
+| 2 Knowledge graph | `2026-06-03-pdf-phase2-knowledge-graph.md` | ⚠️ SUPERSEDED by spec v3 §1b — extraction is **section-level (default), not per-chunk** + NER/value-overlap backbone + multi-representation index (chunk/section-card/doc-card embeddings) + escalation OFF for bulk. Regenerate this plan file at Phase-2 build time. |
 | 3 Agentic runtime | `2026-06-03-pdf-phase3-agentic-runtime.md` | + `definitional` intent, conflict gate, provenance labels, `glossary_lookup` tool seam |
 | 4 Cross-domain bridge | `2026-06-03-pdf-phase4-cross-domain-bridge.md` | unchanged |
 | 5 Comprehension layer | `2026-06-04-pdf-phase5-comprehension.md` | **NEW — the superhuman-memory payload** |
