@@ -82,19 +82,31 @@ class Neo4jWriter:
 
     @staticmethod
     def _write_chunk_cypher() -> str:
-        # MERGE the document + page (tenant scoped), then attach the chunk.
-        # Every node carries tenant_id + acl for isolation/ACL enforcement.
+        # MERGE the document + page (tenant scoped), then MERGE the chunk keyed on
+        # (chunk_id, tenant_id) so re-extraction (retry/DLQ replay) OVERWRITES the
+        # chunk rather than duplicating it (idempotent write). The mutable props
+        # (text/embedding/confidence/low_confidence/page_num/element_type/
+        # reading_order/acl) are set identically on both the ON CREATE and
+        # ON MATCH branches so a replay always converges to the latest extraction.
         return (
             "MERGE (d:Document {doc_id: $doc_id, tenant_id: $tenant_id}) "
             "  ON CREATE SET d.acl = $acl "
             "MERGE (p:Page {doc_id: $doc_id, page_num: $page_num, tenant_id: $tenant_id}) "
             "  ON CREATE SET p.acl = $acl "
             "MERGE (d)-[:CONTAINS]->(p) "
-            "CREATE (c:Chunk { "
-            "  chunk_id: $chunk_id, doc_id: $doc_id, page_num: $page_num, "
-            "  element_type: $element_type, text: $text, "
-            "  reading_order: $reading_order, tenant_id: $tenant_id, "
-            "  acl: $acl, embedding: $embedding }) "
+            "MERGE (c:Chunk {chunk_id: $chunk_id, tenant_id: $tenant_id}) "
+            "  ON CREATE SET "
+            "    c.doc_id = $doc_id, c.page_num = $page_num, "
+            "    c.element_type = $element_type, c.text = $text, "
+            "    c.reading_order = $reading_order, c.acl = $acl, "
+            "    c.embedding = $embedding, c.confidence = $confidence, "
+            "    c.low_confidence = $low_confidence "
+            "  ON MATCH SET "
+            "    c.doc_id = $doc_id, c.page_num = $page_num, "
+            "    c.element_type = $element_type, c.text = $text, "
+            "    c.reading_order = $reading_order, c.acl = $acl, "
+            "    c.embedding = $embedding, c.confidence = $confidence, "
+            "    c.low_confidence = $low_confidence "
             "MERGE (p)-[:CONTAINS]->(c)"
         )
 

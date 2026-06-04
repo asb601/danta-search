@@ -113,10 +113,14 @@ class FakeLlm:
     def __init__(self):
         self.calls = 0
         self.last_system = None
+        self.last_container_id = None
+        self.last_signals = None
 
-    async def generate(self, system, user):
+    async def generate(self, system, user, *, container_id="", signals=None):
         self.calls += 1
         self.last_system = system
+        self.last_container_id = container_id
+        self.last_signals = signals
         return "The revenue grew 12% [1]."
 
 
@@ -329,3 +333,112 @@ def test_document_summary_and_delete_roundtrip():
 
     dr = DeleteResponse(upload_id="u", deleted=True, chunks_removed=42)
     assert DeleteResponse.model_validate(dr.model_dump()) == dr
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — PdfLlm synthesis adapter (gpt-4o-mini only, prompt caching)
+# ---------------------------------------------------------------------------
+def test_pdf_llm_routes_model_via_router_and_prompt_caches(monkeypatch):
+    # B1: the adapter must resolve the model through model_router.select_model
+    # (NOT a direct deployment lookup) with the QUERY_SYNTHESIS task, and use the
+    # returned ModelChoice.model_id. I1: a stable prompt-cache routing hint is
+    # passed and the system prompt is the cacheable first message.
+    from pdf_chat.retrieval import llm as llm_mod
+    from pdf_chat.model_router import ModelChoice, TaskClass
+
+    captured = {}
+
+    class _FakeMsgs:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            class _R:
+                choices = [type("C", (), {"message": type("M", (), {"content": "grounded answer"})()})()]
+            return _R()
+
+    class _FakeClient:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": _FakeMsgs()})()
+
+    select_calls = {}
+
+    def _fake_select(*, task, container_id, signals, **_):
+        select_calls["task"] = task
+        select_calls["container_id"] = container_id
+        select_calls["signals"] = signals
+        return ModelChoice(provider="azure", model_id="gpt-4o-mini", is_strong=False)
+
+    monkeypatch.setattr(llm_mod, "_build_client", lambda: _FakeClient())
+    monkeypatch.setattr(llm_mod, "select_model", _fake_select)
+
+    adapter = llm_mod.PdfLlm()
+    out = asyncio.run(adapter.generate("SYS", "USER", container_id="c-1", signals={"x": 1}))
+    assert out == "grounded answer"
+    # Routed through select_model with the synthesis task + tenant scope + signals.
+    assert select_calls["task"] == TaskClass.QUERY_SYNTHESIS
+    assert select_calls["container_id"] == "c-1"
+    assert select_calls["signals"] == {"x": 1}
+    # The router's chosen model id is the one actually called (never gpt-4o).
+    assert captured["model"] == "gpt-4o-mini"
+    # System prompt sent as a cacheable first message (prompt caching).
+    assert captured["messages"][0]["role"] == "system"
+    assert captured["messages"][0]["content"] == "SYS"
+    # A stable prompt-cache routing hint is passed (keyed on the system prompt).
+    assert captured["user"] == llm_mod._prompt_cache_key("SYS")
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — OnDemandExtractor + QueryAuditRepo adapters
+# ---------------------------------------------------------------------------
+def test_on_demand_extractor_passthrough_for_text_chunk():
+    from pdf_chat.retrieval.extractor import OnDemandExtractor
+
+    chunk = {"chunk_id": "c1", "element_type": "text", "text": "already here"}
+    out = asyncio.run(OnDemandExtractor().extract(chunk))
+    assert out["text"] == "already here"   # text chunks are returned unchanged
+
+
+def test_query_audit_repo_writes_via_injected_sink():
+    from pdf_chat.agent.audit import QueryAuditRepo
+
+    rows = []
+    repo = QueryAuditRepo(sink=lambda row: rows.append(row))
+    asyncio.run(repo.write(
+        user_id="u1", tenant_id="t1", query_hash="h", query_text="q",
+        returned_chunks=["c1"], denied_chunks=["c2"], cache_hit=True,
+    ))
+    assert rows[0]["tenant_id"] == "t1"
+    assert rows[0]["cache_hit"] is True
+    assert rows[0]["returned_chunks"] == ["c1"]
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — context token budget in assemble_context
+# ---------------------------------------------------------------------------
+from pdf_chat.agent.graph import assemble_context
+
+
+def _budget_chunk(cid, text, page=1):
+    return {"chunk_id": cid, "text": text, "doc_id": "d1", "page_num": page,
+            "tenant_id": "t1"}
+
+
+def test_assemble_context_truncates_to_token_budget(monkeypatch):
+    # 4 chunks of ~10 "tokens" each; budget low enough to admit only the first 2.
+    monkeypatch.setenv("PDF_TUNABLE_CONTEXT_TOKEN_BUDGET", "25")
+    chunks = [_budget_chunk(f"c{i}", " ".join(["word"] * 10)) for i in range(4)]
+    state = PdfChatState(query="q", tenant_id="t1")
+    state.accessible_chunks = chunks
+    out = asyncio.run(assemble_context(state, Deps()))
+    # Only the chunks that fit under the budget are cited; nothing crashes.
+    assert len(out.citations) < 4
+    assert len(out.citations) >= 1
+    assert all(f"[{c['n']}]" in out.context for c in out.citations)
+
+
+def test_assemble_context_keeps_all_when_under_budget(monkeypatch):
+    monkeypatch.setenv("PDF_TUNABLE_CONTEXT_TOKEN_BUDGET", "100000")
+    chunks = [_budget_chunk(f"c{i}", "short") for i in range(3)]
+    state = PdfChatState(query="q", tenant_id="t1")
+    state.accessible_chunks = chunks
+    out = asyncio.run(assemble_context(state, Deps()))
+    assert len(out.citations) == 3

@@ -18,6 +18,10 @@ from typing import Any
 
 from ..config import get_pdf_settings
 from ..models.enums import PageStatus
+from .chunker import chunk_elements
+from .extraction_confidence import propagate_confidence
+from .page_extraction import extract_page_elements
+from .retrieval_embeddings_shim import embed_texts_batched
 
 try:
     from celery import shared_task  # type: ignore
@@ -177,6 +181,38 @@ async def _run_page_extraction(
         return PageStatus.FAILED_TERMINAL.value
 
 
+def run_page_pipeline(
+    *,
+    page: Any,
+    page_image_bytes: bytes,
+    coverage: float,
+    doc_id: str,
+    page_num: int,
+    tenant_id: str,
+    acl: dict,
+    writer: Any,
+) -> int:
+    """Full per-page chain: extract → confidence → chunk → embed → write.
+
+    Pure orchestration over injected backends (the extractors/embedder are
+    module-scope and monkeypatchable; ``writer`` is a Neo4jWriter-like object).
+    Returns the number of chunks written. This IS the worker's real extract step.
+    """
+    elements = extract_page_elements(
+        page=page, page_image_bytes=page_image_bytes, coverage=coverage,
+        doc_id=doc_id, page_num=page_num, tenant_id=tenant_id, acl=acl,
+    )
+    if not elements:
+        return 0
+    element_conf = {el.element_id: el.confidence for el in elements}
+    chunks = chunk_elements(elements)
+    chunks = propagate_confidence(chunks, element_conf, container_id=tenant_id)
+    vectors = embed_texts_batched([c.text for c in chunks], container_id=tenant_id)
+    for chunk, vec in zip(chunks, vectors):
+        chunk.embedding = vec
+    return writer.write_chunks(chunks)
+
+
 def _build_redis_client():  # pragma: no cover - requires infra
     if not _HAS_REDIS:
         return None
@@ -219,10 +255,20 @@ if _HAS_CELERY:  # pragma: no cover - requires infra
                 page_repo = PageManifestRepo(session)
 
                 async def _extract(tid: str) -> None:
-                    # Wired by the worker bootstrap: page_reader → router →
-                    # parser → chunker → embeddings → neo4j_writer.
-                    raise NotImplementedError(
-                        "extract_fn is wired by the worker bootstrap (Stage 9)."
+                    # Worker bootstrap supplies the rendered page + coverage from
+                    # the page manifest; the Neo4jWriter is built from settings.
+                    from .neo4j_writer import Neo4jWriter
+
+                    s = get_pdf_settings()
+                    writer = Neo4jWriter(s.neo4j_uri, s.neo4j_user, s.neo4j_password,
+                                         database=s.neo4j_database)
+                    page_obj, page_image, coverage, doc_id, acl, page_num = (
+                        await page_repo.load_page_inputs(tid, tenant_id=tenant_id)
+                    )
+                    run_page_pipeline(
+                        page=page_obj, page_image_bytes=page_image, coverage=coverage,
+                        doc_id=doc_id, page_num=page_num, tenant_id=tenant_id, acl=acl,
+                        writer=writer,
                     )
 
                 try:

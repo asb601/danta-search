@@ -171,3 +171,40 @@ class PageManifestRepo:
             .where(PageManifest.task_id == task_id)
             .values(retry_count=PageManifest.retry_count + 1)
         )
+
+    async def load_page_inputs(self, task_id: str, *, tenant_id: str | None = None):
+        """Load the per-page extraction inputs for the worker.
+
+        Returns ``(page_obj, page_image_bytes, coverage, doc_id, acl, page_num)``.
+        The rendered page object + image come from the page blob; coverage was
+        measured at preflight and stored on the page row; ``page_num`` is the real
+        page number from the row (so chunks carry their true page, never 0). The
+        blob fetch and page render are small seams (``_download`` /
+        ``_render_page``) so the loader is unit-testable without infra.
+
+        ``tenant_id`` is threaded to ``_fetch_row`` so the production row fetch can
+        scope the lookup to the owning tenant (no cross-tenant page read).
+        """
+        row = self._fetch_row(task_id, tenant_id=tenant_id)
+        blob = self._download(row.page_blob_path)
+        page_obj, image_bytes = self._render_page(blob)
+        return (
+            page_obj,
+            image_bytes,
+            row.text_coverage_ratio,
+            row.doc_id,
+            row.acl_snapshot,
+            row.page_num,
+        )
+
+    def _fetch_row(self, task_id: str, *, tenant_id: str | None = None):  # pragma: no cover - infra-wired
+        # Production body MUST filter the page row by ``tenant_id`` as well as
+        # ``task_id`` so a page is never loaded outside its owning tenant (sentinel
+        # WARN). Left as a worker-bootstrap seam (out of phase scope).
+        raise NotImplementedError("wired by the worker bootstrap")
+
+    def _download(self, path: str) -> bytes:  # pragma: no cover - infra-wired
+        raise NotImplementedError("wired by the worker bootstrap")
+
+    def _render_page(self, blob: bytes):  # pragma: no cover - infra-wired
+        raise NotImplementedError("wired by the worker bootstrap")

@@ -49,26 +49,58 @@ def _candidate_text(candidate: Any) -> str:
     return getattr(candidate, "text", "") or ""
 
 
-def rerank(query: str, candidates: list[Any], top_n: int | None = None) -> list[Any]:
+def rerank(
+    query: str,
+    candidates: list[Any],
+    top_n: int | None = None,
+    *,
+    container_id: str = "",
+) -> list[Any]:
     """Rerank candidates by relevance to ``query`` and truncate to ``top_n``.
 
     Backend priority: Cohere API → self-hosted CrossEncoder → pure fallback
     (input order preserved). The return value is always a list of the SAME
     candidate objects (dict or dataclass), just reordered and truncated.
 
+    Adaptive skip (Spec §2 L3): when there are too few candidates to be worth
+    the cross-encoder cost, the rerank is SKIPPED and the input order returned
+    (truncated to ``top_n``). The skip threshold is a per-container tunable
+    (``rerank_skip_below_candidates``) and the decision is logged via
+    ``log_gate_decision`` — no magic literal lives in this file. This matters at
+    scale: across many tenants and millions of files, skipping the cross-encoder
+    on tiny candidate sets removes needless inference cost per query.
+
     Args:
         query: the user query.
         candidates: fused RRF candidates (dicts or dataclasses with ``text``).
         top_n: how many to keep (defaults to ``rerank_top_n`` config).
+        container_id: tenant scope for tunable resolution + gate logging.
 
     Returns:
         The top ``top_n`` candidates, most-relevant first. Without a reranker
-        installed: the first ``top_n`` candidates in their original order.
+        installed (or when the skip gate fires): the first ``top_n`` candidates
+        in their original order.
     """
-    if top_n is None:
-        top_n = get_pdf_settings().rerank_top_n
     if not candidates:
         return []
+
+    from pdf_chat.tunables import get_tunable, log_gate_decision
+
+    skip_below = get_tunable(container_id, "rerank_skip_below_candidates")
+    decision = log_gate_decision(
+        "rerank_skip",
+        score=len(candidates),
+        threshold=skip_below,
+        outcome="rerank" if len(candidates) >= skip_below else "skip",
+        container_id=container_id,
+    )
+    if not decision["passed"]:
+        if top_n is None:
+            top_n = get_pdf_settings().rerank_top_n
+        return candidates[:top_n]
+
+    if top_n is None:
+        top_n = get_pdf_settings().rerank_top_n
 
     if _HAS_COHERE:
         try:

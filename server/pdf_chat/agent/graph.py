@@ -82,7 +82,9 @@ class Extractor(Protocol):
 
 
 class Llm(Protocol):
-    async def generate(self, system: str, user: str) -> str: ...
+    async def generate(
+        self, system: str, user: str, *, container_id: str = "", signals: dict | None = None
+    ) -> str: ...
 
 
 class AuditRepo(Protocol):
@@ -235,15 +237,51 @@ async def on_demand_extract(state: PdfChatState, deps: Deps) -> PdfChatState:
 
 
 async def assemble_context(state: PdfChatState, deps: Deps) -> PdfChatState:
-    """Stage 8 — build the numbered [N] context block and citation map."""
+    """Stage 8 — build the numbered [N] context block + citation map.
+
+    Enforces a per-container context token budget (Spec §2 L4 token guard #8):
+    chunks are admitted in order until the running token estimate would exceed
+    the budget; the drop is logged via log_gate_decision. The token estimate is
+    the whitespace word count scaled by a configurable tokens-per-word multiplier
+    (``context_tokens_per_word``, ≈1.3) so the guard is CONSERVATIVE vs real BPE
+    tokens, and it counts the citation scaffolding (``[N] ... Source: doc, page``)
+    too — not just the raw chunk text — so the budget reflects the real prompt.
+    """
+    from pdf_chat.tunables import get_tunable, log_gate_decision
+
+    container_id = getattr(state, "tenant_id", "")
+    budget = get_tunable(container_id, "context_token_budget")
+    tokens_per_word = get_tunable(container_id, "context_tokens_per_word")
+
+    def _est_tokens(s: str) -> int:
+        return int(len(s.split()) * tokens_per_word)
+
     lines: list[str] = []
     citations: list[dict] = []
-    for i, chunk in enumerate(state.accessible_chunks, start=1):
+    used_tokens = 0
+    n = 0
+    for chunk in state.accessible_chunks:
         text = _attr(chunk, "text", "") or ""
         doc_id = _attr(chunk, "doc_id", "")
         page = _attr(chunk, "page_num", 0)
-        lines.append(f"[{i}] {text}    Source: {doc_id}, page {page}")
-        citations.append({"n": i, "doc_id": str(doc_id), "page": int(page or 0)})
+        # Count the full rendered line (citation scaffolding included), not just
+        # the raw text, so the budget reflects what actually reaches the model.
+        rendered = f"[{n + 1}] {text}    Source: {doc_id}, page {page}"
+        tok = _est_tokens(rendered)
+        if n > 0 and used_tokens + tok > budget:
+            log_gate_decision(
+                "context_token_budget",
+                score=used_tokens + tok,
+                threshold=budget,
+                outcome="truncate",
+                container_id=container_id,
+                admitted=n,
+            )
+            break
+        n += 1
+        used_tokens += tok
+        lines.append(f"[{n}] {text}    Source: {doc_id}, page {page}")
+        citations.append({"n": n, "doc_id": str(doc_id), "page": int(page or 0)})
     state.context = "\n".join(lines)
     state.citations = citations
     return state
@@ -265,7 +303,14 @@ async def llm_generate(state: PdfChatState, deps: Deps) -> PdfChatState:
         state.answer = INSUFFICIENT_CONTEXT_MESSAGE
         return state
     user = build_user_prompt(state.query, state.context)
-    state.answer = await deps.llm.generate(SYSTEM_PROMPT, user)
+    # Thread tenant scope + escalation signals through to the model router (the
+    # synthesis path routes via model_router.select_model inside the adapter).
+    state.answer = await deps.llm.generate(
+        SYSTEM_PROMPT,
+        user,
+        container_id=getattr(state, "tenant_id", "") or "",
+        signals=getattr(state, "router_signals", None) or {},
+    )
     return state
 
 
@@ -485,11 +530,20 @@ def build_default_deps() -> Deps:
     API layer calls this lazily inside the route, never at module import time.
     """
     deps = Deps()
+    # The cache is built first so the query embedder can reuse it for the
+    # model-scoped query-embedding cache (cache is an optimization, never a
+    # dependency — embedding still works if it is None).
+    try:
+        from pdf_chat.retrieval.cache import RedisCache  # type: ignore
+
+        deps.cache = RedisCache()
+    except Exception:
+        pass
     # Each adapter is wired independently so one missing module doesn't blank the rest.
     try:
         from pdf_chat.retrieval.embeddings import QueryEmbedder  # type: ignore
 
-        deps.embedder = QueryEmbedder()
+        deps.embedder = QueryEmbedder(cache=deps.cache)
     except Exception:
         pass
     try:
@@ -502,12 +556,6 @@ def build_default_deps() -> Deps:
         from pdf_chat.retrieval.reranker import CrossEncoderReranker  # type: ignore
 
         deps.reranker = CrossEncoderReranker()
-    except Exception:
-        pass
-    try:
-        from pdf_chat.retrieval.cache import RedisCache  # type: ignore
-
-        deps.cache = RedisCache()
     except Exception:
         pass
     try:

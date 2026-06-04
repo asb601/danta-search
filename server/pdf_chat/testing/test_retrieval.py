@@ -244,6 +244,43 @@ def test_redis_cache_get_miss_and_corrupt_value_return_none():
 
 
 # --------------------------------------------------------------------------- #
+# RedisCache — vector get/set for the query-embedding cache (Task 4b)
+# --------------------------------------------------------------------------- #
+def test_redis_cache_vector_roundtrip_noop_without_infra():
+    from pdf_chat.retrieval.cache import RedisCache
+
+    cache = RedisCache(url="redis://localhost:6379/0")
+    # No live Redis in CI → set_vector returns False, get_vector returns None,
+    # and neither raises (cache is an optimization, never a dependency).
+    assert cache.set_vector("k", [1.0, 2.0], 60) in (True, False)
+    assert cache.get_vector("missing-key") is None
+
+
+def test_redis_cache_vector_roundtrip_via_fake():
+    # With a mocked client, a vector round-trips as a JSON list with its TTL.
+    cache = RedisCache(url="redis://x", ttl_seconds=123)
+    fake = _FakeRedisClient()
+    cache._client = fake  # inject the fake client (bypass lazy connect)
+
+    vec = [0.1, 0.2, 0.3, -0.4]
+    assert cache.set_vector("qk", vec, 600) is True
+    assert json.loads(fake.store["qk"]) == vec  # stored as a JSON list
+    assert fake.last_ex == 600  # explicit ttl threaded through
+    assert cache.get_vector("qk") == vec  # deserialized back to a list
+
+
+def test_redis_cache_get_vector_miss_and_non_list_return_none():
+    cache = RedisCache(url="redis://x")
+    fake = _FakeRedisClient()
+    cache._client = fake
+    assert cache.get_vector("absent") is None  # miss
+    fake.store["dict"] = json.dumps({"not": "a list"})
+    assert cache.get_vector("dict") is None  # wrong type → None, never raises
+    fake.store["bad"] = "not-json{"
+    assert cache.get_vector("bad") is None  # corrupt JSON → None
+
+
+# --------------------------------------------------------------------------- #
 # Neo4jSearcher — ACL deserialization helper (Agent↔retrieval contract A2)
 # --------------------------------------------------------------------------- #
 def test_deserialize_acl_from_json_string():
@@ -405,3 +442,139 @@ def test_rerank_fallback_preserves_order_and_truncates():
 
 def test_rerank_empty():
     assert rerank("q", [], top_n=5) == []
+
+
+def test_rerank_skips_when_too_few_candidates(monkeypatch):
+    from pdf_chat.retrieval import reranker
+
+    monkeypatch.setenv("PDF_TUNABLE_RERANK_SKIP_BELOW_CANDIDATES", "4")
+    cands = [{"text": "a"}, {"text": "b"}]   # 2 < 4 → skip, return as-is
+    out = reranker.rerank("q", cands, top_n=12, container_id="c-1")
+    assert out == cands
+
+
+def test_rerank_runs_when_enough_candidates(monkeypatch):
+    from pdf_chat.retrieval import reranker
+
+    monkeypatch.setenv("PDF_TUNABLE_RERANK_SKIP_BELOW_CANDIDATES", "2")
+    cands = [{"text": f"c{i}"} for i in range(5)]
+    out = reranker.rerank("q", cands, top_n=3, container_id="c-1")
+    assert len(out) == 3     # pure fallback path still truncates to top_n
+
+
+# --------------------------------------------------------------------------- #
+# Embedding token guards: batch embeddings + query-embedding cache
+# (pure — embed_texts is monkeypatched; no Azure / model_router / Redis infra)
+# --------------------------------------------------------------------------- #
+import asyncio  # noqa: E402
+
+
+def test_embed_texts_batched_chunks_into_config_sized_calls(monkeypatch):
+    from pdf_chat.retrieval import embeddings as emb
+
+    calls: list[int] = []
+
+    def _fake_embed(texts, *, model=None):
+        calls.append(len(texts))
+        return [[float(len(t))] for t in texts]
+
+    monkeypatch.setattr(emb, "embed_texts", _fake_embed)
+    out = emb.embed_texts_batched(
+        [f"t{i}" for i in range(5)], container_id="c-1", batch_size=2
+    )
+    assert len(out) == 5            # one vector per input, order preserved
+    assert calls == [2, 2, 1]       # batched into 2,2,1
+
+
+def test_embed_texts_batched_empty():
+    from pdf_chat.retrieval import embeddings as emb
+
+    assert emb.embed_texts_batched([], container_id="c-1") == []
+
+
+def test_embed_texts_batched_uses_tunable_when_size_unset(monkeypatch):
+    from pdf_chat.retrieval import embeddings as emb
+
+    calls: list[int] = []
+    monkeypatch.setenv("PDF_TUNABLE_EMBEDDING_BATCH_SIZE", "3")
+
+    def _fake_embed(texts, *, model=None):
+        calls.append(len(texts))
+        return [[0.0] for _ in texts]
+
+    monkeypatch.setattr(emb, "embed_texts", _fake_embed)
+    out = emb.embed_texts_batched([f"t{i}" for i in range(7)], container_id="c-1")
+    assert len(out) == 7
+    assert calls == [3, 3, 1]       # batch size resolved from the tunable
+
+
+def test_query_embedding_cache_key_is_model_scoped_and_stable():
+    from pdf_chat.retrieval import embeddings as emb
+
+    k1 = emb.query_embedding_cache_key("revenue?", "model-a", "c-1")
+    k2 = emb.query_embedding_cache_key("revenue?", "model-a", "c-1")
+    k3 = emb.query_embedding_cache_key("revenue?", "model-b", "c-1")
+    k4 = emb.query_embedding_cache_key("revenue?", "model-a", "c-2")
+    assert k1 == k2                 # deterministic
+    assert k1 != k3                 # model swap never serves a stale vector
+    assert k1 != k4                 # tenant-scoped: never served across tenants
+    assert k1.startswith("pdf:qemb:")
+
+
+class _FakeVectorCache:
+    def __init__(self):
+        self.store: dict[str, list] = {}
+        self.set_calls = 0
+
+    def get_vector(self, key):
+        return self.store.get(key)
+
+    def set_vector(self, key, vec, ttl):
+        self.set_calls += 1
+        self.store[key] = vec
+
+
+def test_query_embedder_caches_and_reuses(monkeypatch):
+    from pdf_chat.retrieval import embeddings as emb
+
+    embed_calls: list[str] = []
+
+    def _fake_embed(texts, *, model=None):
+        embed_calls.extend(texts)
+        return [[1.0, 2.0, 3.0] for _ in texts]
+
+    monkeypatch.setattr(emb, "embed_texts", _fake_embed)
+    cache = _FakeVectorCache()
+    embedder = emb.QueryEmbedder(cache=cache, model="m")
+
+    v1 = asyncio.run(embedder.embed("revenue?", container_id="c-1"))
+    v2 = asyncio.run(embedder.embed("revenue?", container_id="c-1"))
+    assert v1 == v2 == [1.0, 2.0, 3.0]
+    assert embed_calls == ["revenue?"]   # embedded ONCE — second was a cache hit
+    assert cache.set_calls == 1
+
+
+def test_query_embedder_no_cache_still_embeds(monkeypatch):
+    from pdf_chat.retrieval import embeddings as emb
+
+    monkeypatch.setattr(emb, "embed_texts", lambda texts, *, model=None: [[9.0]])
+    embedder = emb.QueryEmbedder(cache=None, model="m")
+    assert asyncio.run(embedder.embed("q", container_id="c-1")) == [9.0]
+
+
+def test_query_embedder_resolves_model_via_model_router(monkeypatch):
+    from pdf_chat.retrieval import embeddings as emb
+    from pdf_chat import model_router
+
+    seen_model: list[str] = []
+
+    def _fake_embed(texts, *, model=None):
+        seen_model.append(model)
+        return [[0.0]]
+
+    monkeypatch.setattr(emb, "embed_texts", _fake_embed)
+    monkeypatch.setattr(model_router, "embedding_model", lambda cid: f"emb-for-{cid}")
+    # No explicit model → falls through to the model_router seam (per-container).
+    embedder = emb.QueryEmbedder(cache=None)
+    asyncio.run(embedder.embed("q", container_id="tenant-7"))
+    assert seen_model == ["emb-for-tenant-7"]

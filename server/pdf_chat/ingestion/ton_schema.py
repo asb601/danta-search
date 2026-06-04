@@ -53,6 +53,15 @@ class UnifiedElement:
         if self.bbox is not None and not isinstance(self.bbox, BBox):
             self.bbox = BBox(**self.bbox)
 
+    @property
+    def text(self) -> str:
+        """Alias for ``content`` (the raw text/markdown body of the element).
+
+        Lets callers read ``element.text`` uniformly with ``Chunk.text`` without
+        knowing that the parser-normalized body is stored under ``content``.
+        """
+        return self.content
+
     def to_dict(self) -> dict:
         d = asdict(self)
         d["element_type"] = self.element_type.value
@@ -73,6 +82,8 @@ class Chunk:
     acl: dict = field(default_factory=dict)
     embedding: list[float] | None = None
     source_element_id: str | None = None
+    confidence: float = 1.0
+    low_confidence: bool = False
 
     def to_neo4j_props(self) -> dict:
         """Flatten for a Cypher CREATE (acl serialized to JSON string)."""
@@ -87,4 +98,6 @@ class Chunk:
             "tenant_id": self.tenant_id,
             "acl": json.dumps(self.acl or {}),
             "embedding": self.embedding or [],
+            "confidence": self.confidence,
+            "low_confidence": self.low_confidence,
         }

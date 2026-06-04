@@ -1,0 +1,23 @@
+[
+  {
+    "id": "q1",
+    "question": "What is the total contract value?",
+    "expected_keywords": ["total", "contract", "value"],
+    "must_cite": true,
+    "expect_refusal": false
+  },
+  {
+    "id": "q2",
+    "question": "Who are the parties to the agreement?",
+    "expected_keywords": ["party", "parties", "agreement"],
+    "must_cite": true,
+    "expect_refusal": false
+  },
+  {
+    "id": "q3",
+    "question": "What is the governing law of a contract that is not in this document set?",
+    "expected_keywords": [],
+    "must_cite": false,
+    "expect_refusal": true
+  }
+]

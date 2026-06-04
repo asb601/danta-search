@@ -145,3 +145,31 @@ class RedisCache:
             return True
         except Exception:  # pragma: no cover - infra-dependent
             return False
+
+    def get_vector(self, key: str) -> "list[float] | None":
+        """Return a cached embedding vector, or None on miss/no-infra."""
+        client = self._get_client()
+        if client is None:
+            return None
+        try:
+            raw = client.get(key)
+        except Exception:  # pragma: no cover - infra-dependent
+            return None
+        if raw is None:
+            return None
+        try:
+            value = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        return value if isinstance(value, list) else None
+
+    def set_vector(self, key: str, vec: "list[float]", ttl_seconds: int) -> bool:
+        """Persist an embedding vector with TTL. False if cache unavailable."""
+        client = self._get_client()
+        if client is None:
+            return False
+        try:
+            client.set(key, json.dumps(vec), ex=ttl_seconds)
+            return True
+        except Exception:  # pragma: no cover - infra-dependent
+            return False

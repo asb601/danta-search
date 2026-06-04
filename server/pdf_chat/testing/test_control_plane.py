@@ -435,3 +435,43 @@ def test_orchestrator_reconcile_persists_reduced_status():
 
     assert status == DocStatus.PARTIALLY_INDEXED.value
     assert ("up-1", DocStatus.PARTIALLY_INDEXED.value, {}) in up.status_calls
+
+
+# --------------------------------------------------------------------------- #
+# Task 13b — PageManifestRepo.load_page_inputs (page-input loader)
+# --------------------------------------------------------------------------- #
+def test_load_page_inputs_returns_pipeline_tuple():
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+
+    class _FakeRow:
+        page_blob_path = "az://x/p7.png"
+        text_coverage_ratio = 0.92
+        doc_id = "doc-1"
+        acl_snapshot = {"public": True}
+        page_num = 7                                   # real (non-zero) page number
+
+    class _FakeSession:
+        async def get(self, *a, **k):
+            return None
+
+    seen = {}
+
+    def _fetch(tid, *, tenant_id=None):                # tenant_id threaded through
+        seen["tid"] = tid
+        seen["tenant_id"] = tenant_id
+        return _FakeRow()
+
+    repo = PageManifestRepo(_FakeSession())
+    repo._fetch_row = _fetch                            # injected for the pure test
+    repo._download = lambda path: b"PNGBYTES"          # injected blob fetch
+    repo._render_page = lambda blob: ("page-obj", b"PNGBYTES")
+
+    page, image, coverage, doc_id, acl, page_num = asyncio.run(
+        repo.load_page_inputs("pg-1", tenant_id="t9")
+    )
+    assert coverage == 0.92
+    assert doc_id == "doc-1"
+    assert acl == {"public": True}
+    assert image == b"PNGBYTES"
+    assert page_num == 7                               # real page_num returned
+    assert seen["tenant_id"] == "t9"                   # tenant scope threaded

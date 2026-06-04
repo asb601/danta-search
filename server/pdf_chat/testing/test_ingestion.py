@@ -518,3 +518,94 @@ def test_neo4j_writer_constructible_without_driver():
     # A real write (or index op) requires the driver, which is absent here.
     with pytest.raises(RuntimeError):
         writer.ensure_vector_index(1536)
+
+
+def test_write_chunk_cypher_is_idempotent_merge_keyed_on_chunk_and_tenant():
+    # B2: re-extraction (retry/DLQ replay) must OVERWRITE, not duplicate. The
+    # chunk write therefore MERGEs on (chunk_id, tenant_id) and sets the mutable
+    # props on BOTH the ON CREATE and ON MATCH branches.
+    from pdf_chat.ingestion import Neo4jWriter
+
+    cypher = Neo4jWriter._write_chunk_cypher()
+    assert "CREATE (c:Chunk" not in cypher          # no bare CREATE → no dup
+    assert "MERGE (c:Chunk {chunk_id: $chunk_id, tenant_id: $tenant_id})" in cypher
+    assert "ON CREATE SET" in cypher
+    assert "ON MATCH SET" in cypher
+    # Both branches converge the mutable props so a replay reflects the latest run.
+    for prop in ("c.text", "c.embedding", "c.confidence", "c.low_confidence",
+                 "c.page_num", "c.acl"):
+        assert cypher.count(prop) == 2              # once per branch
+
+
+# --------------------------------------------------------------------------- #
+# Task 13 — run_page_pipeline (the wired worker extract chain)
+# --------------------------------------------------------------------------- #
+def test_run_page_pipeline_extracts_chunks_and_writes(monkeypatch):
+    from pdf_chat.ingestion import tasks as t
+    from pdf_chat.ingestion.ton_schema import ElementType, UnifiedElement
+
+    # B3: the worker threads the REAL page_num (not 0) into the pipeline; the
+    # extracted element + resulting chunks must carry it.
+    seen_page = {}
+
+    def _extract(**k):
+        seen_page["page_num"] = k.get("page_num")
+        return [UnifiedElement(
+            element_id="e", doc_id="d", page_num=k.get("page_num"),
+            element_type=ElementType.TEXT,
+            content="Hello world. Second sentence.", reading_order=0,
+            tenant_id="t1", confidence=0.9,
+        )]
+
+    monkeypatch.setattr(t, "extract_page_elements", _extract)
+    monkeypatch.setattr(t, "embed_texts_batched", lambda texts, **k: [[0.1]] * len(texts))
+
+    written = {}
+    class _Writer:
+        def write_chunks(self, chunks):
+            written["chunks"] = chunks
+            return len(chunks)
+
+    n = t.run_page_pipeline(
+        page=object(), page_image_bytes=b"", coverage=0.9,
+        doc_id="d", page_num=7, tenant_id="t1", acl={}, writer=_Writer(),
+    )
+    assert n >= 1
+    assert seen_page["page_num"] == 7               # real page_num threaded in
+    assert written["chunks"][0].page_num == 7       # chunk carries the real page
+    assert written["chunks"][0].embedding == [0.1]
+    assert written["chunks"][0].confidence == 0.9   # confidence propagated
+
+
+# --------------------------------------------------------------------------- #
+# Task 14 — finalization reducer
+# --------------------------------------------------------------------------- #
+def test_finalize_document_waits_until_all_pages_settled():
+    from pdf_chat.ingestion.finalize import finalize_document
+    from pdf_chat.models.enums import DocStatus, PageStatus
+
+    # One page still running → not finalized.
+    not_done = finalize_document([
+        PageStatus.SUCCEEDED.value, PageStatus.RUNNING.value,
+    ])
+    assert not_done == DocStatus.PROCESSING.value
+
+
+def test_finalize_document_indexed_when_all_succeeded():
+    from pdf_chat.ingestion.finalize import finalize_document
+    from pdf_chat.models.enums import DocStatus, PageStatus
+
+    done = finalize_document([
+        PageStatus.SUCCEEDED.value, PageStatus.SUCCEEDED.value,
+    ])
+    assert done == DocStatus.INDEXED.value
+
+
+def test_finalize_document_partial_when_some_terminal_failed():
+    from pdf_chat.ingestion.finalize import finalize_document
+    from pdf_chat.models.enums import DocStatus, PageStatus
+
+    partial = finalize_document([
+        PageStatus.SUCCEEDED.value, PageStatus.FAILED_TERMINAL.value,
+    ])
+    assert partial == DocStatus.PARTIALLY_INDEXED.value
