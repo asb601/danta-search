@@ -82,16 +82,19 @@ def register_tool(tool: Tool) -> Tool:
     callable that satisfies the ``Tool`` Protocol; a raw LangChain
     ``StructuredTool`` must first be adapted into a ``Tool`` (the loop only ever
     stores Protocol-conformant objects, never a raw StructuredTool).
+
+    A name in ``RESERVED_TOOL_NAMES`` (the Phase-4/5 seams ``structured_query`` /
+    ``glossary_lookup``) IS accepted — registering one means that seam is being
+    filled deliberately by its owning phase (e.g. Phase-4
+    ``build_structured_query_tool``). The reservation set exists so the loop /
+    integration can DISCOVER the seam, not to forbid filling it; the
+    already-registered guard above still prevents accidental double-registration.
     """
     name = getattr(tool, "name", None)
     if not name or not isinstance(name, str):
         raise ValueError("tool must expose a non-empty string `name`")
     if name in TOOL_REGISTRY:
         raise ValueError(f"tool name already registered: {name!r}")
-    if name in RESERVED_TOOL_NAMES:
-        # A future phase may register these — but registering one means the SEAM
-        # is being filled deliberately; surface it rather than shadow silently.
-        raise ValueError(f"tool name is a reserved Phase-4/5 seam: {name!r}")
     TOOL_REGISTRY[name] = tool
     return tool
 

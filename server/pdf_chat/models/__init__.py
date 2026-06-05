@@ -7,6 +7,7 @@ runtime migrations create them. Tenant isolation is via ``container_id`` /
 """
 from __future__ import annotations
 
+from pdf_chat.models.bridge import BridgeStatus, PdfEntityBridge
 from pdf_chat.models.manifests import (
     PageManifest,
     QueryAuditLog,
@@ -19,4 +20,6 @@ __all__ = [
     "PageManifest",
     "QueryAuditLog",
     "PdfGraphRagTunable",
+    "PdfEntityBridge",
+    "BridgeStatus",
 ]

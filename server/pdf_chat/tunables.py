@@ -148,6 +148,25 @@ TUNABLE_DEFAULTS: dict[str, Any] = {
     # Multi-part decomposition (decompose.py) — max output components a single
     # multi-part ask is split into (bounds the sufficiency-gate fan-out).
     "agent.decomp_max_components": 6,
+    # Phase 4 — Value-evidenced cross-domain bridge (single source for every
+    # bridge.*/grain.* dial). Each Phase-4 module passes these as inline named
+    # defaults to get_tunable so it stays import-safe pre-integration; registering
+    # them here restores single-source discoverability (Spec §3 inv 4).
+    # Bridge reconciliation (Task 3) — a PDF entity links to a CSV master key
+    # ONLY when its literal values overlap the key's fingerprints above ALL of
+    # these gates; name-equality alone or any sub-threshold match is REFUSED
+    # (never a silent top-match).
+    "bridge.min_value_overlap_pct": 0.50,
+    "bridge.min_overlap_count": 3,
+    # Must sit ABOVE join_confidence's clamp floor (semantic_policy
+    # fingerprint_min_confidence=0.60) or the gate is inert (every value would
+    # clamp to >=0.60 and pass). 0.70 keeps the confidence/cardinality leg LIVE:
+    # a tiny-domain coincidence (low log-cardinality) is rejected even when the
+    # overlap pct + count gates pass.
+    "bridge.min_confidence": 0.70,
+    # Grain alignment (Task 5) — a PDF fact (rate×volume) reconciles a CSV
+    # aggregate total when their relative difference is within this fraction.
+    "grain.numeric_tolerance_pct": 0.05,
 }
 
 # Optional per-container DB override hook. Wired in Task 1b; until then None ⇒
