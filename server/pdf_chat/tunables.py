@@ -115,6 +115,39 @@ TUNABLE_DEFAULTS: dict[str, Any] = {
     "kg.report.min_grounded_edges": 2,
     # Multi-representation search (Task 1/8)
     "kg.multivec.top_k": 12,
+    # Phase 3 — Agentic LangGraph query runtime (single source for every agent.*
+    # dial). Each Phase-3 module already passes these as inline named defaults to
+    # get_tunable so it stays import-safe pre-integration; registering them here
+    # restores the single-source discoverability + per-container override rule
+    # (Spec §3 inv 4) alongside the kg.*/model.* keys above.
+    # Planner (Task 2) — high-confidence simple/cached queries bypass the loop.
+    "agent.planner_bypass_confidence": 0.80,
+    # Tool loop (Task 7) — hard caps; max_tool_calls mirrors the main-system
+    # MAX_TOOL_CALLS=8. The monotonic-progress guard needs no literal.
+    "agent.max_tool_calls": 8,
+    "agent.max_per_tool_calls": 3,
+    "agent.max_decomp_depth": 2,
+    # Entity linking (Task 3) — graph tools are unreachable below the floor.
+    "agent.entity_link_min_confidence": 0.50,
+    "agent.entity_link_min_token_len": 3,
+    "agent.entity_link_max_candidates": 8,
+    # Synthesis (Task 8) — citation-density floor; an answer below it is refused.
+    "agent.min_citations_per_claim": 1,
+    # Negative-claim gate (Task 10) — coverage proof floor (retrieval-empty is
+    # NOT absence): at least this many accessible chunks must be in-context before
+    # a "no data" claim can be proven.
+    "agent.neg_claim.min_coverage_chunks": 1,
+    # Negative-claim phrase/negation lists — TUNABLE so a tenant can extend them
+    # (e.g. localized phrasing) without a code change. The module passes its
+    # canonical English defaults explicitly, so these are listed here purely for
+    # discoverability (Spec §3 inv 4); a tenant override (env/DB) is a
+    # comma/newline-separated string the gate parses + UNIONs with nothing (it
+    # replaces, defaulting back to canonical when empty).
+    "agent.neg_claim.phrases": None,
+    "agent.neg_claim.negation_tokens": None,
+    # Multi-part decomposition (decompose.py) — max output components a single
+    # multi-part ask is split into (bounds the sufficiency-gate fan-out).
+    "agent.decomp_max_components": 6,
 }
 
 # Optional per-container DB override hook. Wired in Task 1b; until then None ⇒

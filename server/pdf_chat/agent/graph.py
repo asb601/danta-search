@@ -522,14 +522,23 @@ def build_graph(deps: Deps):
     return sg.compile()
 
 
-def build_default_deps() -> Deps:
+def build_default_deps() -> "AgentDeps":
     """Wire the real retrieval/* + infra adapters via late/guarded imports.
 
-    Returns a ``Deps`` with whatever adapters are importable; missing ones stay
-    None so the pipeline degrades gracefully rather than failing to import. The
-    API layer calls this lazily inside the route, never at module import time.
+    Returns an :class:`AgentDeps` (the Phase-3 superset of ``Deps``) with whatever
+    adapters are importable; missing ones stay None so the pipeline degrades
+    gracefully rather than failing to import. The API layer calls this lazily
+    inside the route, never at module import time.
+
+    AgentDeps is a ``Deps`` subclass, so the legacy state-machine ``run_pdf_chat``
+    path keeps working unchanged while the Phase-3 ``run_pdf_query`` agentic path
+    reads the additional planner/tools/loop/synthesis seams. The Phase-3 modules
+    (planner/entity_linker/loop/synthesis/negative_claim) are PURE functions
+    dispatched by ``run_pdf_query`` — they take ``deps`` rather than being stored
+    as adapters, so wiring them is a matter of making the underlying ``searcher``
+    (tools), ``llm`` (planner+synthesis), and ``embedder`` available here.
     """
-    deps = Deps()
+    deps = AgentDeps()
     # The cache is built first so the query embedder can reuse it for the
     # model-scoped query-embedding cache (cache is an optimization, never a
     # dependency — embedding still works if it is None).
@@ -577,3 +586,396 @@ def build_default_deps() -> Deps:
     except Exception:
         pass
     return deps
+
+
+# =========================================================================== #
+# Phase 3 — Agentic LangGraph runtime (contract C4)
+#
+# This is the public entry that supersedes the fixed 10-stage state machine for
+# query execution. It REUSES every Phase-3 module (planner, entity_linker, the
+# capped tool loop, synthesis with the tag_as_answer HARD GATE, and the
+# negative-claim/conflict gate) and threads per-hop tenant isolation everywhere.
+#
+# The legacy ``run_pdf_chat`` path above is intentionally preserved (the API
+# route + eval harness + 18 existing agent tests depend on it). The Phase-3
+# pipeline is additive: ``run_pdf_query`` is the new C4 surface.
+#
+# INFRA-BOOTSTRAP NOTE (Phase 6 / ops — NOT implemented here): the PRIMARY
+# ``multi_vector_search`` tool and ``community_report_lookup`` read three Neo4j
+# vector indexes that must be created at infra bootstrap:
+#   * ``section_card_vector_index``
+#   * ``doc_card_vector_index``
+#   * ``community_report_vector_index``
+# No DDL is issued from this module; the searcher consumes the indexes by name.
+# =========================================================================== #
+from dataclasses import field as _field  # noqa: E402  (local alias, late import ok)
+
+
+@dataclass
+class AgentDeps(Deps):
+    """Phase-3 dependency bundle — a superset of the legacy ``Deps``.
+
+    The Phase-3 nodes are pure functions that receive ``deps`` and read its
+    adapters: ``searcher`` (the tool registry's backend, per-hop tenant), ``llm``
+    (planner classification + grounded synthesis, both routed via the model
+    router), ``embedder`` (query vector), ``cache`` (bypass short-circuit), and
+    ``audit_repo`` (compliance trail). It inherits every legacy field so an
+    ``AgentDeps`` also drives ``run_pdf_chat`` unchanged.
+    """
+
+    # No new fields are required — the Phase-3 modules consume the existing
+    # adapters. The subclass exists so callers/tests can distinguish the agentic
+    # bundle and so future agentic-only seams have a home without touching Deps.
+
+
+@dataclass
+class PdfQueryResult:
+    """The C4 public result of ``run_pdf_query`` (plan-locked).
+
+    * ``answer``      — the grounded (or honestly-refused) answer text.
+    * ``citations``   — ``[{n, doc_id, page, bbox, ...}]`` for the cited evidence.
+    * ``intent``      — the planner's typed intent (local|global|cross_domain|definitional).
+    * ``provenance``  — citation index ``n`` → label (stated|inferred|conflicting|not_found).
+    * ``conflicts``   — surfaced three-state source conflicts (never silently resolved).
+    """
+
+    answer: str
+    citations: list[dict] = _field(default_factory=list)
+    intent: str = "local"
+    provenance: dict = _field(default_factory=dict)
+    conflicts: list[dict] = _field(default_factory=list)
+
+
+def _result_from_state(state: PdfChatState) -> PdfQueryResult:
+    """Project the terminal ``PdfChatState`` onto the C4 result surface."""
+    return PdfQueryResult(
+        answer=state.answer,
+        citations=list(state.citations or []),
+        intent=getattr(state, "intent", "local") or "local",
+        provenance=dict(getattr(state, "provenance", {}) or {}),
+        conflicts=list(getattr(state, "conflicts", []) or []),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Phase-3 agent nodes — each (state, deps) -> state, dispatched by run_pdf_query
+# and by the guarded LangGraph builder. Pure orchestration over injected deps;
+# every Phase-3 module is imported lazily so this file imports with zero infra.
+# --------------------------------------------------------------------------- #
+async def plan_node(state: PdfChatState, deps: "AgentDeps") -> PdfChatState:
+    """Typed-intent classification + bypass decision (planner.py).
+
+    A cached query (or a high-confidence simple query) sets ``state.bypass`` so
+    the loop is skipped. The planner NEVER raises — a backend/parse failure
+    degrades to a typed ``fallback_reason`` and ``bypass=False`` (the safe,
+    fully-grounded loop path). Router signals (cross_domain/definitional) are
+    stashed on the state for the synthesis model router.
+    """
+    from pdf_chat.agent.planner import plan_query
+
+    container_id = state.tenant_id or ""
+    plan = await plan_query(
+        state.query, container_id=container_id, llm=getattr(deps, "llm", None),
+        cached=bool(state.cached),
+    )
+    state.intent = plan.intent
+    state.planner_confidence = plan.confidence
+    state.fallback_reason = plan.fallback_reason
+    state.bypass = plan.bypass
+    # Merge planner signals (don't clobber any caller-seeded signals).
+    merged = dict(state.router_signals or {})
+    merged.update(plan.signals or {})
+    state.router_signals = merged
+    return state
+
+
+async def decompose_node(state: PdfChatState, deps: "AgentDeps") -> PdfChatState:
+    """Populate ``state.sub_queries`` / ``state.output_components`` for a
+    multi-part ask BEFORE the tool loop runs (closes the orphaned planner signal).
+
+    Only fires when the planner flagged ``multi_part`` (``state.router_signals``).
+    The split is data-driven (decompose.py — LLM model-router seam with a
+    deterministic clause fallback); a result of ≤1 component means the query is
+    effectively single-part and nothing is populated (the loop then gates on the
+    single implicit whole-query component, unchanged). Never raises.
+    """
+    from pdf_chat.agent.decompose import decompose_query
+
+    if not bool((state.router_signals or {}).get("multi_part")):
+        return state
+    container_id = state.tenant_id or ""
+    components = await decompose_query(
+        state.query,
+        container_id=container_id,
+        llm=getattr(deps, "llm", None),
+        signals=state.router_signals,
+    )
+    if len(components) >= 2:
+        state.output_components = list(components)
+        # The loop gates sufficiency on sub_queries; each component is a required
+        # sub-query so the loop is not "done" until all parts have grounding.
+        state.sub_queries = list(components)
+    return state
+
+
+async def link_node(state: PdfChatState, deps: "AgentDeps") -> PdfChatState:
+    """Resolve a graph anchor into ``state.entity`` before the graph leg runs."""
+    from pdf_chat.agent.entity_linker import link_entities
+
+    return await link_entities(state, deps, container_id=state.tenant_id or "")
+
+
+async def loop_node(state: PdfChatState, deps: "AgentDeps") -> PdfChatState:
+    """Run the capped, monotonic tool loop (loop.py) — multi_vector_search PRIMARY.
+
+    The loop reads ``TOOL_REGISTRY`` (so Phase-4/5 tools register without a loop
+    change), threads per-hop tenant isolation on every searcher leg, ACL-filters
+    before rerank, and aborts on the total/per-tool/decomp caps or a no-new-chunk
+    round. It writes ``state.accessible_chunks``.
+    """
+    from pdf_chat.agent.loop import LoopBudget, run_tool_loop
+
+    budget = LoopBudget.from_tunables(container_id=state.tenant_id or "")
+    return await run_tool_loop(state, deps, budget)
+
+
+async def synthesize_node(state: PdfChatState, deps: "AgentDeps") -> PdfChatState:
+    """Grounded synthesis with the tag_as_answer HARD GATE + citation floor.
+
+    Writes ``state.answer`` / ``state.citations`` / ``state.provenance`` (and
+    surfaces conflicts onto ``state.conflicts`` via the shared conflict gate).
+    Refuses deterministically (no LLM call) on insufficient context. Never raises.
+    """
+    from pdf_chat.agent.synthesis import synthesize
+
+    result = await synthesize(state, deps, container_id=state.tenant_id or "")
+    state.answer = result.answer
+    state.citations = result.citations
+    state.provenance = result.provenance
+    return state
+
+
+async def negative_claim_node(state: PdfChatState, deps: "AgentDeps") -> PdfChatState:
+    """Wrap the final answer with the negative-claim + conflict gate (gate 3).
+
+    An UNPROVEN "no data / not found" claim (retrieval-empty, or coverage not
+    proven) is replaced by an honest rewrite — retrieval-empty ≠ absent. A PROVEN
+    absence (relevant pages in-context + diagnosed) is kept. Surfaced three-state
+    conflicts ride ``state.conflicts`` (never silently resolved). Mirrors the
+    main system's ``_gate_negative_claim`` wrapping on the final answer.
+    """
+    from pdf_chat.agent.negative_claim import (
+        evaluate_pdf_negative_claim,
+        pdf_honest_rewrite,
+    )
+    from pdf_chat.tunables import log_gate_decision
+
+    container_id = state.tenant_id or ""
+    # Reuse the verdict already computed (and memoized) by synthesis to avoid a
+    # second O(n²) _detect_conflicts pass per query. Only recompute when synthesis
+    # did not run (e.g. a cache-hit path) OR the answer changed since memoization,
+    # so behavior is identical to the previous always-recompute path.
+    verdict = getattr(state, "neg_verdict", None)
+    memo_answer = getattr(verdict, "_for_answer", None) if verdict is not None else None
+    if verdict is None or memo_answer != (state.answer or ""):
+        verdict = evaluate_pdf_negative_claim(
+            answer=state.answer or "",
+            accessible_chunks=state.accessible_chunks or [],
+            container_id=container_id,
+        )
+    if verdict.conflicts:
+        state.conflicts = verdict.conflicts
+    # Only rewrite an UNPROVEN negative claim. A non-negative answer, or a proven
+    # absence, is left exactly as synthesized.
+    if verdict.is_negative_claim and not verdict.proven:
+        state.answer = pdf_honest_rewrite(verdict)
+        state.citations = []
+        log_gate_decision(
+            "agent.negative_claim_wrap",
+            score=0.0,
+            threshold=1.0,
+            outcome="rewrite_unproven",
+            container_id=container_id,
+        )
+    return state
+
+
+async def _bypass_retrieve(state: PdfChatState, deps: "AgentDeps") -> PdfChatState:
+    """Short retrieval path for a bypass that is NOT a cache hit.
+
+    A confident simple query still needs grounded evidence; rather than the full
+    capped loop we run a SINGLE retrieval round (ACL-filtered, reranked) via the
+    same loop machinery: the PRIMARY ``multi_vector_search`` leg, plus the
+    ``graph_traverse`` leg when entity linking resolved an anchor (so a bypassed
+    query that hinges on a named entity is not stuck with vector-only retrieval).
+    The total cap allows both legs of the one round; the monotonic-progress guard
+    then stops any second round. This keeps the bypass fast while never asserting
+    an ungrounded answer.
+    """
+    from pdf_chat.agent.loop import LoopBudget, run_tool_loop
+
+    # 2 total calls = PRIMARY + (optional) graph leg in a single round; 1 per
+    # tool so neither leg repeats. (Literals here are an internal bypass budget,
+    # not a tunable gate — the capped LOOP path is the tunable one.)
+    budget = LoopBudget(max_total_calls=2, max_per_tool=1, max_decomp_depth=0)
+    return await run_tool_loop(state, deps, budget)
+
+
+# --------------------------------------------------------------------------- #
+# The public C4 entry
+# --------------------------------------------------------------------------- #
+async def run_pdf_query(
+    query: str,
+    *,
+    tenant_id: str,
+    container_id: str,
+    user_id: str = "",
+    groups: list[str] | None = None,
+    doc_ids: list[str] | None = None,
+    deps: "AgentDeps | None" = None,
+) -> PdfQueryResult:
+    """Execute a query end-to-end and return a grounded :class:`PdfQueryResult`.
+
+    Pipeline (the SAME nodes the guarded LangGraph builder runs):
+
+      embed → cache_check → plan
+        ├─ bypass (cache hit)      → audit → return cached answer
+        ├─ bypass (no cache hit)   → short multi_vector_search retrieve → acl
+        │                            → synthesize → negative_claim → cache → audit
+        └─ loop path               → link_entities → run_tool_loop
+                                     → synthesize → negative_claim → cache → audit
+
+    Tenant isolation: ``tenant_id`` is threaded onto the state and every searcher
+    leg (per-hop). ``container_id`` scopes every tunable + gate-decision log.
+    ``deps=None`` wires real adapters via ``build_default_deps`` (guarded).
+
+    Never raises: a backend failure degrades to a deterministic refusal rather
+    than a hallucinated answer (the honest-absence invariant).
+    """
+    if deps is None:
+        deps = build_default_deps()
+
+    state = PdfChatState(
+        query=query,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        groups=list(groups or []),
+        doc_ids=list(doc_ids) if doc_ids is not None else None,
+    )
+
+    # Stage 2/5 — embed + cache lookup (reuses the legacy nodes verbatim).
+    state = await embed_query(state, deps)
+    state = await cache_check(state, deps)
+
+    # Plan: typed intent + bypass (a cache hit forces bypass=True downstream).
+    state = await plan_node(state, deps)
+
+    if state.cached:
+        # A cache hit serves the stored answer but MUST still be audited
+        # (Security must-fix #6) — the answer already populated by cache_check.
+        state = await audit(state, deps)
+        return _result_from_state(state)
+
+    # Multi-part decomposition: populate components BEFORE the loop so the
+    # sufficiency gate (loop._components_satisfied) sees real components and a
+    # multi-part ask is never truncated after the first grounded chunk. (A
+    # multi-part query never bypasses — the planner forces the loop — but we run
+    # this before the branch so a future bypass+multi_part stays correct.)
+    state = await decompose_node(state, deps)
+
+    if state.bypass:
+        # Confident simple query, no cache hit: a single PRIMARY retrieval round.
+        # Entity linking runs here too (it is a cheap no-op when nothing resolves)
+        # so a bypassed query that hinges on a named entity still gets the graph
+        # leg rather than vector-only retrieval.
+        state = await link_node(state, deps)
+        state = await _bypass_retrieve(state, deps)
+    else:
+        # Full agentic path: link a graph anchor, then run the capped loop.
+        state = await link_node(state, deps)
+        state = await loop_node(state, deps)
+
+    state = await synthesize_node(state, deps)
+    state = await negative_claim_node(state, deps)
+
+    # Cache the grounded answer (never a refusal — the legacy cache_write already
+    # refuses to cache below-floor contexts) + audit the retrieval.
+    state = await cache_write(state, deps)
+    state = await audit(state, deps)
+    return _result_from_state(state)
+
+
+# Ordered Phase-3 pipeline (used by the guarded LangGraph builder).
+def _agent_nodes():
+    """The Phase-3 node sequence as (name, fn) pairs (lazy so import stays clean)."""
+    return [
+        ("embed_query", embed_query),
+        ("cache_check", cache_check),
+        ("plan", plan_node),
+        ("decompose", decompose_node),
+        ("link_entities", link_node),
+        ("run_tool_loop", loop_node),
+        ("synthesize", synthesize_node),
+        ("negative_claim", negative_claim_node),
+        ("cache_write", cache_write),
+        ("audit", audit),
+    ]
+
+
+def build_agent_graph(deps: "AgentDeps"):
+    """Compile a guarded LangGraph over the SAME Phase-3 nodes, or raise.
+
+    Mirrors the legacy ``build_graph`` guard: if ``langgraph`` is importable we
+    return a compiled ``StateGraph`` with ``.ainvoke(state)``; otherwise we raise
+    a ``RuntimeError`` pointing callers at ``run_pdf_query`` (the plain runner
+    that executes the identical node functions). The graph branches after the
+    planner: a cache hit jumps to ``audit``; a bypass skips link+loop straight to
+    ``synthesize``; otherwise the full link → loop path runs.
+    """
+    try:
+        from langgraph.graph import StateGraph, END  # type: ignore
+    except Exception as exc:  # pragma: no cover - depends on optional dep
+        raise RuntimeError(
+            "langgraph not installed; use run_pdf_query instead"
+        ) from exc
+
+    def _wrap(fn):
+        async def _node(state: PdfChatState) -> PdfChatState:
+            return await fn(state, deps)
+
+        return _node
+
+    sg = StateGraph(PdfChatState)
+    for name, fn in _agent_nodes():
+        sg.add_node(name, _wrap(fn))
+    sg.set_entry_point("embed_query")
+    sg.add_edge("embed_query", "cache_check")
+    sg.add_edge("cache_check", "plan")
+
+    # A cache hit jumps straight to audit; otherwise decompose (populate
+    # components for a multi-part ask) then link an entity (on BOTH the bypass
+    # and loop paths — the linker is a cheap no-op when nothing resolves).
+    def _after_plan(state: PdfChatState) -> str:
+        return "audit" if state.cached else "decompose"
+
+    sg.add_conditional_edges(
+        "plan", _after_plan, {"audit": "audit", "decompose": "decompose"}
+    )
+    sg.add_edge("decompose", "link_entities")
+
+    # After entity linking the bypass path skips the loop and goes straight to
+    # synthesis; the full agentic path runs the capped tool loop.
+    def _after_link(state: PdfChatState) -> str:
+        return "synthesize" if state.bypass else "run_tool_loop"
+
+    sg.add_conditional_edges(
+        "link_entities",
+        _after_link,
+        {"synthesize": "synthesize", "run_tool_loop": "run_tool_loop"},
+    )
+    sg.add_edge("run_tool_loop", "synthesize")
+    sg.add_edge("synthesize", "negative_claim")
+    sg.add_edge("negative_claim", "cache_write")
+    sg.add_edge("cache_write", "audit")
+    sg.add_edge("audit", END)
+    return sg.compile()
