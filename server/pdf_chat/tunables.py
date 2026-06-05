@@ -189,6 +189,32 @@ TUNABLE_DEFAULTS: dict[str, Any] = {
     # Ontology builder — open-vocab doc-taxonomy clustering: a learned doc_class is
     # kept only when its LLM clustering confidence clears this floor.
     "ontology.doc_taxonomy_min_confidence": 0.50,
+    # Phase 6 — eval CI threshold gate (single source for the build-fail floors).
+    # assert_thresholds resolves each floor here and emits a gate decision; a
+    # metric breaching its floor RAISES AssertionError (the CI build-fail seam).
+    # correctness/faithfulness are floors (score >= floor passes); fallback_rate
+    # is a CEILING expressed as the negated-and-floored pass test inside the gate.
+    "eval.min_correctness": 0.7,
+    "eval.min_faithfulness": 0.6,
+    "eval.max_fallback_rate": 0.3,
+    # Phase 6 — rate-limit backoff (Task 4). Exponential backoff + bounded
+    # concurrency for Azure OpenAI calls at ingestion scale. The per-attempt delay
+    # is base_seconds*2**attempt, capped at max_seconds, plus uniform jitter up to
+    # jitter_ratio of the capped delay; the attempt budget is max_attempts (the
+    # caller DLQs on exhaustion); in-flight calls are capped at max_concurrency by a
+    # semaphore. BoundedBackoffExecutor resolves each knob via get_tunable with NO
+    # inline numeric default so no delay/cap literal lives in rate_limiter.py
+    # (Spec §3 inv 4); test-only callers pass explicit overrides.
+    "obs.backoff.base_seconds": 1.0,
+    "obs.backoff.max_seconds": 60.0,
+    "obs.backoff.max_attempts": 5,
+    "obs.embed.max_concurrency": 8,
+    "obs.backoff.jitter_ratio": 0.2,
+    # Phase 6 — cascading delete (Tasks 5/6). Batch size for the tenant-scoped
+    # chunk DETACH DELETE loop (LIMIT $limit), resolved via get_tunable with NO
+    # inline numeric default so no batch literal lives in delete_service.py
+    # (Spec §3 inv 4). The cascade loops one batch at a time until 0 chunks remain.
+    "delete.batch_size": 500,
 }
 
 # Optional per-container DB override hook. Wired in Task 1b; until then None ⇒

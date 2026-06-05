@@ -11,6 +11,7 @@ SDK installed raises a clear ``RuntimeError`` at call time, never at import.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 
 from ..config import get_pdf_settings
@@ -59,3 +60,38 @@ def embed_texts(texts: list[str], *, model: str | None = None) -> list[list[floa
     client = _build_client()
     resp = client.embeddings.create(input=texts, model=deployment)
     return [item.embedding for item in resp.data]
+
+
+async def embed_texts_bounded(
+    batches: list[list[str]],
+    *,
+    container_id: str,
+    model: str | None = None,
+) -> list[list[list[float]]]:
+    """Embed many batches under exponential backoff + bounded concurrency.
+
+    Each element of ``batches`` is one embedding request; results preserve input
+    order. Used by the ingestion fan-out where N batches would otherwise burst
+    Azure's rate limit. Reuses the synchronous :func:`embed_texts` per batch inside
+    a thread (``asyncio.to_thread``) so the SDK's blocking call doesn't stall the
+    event loop, and routes every call through :class:`BoundedBackoffExecutor` so a
+    429/503 is retried and the in-flight count is capped per the tunables.
+
+    The existing synchronous :func:`embed_texts` is left untouched so Phase 0/1
+    callers are unaffected.
+    """
+    from .rate_limiter import BoundedBackoffExecutor
+
+    executor = BoundedBackoffExecutor(container_id=container_id)
+
+    def _factory(texts: list[str]) -> "Callable":  # noqa: F821 - local typing only
+        async def _call() -> list[list[float]]:
+            # Look up embed_texts on the module at call time so a test monkeypatch
+            # of ``embeddings.embed_texts`` is respected (don't bind the symbol now).
+            import pdf_chat.ingestion.embeddings as _emb
+
+            return await asyncio.to_thread(_emb.embed_texts, texts, model=model)
+
+        return _call
+
+    return await executor.gather_bounded([_factory(b) for b in batches])

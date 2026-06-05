@@ -4,20 +4,55 @@
     "question": "What is the total contract value?",
     "expected_keywords": ["total", "contract", "value"],
     "must_cite": true,
-    "expect_refusal": false
+    "expect_refusal": false,
+    "category": "local"
   },
   {
     "id": "q2",
     "question": "Who are the parties to the agreement?",
     "expected_keywords": ["party", "parties", "agreement"],
     "must_cite": true,
-    "expect_refusal": false
+    "expect_refusal": false,
+    "category": "local"
   },
   {
     "id": "q3",
     "question": "What is the governing law of a contract that is not in this document set?",
     "expected_keywords": [],
     "must_cite": false,
-    "expect_refusal": true
+    "expect_refusal": true,
+    "category": "negative_claim"
+  },
+  {
+    "id": "q4",
+    "question": "Which vendor supplies the component named in the termination clause, and what is that vendor's payment term?",
+    "expected_keywords": ["vendor", "payment", "term"],
+    "must_cite": true,
+    "expect_refusal": false,
+    "category": "graph_traversal"
+  },
+  {
+    "id": "q5",
+    "question": "Across all the contracts in this corpus, what are the most common renewal and indemnification obligations?",
+    "expected_keywords": ["renewal", "indemnification", "obligation"],
+    "must_cite": true,
+    "expect_refusal": false,
+    "category": "global_community"
+  },
+  {
+    "id": "q6",
+    "question": "Does the invoiced amount for vendor Acme in the PDF reconcile with the total billed amount for Acme in the billing dataset?",
+    "expected_keywords": ["invoice", "amount", "reconcile"],
+    "must_cite": true,
+    "expect_refusal": false,
+    "category": "cross_domain"
+  },
+  {
+    "id": "q7",
+    "question": "What penalty does the contract impose for late delivery by the carrier in 2019?",
+    "expected_keywords": [],
+    "must_cite": false,
+    "expect_refusal": true,
+    "category": "negative_claim"
   }
 ]

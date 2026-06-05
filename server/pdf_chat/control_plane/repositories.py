@@ -53,18 +53,27 @@ class UploadManifestRepo:
         status: str,
         *,
         error_message: str | None = None,
+        tenant_id: str | None = None,
         **fields: Any,
-    ) -> None:
-        """Update the document status (+ optional error and other columns)."""
+    ) -> int:
+        """Update the document status (+ optional error and other columns).
+
+        ``tenant_id`` is OPTIONAL and BACKWARD COMPATIBLE: the orchestrator callers
+        pass none and keep the upload_id-only UPDATE. When supplied (the delete
+        path), a ``tenant_id`` predicate is added so a tenant can NEVER mutate
+        another tenant's row (SECURITY). Returns the affected ``rowcount`` so the
+        caller can distinguish a real update from an unknown-id / cross-tenant
+        no-op (0 rows → the route's 404). Existing callers ignore the return.
+        """
         values: dict[str, Any] = {"status": status, "updated_at": _now()}
         if error_message is not None:
             values["error_message"] = error_message
         values.update(fields)
-        await self._session.execute(
-            update(UploadManifest)
-            .where(UploadManifest.upload_id == upload_id)
-            .values(**values)
-        )
+        stmt = update(UploadManifest).where(UploadManifest.upload_id == upload_id)
+        if tenant_id is not None:
+            stmt = stmt.where(UploadManifest.tenant_id == tenant_id)
+        result = await self._session.execute(stmt.values(**values))
+        return result.rowcount
 
     async def find_by_sha256(
         self, sha256: str, tenant_id: str

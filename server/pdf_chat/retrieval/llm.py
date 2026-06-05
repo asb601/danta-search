@@ -18,6 +18,7 @@ import hashlib
 import os
 
 from pdf_chat.model_router import select_model, TaskClass
+from pdf_chat.observability.cost_tracker import get_cost_tracker
 
 try:
     from openai import AzureOpenAI  # type: ignore
@@ -48,7 +49,14 @@ def _prompt_cache_key(system: str) -> str:
 
 
 class PdfLlm:
-    """Grounded synthesis adapter; model chosen via the router, prompt-cached."""
+    """Grounded synthesis adapter; model chosen via the router, prompt-cached.
+
+    Cost tracking: ``generate`` records the synthesis token usage into the
+    per-tenant ``PdfCostTracker`` (Fix 10) so the /api/pdf/metrics cost surface is
+    real for queries. cost_usd is best-effort 0.0 (no per-model price table is
+    wired in pdf_chat yet). DEFERRED: extraction/vision cost call sites and the
+    limiter→production-embed wiring remain unwired (sync Celery path, out of scope).
+    """
 
     async def generate(
         self,
@@ -82,5 +90,31 @@ class PdfLlm:
             # Prompt-cache routing hint: stable per system-prompt version so Azure
             # can route repeat calls to the cached instruction prefix.
             user=cache_key,
+        )
+        # Record the synthesis cost so GET /api/pdf/metrics reflects real query-time
+        # usage (Fix 10 — track_llm previously had zero production callers). The
+        # tenant scope in pdf_chat IS container_id; the phase is "synthesis"; the
+        # SELECTED model id (choice.model_id) is what the router resolved, so a
+        # gpt-4o regression is flagged as a policy_violation by the tracker.
+        #
+        # cost_usd is best-effort 0.0: pdf_chat has no per-model price table wired
+        # yet, so token counts are tracked and the dollar figure stays 0.0 until a
+        # price table is added. getattr-guards mean a fake/missing .usage never
+        # raises and never changes generate()'s return value.
+        #
+        # DEFERRED productionization (documented per the task): the ingestion
+        # extraction / vision cost call sites and the rate-limiter→production-embed
+        # wiring are NOT done here — that path is sync Celery and out of scope; this
+        # fix only makes the QUERY (synthesis) cost surface real.
+        usage = getattr(resp, "usage", None)
+        get_cost_tracker().track_llm(
+            container_id,
+            "synthesis",
+            choice.model_id,
+            prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+            completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+            cost_usd=0.0,  # no price table wired in pdf_chat yet (best-effort).
+            document_id=None,
+            trace_id=None,
         )
         return resp.choices[0].message.content or ""

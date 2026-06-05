@@ -475,3 +475,49 @@ def test_load_page_inputs_returns_pipeline_tuple():
     assert image == b"PNGBYTES"
     assert page_num == 7                               # real page_num returned
     assert seen["tenant_id"] == "t9"                   # tenant scope threaded
+
+
+# --------------------------------------------------------------------------- #
+# Fix 2 — UploadManifestRepo.set_status tenant scoping (SECURITY)
+# --------------------------------------------------------------------------- #
+class _CapturingSession:
+    """Fake AsyncSession that captures the executed UPDATE + returns a rowcount."""
+
+    def __init__(self, rowcount: int):
+        self._rowcount = rowcount
+        self.last_stmt = None
+
+    async def execute(self, stmt):
+        self.last_stmt = stmt
+
+        class _Result:
+            rowcount = self._rowcount
+
+        return _Result()
+
+
+def test_set_status_without_tenant_is_backward_compatible():
+    """The 4 orchestrator callers pass no tenant_id; the UPDATE keys on upload_id
+    only and the (ignored) return is the rowcount."""
+    from pdf_chat.control_plane.repositories import UploadManifestRepo
+
+    session = _CapturingSession(rowcount=1)
+    repo = UploadManifestRepo(session)
+    rows = asyncio.run(repo.set_status("up-1", "deleted"))
+    assert rows == 1
+    compiled = str(session.last_stmt.compile())
+    # no tenant_id predicate when tenant_id is omitted
+    assert "tenant_id" not in compiled
+
+
+def test_set_status_with_tenant_scopes_the_update_and_returns_rowcount():
+    """When tenant_id is supplied the UPDATE adds a tenant_id predicate so a tenant
+    can never soft-delete another tenant's doc; rowcount is returned for the 404."""
+    from pdf_chat.control_plane.repositories import UploadManifestRepo
+
+    session = _CapturingSession(rowcount=0)  # other-tenant / unknown id ⇒ 0 rows
+    repo = UploadManifestRepo(session)
+    rows = asyncio.run(repo.set_status("up-1", "deleted", tenant_id="tenant-A"))
+    assert rows == 0
+    compiled = str(session.last_stmt.compile())
+    assert "tenant_id" in compiled

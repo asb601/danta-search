@@ -15,6 +15,10 @@ class GoldQuestion:
     expected_keywords: list[str] = field(default_factory=list)
     must_cite: bool = True
     expect_refusal: bool = False
+    # Phase-6 routing category (DATA, not a rule): local | graph_traversal |
+    # global_community | cross_domain | negative_claim. Defaults to "local" so
+    # pre-Phase-6 rows (and ad-hoc constructions) stay valid.
+    category: str = "local"
 
 
 def load_gold_set(path: "Path | None" = None) -> list[GoldQuestion]:

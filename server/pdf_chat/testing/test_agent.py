@@ -387,6 +387,122 @@ def test_pdf_llm_routes_model_via_router_and_prompt_caches(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Fix 10 — PdfLlm.generate wires cost tracking into the synthesis call
+# ---------------------------------------------------------------------------
+def _fake_llm_client_with_usage(model_id: str, *, prompt_tokens: int,
+                                completion_tokens: int):
+    usage = type("Usage", (), {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+    })()
+
+    class _Resp:
+        choices = [type("C", (), {"message": type("M", (), {"content": "ans"})()})()]
+
+    _Resp.usage = usage
+    _Resp.model = model_id
+
+    class _FakeMsgs:
+        def create(self, **kwargs):
+            return _Resp()
+
+    class _FakeClient:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": _FakeMsgs()})()
+
+    return lambda: _FakeClient()
+
+
+def test_pdf_llm_records_synthesis_cost(monkeypatch):
+    """generate() must record one 'synthesis' cost-tracker call with the response's
+    usage tokens + the router-selected model id (Fix 10)."""
+    from pdf_chat.retrieval import llm as llm_mod
+    from pdf_chat.model_router import ModelChoice
+    from pdf_chat.observability.cost_tracker import get_cost_tracker
+
+    get_cost_tracker().reset("c-cost")
+
+    monkeypatch.setattr(
+        llm_mod, "_build_client",
+        _fake_llm_client_with_usage("gpt-4o-mini", prompt_tokens=120,
+                                    completion_tokens=30),
+    )
+    monkeypatch.setattr(
+        llm_mod, "select_model",
+        lambda *, task, container_id, signals, **_: ModelChoice(
+            provider="azure", model_id="gpt-4o-mini", is_strong=False
+        ),
+    )
+
+    out = asyncio.run(llm_mod.PdfLlm().generate("SYS", "USER", container_id="c-cost"))
+    assert out == "ans"
+
+    snap = get_cost_tracker().snapshot("c-cost")
+    assert snap["llm_calls"] == 1
+    assert snap["prompt_tokens"] == 120
+    assert snap["completion_tokens"] == 30
+    assert snap["by_phase"]["synthesis"]["llm_calls"] == 1
+    assert snap["policy_violations"] == 0  # gpt-4o-mini is allowed
+
+
+def test_pdf_llm_flags_gpt4o_policy_violation(monkeypatch):
+    """If the router somehow selected a gpt-4o (non-mini) model, generate() still
+    records the cost AND flags the policy violation (Fix 10)."""
+    from pdf_chat.retrieval import llm as llm_mod
+    from pdf_chat.model_router import ModelChoice
+    from pdf_chat.observability.cost_tracker import get_cost_tracker
+
+    get_cost_tracker().reset("c-viol")
+
+    monkeypatch.setattr(
+        llm_mod, "_build_client",
+        _fake_llm_client_with_usage("gpt-4o", prompt_tokens=10, completion_tokens=5),
+    )
+    monkeypatch.setattr(
+        llm_mod, "select_model",
+        lambda *, task, container_id, signals, **_: ModelChoice(
+            provider="azure", model_id="gpt-4o", is_strong=True
+        ),
+    )
+
+    asyncio.run(llm_mod.PdfLlm().generate("SYS", "USER", container_id="c-viol"))
+    snap = get_cost_tracker().snapshot("c-viol")
+    assert snap["llm_calls"] == 1
+    assert snap["policy_violations"] == 1
+
+
+def test_pdf_llm_generate_does_not_raise_when_response_lacks_usage(monkeypatch):
+    """A fake response without .usage must never raise (getattr-guarded) and must
+    still return the answer unchanged (Fix 10)."""
+    from pdf_chat.retrieval import llm as llm_mod
+    from pdf_chat.model_router import ModelChoice
+    from pdf_chat.observability.cost_tracker import get_cost_tracker
+
+    get_cost_tracker().reset("c-nousage")
+
+    class _FakeMsgs:
+        def create(self, **kwargs):
+            class _R:
+                choices = [type("C", (), {"message": type("M", (), {"content": "ans"})()})()]
+            return _R()  # no .usage attribute at all
+
+    class _FakeClient:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": _FakeMsgs()})()
+
+    monkeypatch.setattr(llm_mod, "_build_client", lambda: _FakeClient())
+    monkeypatch.setattr(
+        llm_mod, "select_model",
+        lambda *, task, container_id, signals, **_: ModelChoice(
+            provider="azure", model_id="gpt-4o-mini", is_strong=False
+        ),
+    )
+
+    out = asyncio.run(llm_mod.PdfLlm().generate("SYS", "USER", container_id="c-nousage"))
+    assert out == "ans"
+
+
+# ---------------------------------------------------------------------------
 # Task 7 — OnDemandExtractor + QueryAuditRepo adapters
 # ---------------------------------------------------------------------------
 def test_on_demand_extractor_passthrough_for_text_chunk():
