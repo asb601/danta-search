@@ -156,9 +156,15 @@ def test_phase4_phase5_names_are_seam_only_absent_from_registry():
     # Reserved by name (the loop/integration can discover the seam) ...
     assert "structured_query" in RESERVED_TOOL_NAMES
     assert "glossary_lookup" in RESERVED_TOOL_NAMES
-    # ... but UNIMPLEMENTED here — never in the live registry.
-    assert "structured_query" not in TOOL_REGISTRY
-    assert "glossary_lookup" not in TOOL_REGISTRY
+    # ... and UNIMPLEMENTED in the Phase-3 module itself (never wired here).
+    # Phase 4/5 fill these reserved seams by importing their own module
+    # (tools_structured / tools_glossary), which calls register_tool. Phase 3
+    # owns neither, so the durable Phase-3 contract is: the names are reserved
+    # AND Phase 3 never registers them on its own. We assert against the names
+    # Phase 3 itself defines, not the cross-phase registry side-effect (Phase 5's
+    # tools_glossary, once imported, LEGITIMATELY registers "glossary_lookup").
+    assert "glossary_lookup" not in PHASE3_TOOL_NAMES
+    assert "structured_query" not in PHASE3_TOOL_NAMES
 
 
 def test_every_phase3_tool_satisfies_tool_protocol():

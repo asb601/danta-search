@@ -32,7 +32,7 @@ from pdf_chat.agent.graph import (
     run_pdf_query,
 )
 from pdf_chat.agent.prompts import INSUFFICIENT_CONTEXT_MESSAGE
-from pdf_chat.agent.tools import TOOL_REGISTRY
+from pdf_chat.agent.tools import PHASE3_TOOL_NAMES, TOOL_REGISTRY
 
 
 # --------------------------------------------------------------------------- #
@@ -348,9 +348,12 @@ def test_phase3_tools_registered_with_multi_vector_primary():
     assert "graph_traverse" in TOOL_REGISTRY
     assert "community_report_lookup" in TOOL_REGISTRY
     assert "get_entity_neighbors" in TOOL_REGISTRY
-    # Phase-4/5 seams stay UNregistered.
-    assert "structured_query" not in TOOL_REGISTRY
-    assert "glossary_lookup" not in TOOL_REGISTRY
+    # Phase-4/5 seam names are never PHASE-3-OWNED tools. (Phase 5's
+    # tools_glossary, once imported, LEGITIMATELY registers "glossary_lookup" into
+    # the shared registry, so we assert the durable Phase-3 contract — Phase 3
+    # owns neither seam name — not the cross-phase registry side-effect.)
+    assert "structured_query" not in PHASE3_TOOL_NAMES
+    assert "glossary_lookup" not in PHASE3_TOOL_NAMES
 
 
 # --------------------------------------------------------------------------- #

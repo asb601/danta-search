@@ -167,6 +167,28 @@ TUNABLE_DEFAULTS: dict[str, Any] = {
     # Grain alignment (Task 5) — a PDF fact (rate×volume) reconciles a CSV
     # aggregate total when their relative difference is within this fraction.
     "grain.numeric_tolerance_pct": 0.05,
+    # Phase 5 — Comprehension layer (single source for every glossary.*/
+    # comprehension.*/ontology.* dial). Each Phase-5 module passes these as inline
+    # named defaults to get_tunable so it stays import-safe pre-integration;
+    # registering them here restores single-source discoverability (Spec §3 inv 4).
+    # Glossary mining — inclusion floor a confirmed/inferred entry must clear.
+    "glossary.min_confidence": 0.60,
+    # Distributional-anomaly LIFT gate (coined term vs injected background_freq):
+    # a term is a coined-jargon candidate when its in-corpus log10-frequency
+    # exceeds its general-usage background log10-frequency by at least this lift.
+    "glossary.anomaly_min_lift": 1.5,
+    # Assumed background log10-frequency of a token ABSENT from the general
+    # English/business table (an OOV term is treated as very rare in general use,
+    # so its recurrence in-corpus produces a high positive lift). VERY negative.
+    "glossary.background_oov_logfreq": -6.0,
+    # Co-reference variant adjudication: alias-merge similarity floor.
+    "glossary.coref_min_similarity": 0.70,
+    # Comprehension faithfulness — a mention older than this many days is annotated
+    # as possibly outdated (staleness note); fresher mentions get no note.
+    "comprehension.staleness_days": 365,
+    # Ontology builder — open-vocab doc-taxonomy clustering: a learned doc_class is
+    # kept only when its LLM clustering confidence clears this floor.
+    "ontology.doc_taxonomy_min_confidence": 0.50,
 }
 
 # Optional per-container DB override hook. Wired in Task 1b; until then None ⇒
