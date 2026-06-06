@@ -51,3 +51,20 @@ def stream_pages(blob_bytes: bytes) -> Iterator[tuple[int, Any]]:
             # page is freed from memory as the loop advances
     finally:
         pdf.close()
+
+
+def render_page_png(page: Any) -> bytes:
+    """Render a single ``fitz.Page`` to PNG bytes.
+
+    The OCR/scanned extraction path (``ocr_extractor.extract_scanned_page``)
+    consumes a rendered PNG of the page, so this is the canonical "page → image
+    bytes" helper. Kept next to :func:`stream_pages` so ALL fitz-render logic
+    lives in one module (no duplicated ``fitz.open`` / ``get_pixmap``).
+
+    Args:
+        page: a ``fitz.Page`` (as yielded by :func:`stream_pages`).
+
+    Returns:
+        PNG-encoded bytes of the rendered page.
+    """
+    return page.get_pixmap().tobytes("png")

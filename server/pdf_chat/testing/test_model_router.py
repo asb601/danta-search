@@ -297,3 +297,52 @@ def test_redis_budget_store_keys_are_tenant_scoped():
     store.reserve("tenant-a")
     assert store.used("tenant-a") == 1
     assert store.used("tenant-b") == 0  # isolation: distinct keys per container
+
+
+def test_redis_budget_store_reserve_increments_used_key():
+    """reserve() INCRs the per-tenant used key; reads target the right keys."""
+    client = _FakeRedis()
+    store = RedisBudgetStore(client)
+    store.reserve("t1")
+    store.reserve("t1")
+    # The numerator lives under the tenant-scoped used key.
+    assert client._data["pdf:escbudget:t1"] == 2
+    assert store.used("t1") == 2
+    # total() reads the distinct total key (unset → 0).
+    assert "pdf:escbudget:total:t1" not in client._data
+    assert store.total("t1") == 0
+
+
+# ── set_default_budget_store install (process-global; teardown-safe) ──────────
+
+
+def test_set_default_budget_store_enables_reserve():
+    """Installing the default store makes escalation reserve WITHOUT an explicit
+    store= kwarg; teardown resets the global so the other tests stay green."""
+    from pdf_chat import model_router
+
+    store = FakeBudgetStore(used=0, total=1000)
+    prev = model_router._DEFAULT_STORE
+    model_router.set_default_budget_store(store)
+    try:
+        choice = select_model(
+            task="query_synthesis",
+            container_id="t1",
+            signals={"definitional": True},  # a firing signal
+        )
+        assert choice.is_strong is True               # escalated via the default store
+        assert store.used("t1") == 1                  # reserve went through the default
+    finally:
+        model_router.set_default_budget_store(prev)
+
+
+def test_default_store_none_fails_safe():
+    """With the default store explicitly None, a firing signal cannot escalate."""
+    from pdf_chat import model_router
+
+    prev = model_router._DEFAULT_STORE
+    model_router.set_default_budget_store(None)
+    try:
+        assert escalation_allowed("t1", {"definitional": True}) is False
+    finally:
+        model_router.set_default_budget_store(prev)

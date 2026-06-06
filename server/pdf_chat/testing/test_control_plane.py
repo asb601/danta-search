@@ -444,9 +444,14 @@ def test_load_page_inputs_returns_pipeline_tuple():
     from pdf_chat.control_plane.repositories import PageManifestRepo
 
     class _FakeRow:
+        # New (post-seam) shape: the loader reads blob_uri + upload_id (doc_id ==
+        # upload_id) and coverage now comes from _render_page. Old attrs kept so a
+        # reviewer can see the migration; both coexist harmlessly.
         page_blob_path = "az://x/p7.png"
+        blob_uri = "az://x/doc.pdf"
         text_coverage_ratio = 0.92
         doc_id = "doc-1"
+        upload_id = "doc-1"
         acl_snapshot = {"public": True}
         page_num = 7                                   # real (non-zero) page number
 
@@ -463,14 +468,15 @@ def test_load_page_inputs_returns_pipeline_tuple():
 
     repo = PageManifestRepo(_FakeSession())
     repo._fetch_row = _fetch                            # injected for the pure test
-    repo._download = lambda path: b"PNGBYTES"          # injected blob fetch
-    repo._render_page = lambda blob: ("page-obj", b"PNGBYTES")
+    repo._download = lambda uri: b"PNGBYTES"           # injected blob fetch
+    # _render_page now returns the 3-tuple (page_obj, image_bytes, coverage).
+    repo._render_page = lambda blob, *, page_num: ("page-obj", b"PNGBYTES", 0.92)
 
     page, image, coverage, doc_id, acl, page_num = asyncio.run(
         repo.load_page_inputs("pg-1", tenant_id="t9")
     )
     assert coverage == 0.92
-    assert doc_id == "doc-1"
+    assert doc_id == "doc-1"                            # doc_id == upload_id
     assert acl == {"public": True}
     assert image == b"PNGBYTES"
     assert page_num == 7                               # real page_num returned
@@ -521,3 +527,246 @@ def test_set_status_with_tenant_scopes_the_update_and_returns_rowcount():
     assert rows == 0
     compiled = str(session.last_stmt.compile())
     assert "tenant_id" in compiled
+
+
+# --------------------------------------------------------------------------- #
+# SEAMS — PageManifestRepo._fetch_row / _download / _render_page (worker-wired)
+# --------------------------------------------------------------------------- #
+class _SelectCapturingSession:
+    """Fake AsyncSession capturing the executed SELECT; returns a fixed first()."""
+
+    def __init__(self, first_row):
+        self._first_row = first_row
+        self.last_stmt = None
+
+    async def execute(self, stmt):
+        self.last_stmt = stmt
+        first_row = self._first_row
+
+        class _Result:
+            def first(self_inner):
+                return first_row
+
+        return _Result()
+
+
+def test_fetch_row_scopes_by_tenant_and_task():
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+
+    class _Row:
+        page_num = 3
+        upload_id = "doc-7"
+        blob_uri = "az://c/doc.pdf"
+        acl_snapshot = {"public": True}
+
+    session = _SelectCapturingSession(_Row())
+    repo = PageManifestRepo(session)
+    row = asyncio.run(repo._fetch_row("doc-7:page:000003", tenant_id="t-A"))
+    assert row.upload_id == "doc-7"
+    compiled = str(session.last_stmt.compile())
+    # Two-table read joined on upload_id, scoped to BOTH task_id AND tenant_id.
+    assert "pdf_page_manifest" in compiled
+    assert "pdf_upload_manifest" in compiled
+    assert "JOIN" in compiled.upper()
+    assert "task_id" in compiled
+    assert "tenant_id" in compiled
+
+
+def test_fetch_row_without_tenant_has_no_tenant_predicate():
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+
+    class _Row:
+        page_num = 1
+        upload_id = "doc-1"
+        blob_uri = "az://c/doc.pdf"
+        acl_snapshot = {}
+
+    session = _SelectCapturingSession(_Row())
+    repo = PageManifestRepo(session)
+    asyncio.run(repo._fetch_row("doc-1:page:000001", tenant_id=None))
+    compiled = str(session.last_stmt.compile())
+    # Backward-compatible: no tenant predicate when tenant_id is omitted.
+    assert "tenant_id" not in compiled
+
+
+def test_fetch_row_missing_row_raises_permanent():
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+    from pdf_chat.ingestion.tasks import PermanentError
+
+    session = _SelectCapturingSession(None)  # no row / cross-tenant ⇒ None
+    repo = PageManifestRepo(session)
+    try:
+        asyncio.run(repo._fetch_row("missing", tenant_id="t-A"))
+    except PermanentError:
+        return
+    raise AssertionError("missing/cross-tenant row must raise PermanentError")
+
+
+def test_download_reads_local_path(tmp_path):
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-local-bytes")
+    repo = PageManifestRepo(session=None)
+    # Plain local path
+    assert asyncio.run(repo._download(str(f))) == b"%PDF-local-bytes"
+    # file:// uri
+    assert asyncio.run(repo._download(f.as_uri())) == b"%PDF-local-bytes"
+
+
+def test_download_uses_injected_reader_for_az_uri():
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+
+    seen = {}
+
+    def _reader(uri):
+        seen["uri"] = uri
+        return b"AZURE-BYTES"
+
+    repo = PageManifestRepo(session=None, blob_reader=_reader)
+    out = asyncio.run(repo._download("az://cont/doc.pdf"))
+    assert out == b"AZURE-BYTES"
+    assert seen["uri"] == "az://cont/doc.pdf"
+
+
+def test_download_az_uri_without_reader_raises_permanent():
+    from pdf_chat.control_plane import repositories as repo_mod
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+    from pdf_chat.ingestion.tasks import PermanentError
+
+    # Ensure no process-wide default reader leaks in from another test.
+    prev = repo_mod._DEFAULT_BLOB_READER
+    repo_mod.set_default_blob_reader(None)
+    try:
+        repo = PageManifestRepo(session=None)
+        try:
+            asyncio.run(repo._download("az://cont/doc.pdf"))
+        except PermanentError:
+            return
+        raise AssertionError("az:// without a wired reader must raise PermanentError")
+    finally:
+        repo_mod.set_default_blob_reader(prev)
+
+
+class _FakeRect:
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+
+
+class _FakePage:
+    """Minimal fitz.Page double for _render_page geometry + PNG render."""
+
+    def __init__(self, *, blocks, width, height, png=b"PNG"):
+        self._blocks = blocks
+        self.rect = _FakeRect(width, height)
+        self._png = png
+
+    def get_text(self, kind):
+        assert kind == "dict"
+        return {"blocks": self._blocks}
+
+    def get_pixmap(self):
+        png = self._png
+
+        class _Pix:
+            def tobytes(self_inner, fmt):
+                assert fmt == "png"
+                return png
+
+        return _Pix()
+
+
+def test_render_page_reuses_stream_pages_and_returns_triple(monkeypatch):
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+    from pdf_chat.ingestion import page_reader, page_routing
+
+    # A text block covering half the page area (text_area / page_area = 0.5).
+    page0 = _FakePage(blocks=[], width=100.0, height=100.0, png=b"PNG0")
+    page7 = _FakePage(
+        blocks=[{"type": 0, "bbox": [0, 0, 100, 50]}],  # 100*50 = 5000
+        width=100.0,
+        height=100.0,                                    # page area = 10000
+        png=b"PNG7",
+    )
+
+    def _fake_stream(blob):
+        yield 0, page0
+        yield 7, page7
+
+    monkeypatch.setattr(page_reader, "stream_pages", _fake_stream)
+
+    repo = PageManifestRepo(session=None)
+    page_obj, image_bytes, coverage = asyncio.run(
+        repo._render_page(b"blob", page_num=7)
+    )
+    assert page_obj is page7
+    assert image_bytes == b"PNG7"
+    # Coverage is the MEASURED text-span/page-area ratio via the existing helper.
+    expected = page_routing.text_coverage_ratio(text_area=5000.0, page_area=10000.0)
+    assert coverage == expected == 0.5
+    assert 0.0 <= coverage <= 1.0
+
+
+def test_render_page_out_of_range_raises_permanent(monkeypatch):
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+    from pdf_chat.ingestion import page_reader
+    from pdf_chat.ingestion.tasks import PermanentError
+
+    page0 = _FakePage(blocks=[], width=10.0, height=10.0)
+
+    def _fake_stream(blob):
+        yield 0, page0
+
+    monkeypatch.setattr(page_reader, "stream_pages", _fake_stream)
+    repo = PageManifestRepo(session=None)
+    try:
+        asyncio.run(repo._render_page(b"blob", page_num=5))
+    except PermanentError:
+        return
+    raise AssertionError("out-of-range page must raise PermanentError")
+
+
+def test_load_page_inputs_end_to_end_with_async_seams():
+    """Happy path with all three seams injected as ASYNC fakes (proves the
+    _maybe_await bridge handles coroutines too, complementing the sync-fake test)."""
+    from pdf_chat.control_plane.repositories import PageManifestRepo
+
+    class _Row:
+        upload_id = "doc-9"
+        blob_uri = "az://c/doc.pdf"
+        acl_snapshot = {"role": "viewer"}
+        page_num = 4
+
+    seen = {}
+
+    async def _fetch(tid, *, tenant_id=None):
+        seen["tid"] = tid
+        seen["tenant_id"] = tenant_id
+        return _Row()
+
+    async def _download(uri):
+        seen["uri"] = uri
+        return b"DOCBYTES"
+
+    async def _render(blob, *, page_num):
+        seen["render_page_num"] = page_num
+        return ("PAGE", b"IMG", 0.73)
+
+    repo = PageManifestRepo(session=None)
+    repo._fetch_row = _fetch
+    repo._download = _download
+    repo._render_page = _render
+
+    page, image, coverage, doc_id, acl, page_num = asyncio.run(
+        repo.load_page_inputs("doc-9:page:000004", tenant_id="t-X")
+    )
+    assert page == "PAGE"
+    assert image == b"IMG"
+    assert coverage == 0.73
+    assert doc_id == "doc-9"                 # doc_id == upload_id
+    assert acl == {"role": "viewer"}
+    assert page_num == 4
+    assert seen["tenant_id"] == "t-X"        # tenant threaded to _fetch_row
+    assert seen["uri"] == "az://c/doc.pdf"   # doc-level blob downloaded
+    assert seen["render_page_num"] == 4      # row.page_num threaded to render

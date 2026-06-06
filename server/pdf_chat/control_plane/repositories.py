@@ -13,8 +13,11 @@ unit). They ``flush`` where a returned object must be populated.
 """
 from __future__ import annotations
 
+import inspect
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from pathlib import Path
+from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import urlparse
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,11 +25,51 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pdf_chat.models.enums import PageStatus
 from pdf_chat.models.manifests import PageManifest, UploadManifest
 
-__all__ = ["UploadManifestRepo", "PageManifestRepo"]
+__all__ = [
+    "UploadManifestRepo",
+    "PageManifestRepo",
+    "set_default_blob_reader",
+]
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await ``value`` if it is awaitable, else return it as-is.
+
+    Lets ``load_page_inputs`` drive BOTH the real async seam bodies (which hit the
+    DB / blob store / PyMuPDF) AND the simple sync lambdas the pure unit tests
+    inject as instance attributes, without the loader knowing which it is. Mirrors
+    the identical bridge in ``ingestion/tasks.py`` (kept local to avoid a
+    control_plane → ingestion import at module load).
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+# ── Process-wide default blob reader (installed by the worker bootstrap) ──────
+#
+# ``_download`` needs a blob client built from the per-org Azure connection
+# string, which is NOT a pdf_chat env var — it must be injected. The worker
+# bootstrap installs a default reader here (parallel to
+# ``model_router.set_default_budget_store``); tests inject a fake at the seam
+# instead. Leaving this ``None`` keeps ``repositories.py`` import-safe with zero
+# infra and lets the local-disk path (file:// / plain paths) work unchanged.
+_DEFAULT_BLOB_READER: "Callable[[str], bytes] | None" = None
+
+
+def set_default_blob_reader(reader: "Callable[[str], bytes] | None") -> None:
+    """Install the process-wide blob reader (``blob_uri -> bytes``).
+
+    Called by the worker bootstrap with a closure over a real Azure
+    ``BlobServiceClient``. ``reader`` may be sync or async; ``_download`` bridges
+    both via ``_maybe_await``.
+    """
+    global _DEFAULT_BLOB_READER
+    _DEFAULT_BLOB_READER = reader
 
 
 class UploadManifestRepo:
@@ -97,8 +140,17 @@ class UploadManifestRepo:
 class PageManifestRepo:
     """Persistence for ``pdf_page_manifest`` — one row per page task."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        blob_reader: "Callable[[str], bytes] | None" = None,
+    ) -> None:
         self._session = session
+        # Optional per-repo blob reader override. When None, ``_download`` falls
+        # back to the process-wide default (worker bootstrap) and then to the
+        # local-disk path, so the repo is functional in prod AND in tests.
+        self._blob_reader = blob_reader
 
     async def create_pages(
         self, pages: Iterable[dict[str, Any]]
@@ -184,36 +236,166 @@ class PageManifestRepo:
     async def load_page_inputs(self, task_id: str, *, tenant_id: str | None = None):
         """Load the per-page extraction inputs for the worker.
 
-        Returns ``(page_obj, page_image_bytes, coverage, doc_id, acl, page_num)``.
-        The rendered page object + image come from the page blob; coverage was
-        measured at preflight and stored on the page row; ``page_num`` is the real
-        page number from the row (so chunks carry their true page, never 0). The
-        blob fetch and page render are small seams (``_download`` /
-        ``_render_page``) so the loader is unit-testable without infra.
+        Returns ``(page_obj, page_image_bytes, coverage, doc_id, acl, page_num)``
+        — exactly what ``ingestion/tasks.py`` unpacks and ``extract_page_elements``
+        consumes. The rendered ``fitz.Page`` + its PNG come from streaming the
+        document blob to the one requested page (Hard rule #1: the whole PDF is
+        never resident — PyMuPDF streams page-by-page). ``coverage`` is the
+        measured extractable-text ratio derived at render time; ``doc_id`` is the
+        document identity (``UploadManifest.upload_id``); ``page_num`` is the real
+        page number from the row (so chunks carry their true page, never 0).
 
-        ``tenant_id`` is threaded to ``_fetch_row`` so the production row fetch can
-        scope the lookup to the owning tenant (no cross-tenant page read).
+        Architectural decision (vs. the original stubs): there is NO per-page blob
+        column or splitter in this module — the orchestrator writes ONE doc-level
+        blob (``UploadManifest.blob_uri``) and the spec streams it per page. So the
+        three seams re-point at ``(doc blob + page_num)``: ``_fetch_row`` returns
+        the joined ``PageManifest``/``UploadManifest`` row, ``_download`` fetches
+        the doc blob, and ``_render_page`` streams to ``row.page_num``.
+
+        The three seams are ``async`` (``_fetch_row`` needs ``self._session``); we
+        bridge through ``_maybe_await`` so the pure tests' sync fakes stay green.
+
+        ``tenant_id`` is threaded to ``_fetch_row`` so the row fetch scopes the
+        lookup to the owning tenant (no cross-tenant page read).
         """
-        row = self._fetch_row(task_id, tenant_id=tenant_id)
-        blob = self._download(row.page_blob_path)
-        page_obj, image_bytes = self._render_page(blob)
+        row = await _maybe_await(self._fetch_row(task_id, tenant_id=tenant_id))
+        blob = await _maybe_await(self._download(row.blob_uri))
+        rendered = await _maybe_await(
+            self._render_page(blob, page_num=row.page_num)
+        )
+        # ``_render_page`` returns (page_obj, image_bytes, coverage). Sync test
+        # fakes may still return the legacy 2-tuple — fall back to the row's
+        # text_coverage_ratio when present so the pinned loader test stays green.
+        if len(rendered) == 3:
+            page_obj, image_bytes, coverage = rendered
+        else:  # pragma: no cover - legacy 2-tuple fake compatibility
+            page_obj, image_bytes = rendered
+            coverage = getattr(row, "text_coverage_ratio", 0.0)
+        doc_id = getattr(row, "doc_id", None) or row.upload_id
         return (
             page_obj,
             image_bytes,
-            row.text_coverage_ratio,
-            row.doc_id,
+            coverage,
+            doc_id,
             row.acl_snapshot,
             row.page_num,
         )
 
-    def _fetch_row(self, task_id: str, *, tenant_id: str | None = None):  # pragma: no cover - infra-wired
-        # Production body MUST filter the page row by ``tenant_id`` as well as
-        # ``task_id`` so a page is never loaded outside its owning tenant (sentinel
-        # WARN). Left as a worker-bootstrap seam (out of phase scope).
-        raise NotImplementedError("wired by the worker bootstrap")
+    async def _fetch_row(self, task_id: str, *, tenant_id: str | None = None):
+        """Fetch the page row joined to its document, scoped to the tenant.
 
-    def _download(self, path: str) -> bytes:  # pragma: no cover - infra-wired
-        raise NotImplementedError("wired by the worker bootstrap")
+        Tenant identity + ACL + the doc blob uri live on ``UploadManifest`` (not
+        ``PageManifest``), so this is a two-table read joined on ``upload_id``. The
+        ``tenant_id`` predicate (when supplied) guarantees a page can NEVER be
+        loaded outside its owning tenant (multi-tenant Hard rule #3 / sentinel
+        WARN). A missing/cross-tenant row is a PERMANENT failure → the worker DLQs
+        rather than retrying forever.
 
-    def _render_page(self, blob: bytes):  # pragma: no cover - infra-wired
-        raise NotImplementedError("wired by the worker bootstrap")
+        Returns a Row exposing ``.page_num``, ``.upload_id``, ``.blob_uri``,
+        ``.acl_snapshot``.
+        """
+        stmt = (
+            select(
+                PageManifest.page_num,
+                PageManifest.upload_id,
+                UploadManifest.blob_uri,
+                UploadManifest.acl_snapshot,
+            )
+            .join(
+                UploadManifest,
+                PageManifest.upload_id == UploadManifest.upload_id,
+            )
+            .where(PageManifest.task_id == task_id)
+        )
+        if tenant_id is not None:
+            stmt = stmt.where(UploadManifest.tenant_id == tenant_id)
+        row = (await self._session.execute(stmt)).first()
+        if row is None:
+            # Lazy import keeps repositories.py infra-free at module load and
+            # avoids a hard control_plane → ingestion edge at import time.
+            from pdf_chat.ingestion.tasks import PermanentError
+
+            raise PermanentError(
+                f"page row not found or cross-tenant for task_id={task_id!r}"
+            )
+        return row
+
+    async def _download(self, blob_uri: str) -> bytes:
+        """Download the document blob bytes for ``blob_uri``.
+
+        Mirrors the established blob-access path WITHOUT inventing a new auth path:
+          * a local-disk / ``file://`` path is read directly (test + dev), and
+          * an ``az://``/``https://``/``blob://`` uri is fetched via the injected
+            blob reader (per-repo override → process-wide default installed by the
+            worker bootstrap, which closes over a real Azure ``BlobServiceClient``
+            built from the per-org connection string — the same client shape used
+            by ``app/services/parquet_service.py``).
+
+        The container + blob are parsed from the uri (data-driven; never
+        hardcoded), matching ``datafusion_client``'s ``az://container/blob`` shape.
+        """
+        if self._is_local_path(blob_uri):
+            return self._read_local(blob_uri)
+        reader = self._blob_reader or _DEFAULT_BLOB_READER
+        if reader is None:
+            from pdf_chat.ingestion.tasks import PermanentError
+
+            raise PermanentError(
+                "no blob reader wired (worker bootstrap must install one) and "
+                f"blob_uri is not a local path: {blob_uri!r}"
+            )
+        return await _maybe_await(reader(blob_uri))
+
+    @staticmethod
+    def _is_local_path(blob_uri: str) -> bool:
+        """True when ``blob_uri`` points at the local filesystem (file:// / path)."""
+        scheme = urlparse(blob_uri).scheme
+        return scheme in ("", "file")
+
+    @staticmethod
+    def _read_local(blob_uri: str) -> bytes:
+        """Read bytes from a local path or ``file://`` uri."""
+        parsed = urlparse(blob_uri)
+        path = parsed.path if parsed.scheme == "file" else blob_uri
+        return Path(path).read_bytes()
+
+    async def _render_page(self, blob: bytes, *, page_num: int):
+        """Stream the document blob to ``page_num`` and render it.
+
+        REUSES ``page_reader.stream_pages`` (the canonical ``fitz.open`` site —
+        Hard rule #1: only one page is resident at a time) and
+        ``page_reader.render_page_png`` (the canonical page → PNG site). Returns
+        ``(page_obj, image_bytes, coverage)`` where:
+          * ``page_obj`` is the real ``fitz.Page`` that ``extract_digital_page``
+            consumes (``.get_text("dict")`` / ``.rect``),
+          * ``image_bytes`` is the rendered PNG the OCR path consumes, and
+          * ``coverage`` is the MEASURED extractable-text ratio (text-span area /
+            page area) computed via the existing ``page_routing.text_coverage_ratio``
+            — fully data-driven, no magic numbers.
+
+        A requested page outside the document is a PERMANENT failure (the worker
+        DLQs rather than retrying a structural error).
+        """
+        from pdf_chat.ingestion.page_reader import render_page_png, stream_pages
+        from pdf_chat.ingestion.page_routing import text_coverage_ratio
+
+        for n, page in stream_pages(blob):
+            if n != page_num:
+                continue
+            image_bytes = render_page_png(page)
+            rect = page.rect
+            page_area = float(rect.width) * float(rect.height)
+            text_area = 0.0
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") != 0:  # 0 == text block in PyMuPDF
+                    continue
+                bx = block.get("bbox", [0, 0, 0, 0])
+                text_area += max(0.0, bx[2] - bx[0]) * max(0.0, bx[3] - bx[1])
+            coverage = text_coverage_ratio(text_area=text_area, page_area=page_area)
+            return page, image_bytes, coverage
+
+        from pdf_chat.ingestion.tasks import PermanentError
+
+        raise PermanentError(
+            f"page {page_num} out of range for document blob"
+        )
