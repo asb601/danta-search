@@ -218,20 +218,15 @@ def test_chat_route_counts_query_and_observes_latency(monkeypatch):
     client, routes = _client_with_principal("tenant-A")
 
     class _Result:
-        error = None
         answer = "grounded answer"
-        citations = []
-        cached = False
-
-        def chunks_used(self):
-            return 3
+        citations = []  # chunks_used is derived from len(citations) now
 
     import pdf_chat.agent.graph as graph
 
-    async def _fake_run(state, deps):
+    async def _fake_run(query, **kwargs):
         return _Result()
 
-    monkeypatch.setattr(graph, "run_pdf_chat", _fake_run)
+    monkeypatch.setattr(graph, "run_pdf_query", _fake_run)
     monkeypatch.setattr(graph, "build_default_deps", lambda: object())
 
     resp = client.post(
@@ -255,10 +250,10 @@ def test_chat_route_increments_errors_on_runtime_failure(monkeypatch):
 
     import pdf_chat.agent.graph as graph
 
-    async def _boom(state, deps):
+    async def _boom(query, **kwargs):
         raise RuntimeError("runtime exploded")
 
-    monkeypatch.setattr(graph, "run_pdf_chat", _boom)
+    monkeypatch.setattr(graph, "run_pdf_query", _boom)
     monkeypatch.setattr(graph, "build_default_deps", lambda: object())
 
     resp = client.post(

@@ -213,8 +213,7 @@ async def chat(body: ChatRequest, principal: Principal = Depends(get_principal))
     orchestration; real adapters are wired lazily via ``build_default_deps`` so
     this route imports without infra.
     """
-    from pdf_chat.agent.graph import build_default_deps, run_pdf_chat
-    from pdf_chat.agent.state import PdfChatState
+    from pdf_chat.agent.graph import build_default_deps, run_pdf_query
 
     trusted_tenant = _enforce_tenant(principal, body.tenant_id)
 
@@ -226,29 +225,27 @@ async def chat(body: ChatRequest, principal: Principal = Depends(get_principal))
     _pdf_metrics.inc(trusted_tenant, "pdf_query_total")
     _start = _time.perf_counter()
     try:
-        state = PdfChatState(
-            query=body.query,
+        result = await run_pdf_query(
+            body.query,
             tenant_id=trusted_tenant,
+            container_id=(body.container_id or trusted_tenant),
             user_id=principal.user_id,
             groups=principal.groups,
             doc_ids=body.doc_ids,
-            top_k=body.top_k,
+            deps=build_default_deps(),
         )
-        deps = build_default_deps()
-        result = await run_pdf_chat(state, deps)
-        if result.error:
-            _pdf_metrics.inc(trusted_tenant, "pdf_query_errors")
-            trace.set_stage("error", {"detail": result.error})
-            raise HTTPException(status_code=500, detail=result.error)
         trace.set_stage(
             "answer",
-            {"chunks_used": result.chunks_used(), "cached": result.cached},
+            {"chunks_used": len(result.citations), "cached": False},
         )
         return ChatResponse(
             answer=result.answer,
-            citations=[Citation(**c) for c in result.citations],
-            chunks_used=result.chunks_used(),
-            cached=result.cached,
+            citations=[
+                Citation(n=c["n"], doc_id=c["doc_id"], page=c["page"])
+                for c in result.citations
+            ],
+            chunks_used=len(result.citations),
+            cached=False,
         )
     except HTTPException:
         raise

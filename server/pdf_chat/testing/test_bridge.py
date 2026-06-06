@@ -371,12 +371,21 @@ async def test_exit_pdf_joins_vendor_csv_value_evidenced():
     assert refused_answer is None
     assert len(agent_calls) == 1  # no extra agent call for the refused entity
 
-    # 3) The CSV-side (server/app) was NOT modified by this phase.
+    # 3) The CSV-side (server/app) business logic was NOT modified. The product
+    # integration (branch pdf-product-integration) is permitted exactly ONE
+    # additive touch in server/app: mounting the PDF routers + runtime migrations
+    # in server/app/main.py. Any OTHER changed file under server/app would mean
+    # the bridge/PDF work bled into the CSV pipeline — that is what this guards.
     porcelain = subprocess.run(
         ["git", "status", "--porcelain", "server/app"],
         capture_output=True, text=True, cwd=_repo_root(),
     )
-    assert porcelain.stdout.strip() == "", f"server/app changed: {porcelain.stdout!r}"
+    changed = [
+        line[3:].strip()
+        for line in porcelain.stdout.splitlines()
+        if line.strip() and line[3:].strip() != "server/app/main.py"
+    ]
+    assert changed == [], f"server/app changed beyond the sanctioned main.py mount: {changed!r}"
 
 
 def _repo_root() -> str:

@@ -14,7 +14,7 @@ from sqlalchemy import text
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.core.config import get_settings
-from app.core.database import engine, Base
+from app.core.database import engine, Base, async_session
 from app.core.logger import upload_logger, folder_logger, container_logger, auth_logger, chat_logger
 from app.services.audit_log import record_request_audit
 from app.core import metrics as _metrics
@@ -45,6 +45,7 @@ import app.models.server_log  # ensure ServerLog table is created
 import app.models.dashboard  # ensure Dashboard + DashboardFolder tables are created
 import app.models.erp_classification  # ensure ErpClassification table is created
 import app.models.semantic_contract  # ensure SemanticContract table is created
+import pdf_chat.models  # register pdf_chat ORM tables on the shared Base
 
 
 async def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
@@ -211,6 +212,38 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("ingestion_trust_migration_failed", error=str(exc)[:300])
 
+    # PDF chat module — additive runtime migrations (per-migration guard: one
+    # failure must not block the others; same convention as org_rbac above).
+    from pdf_chat.migrations.tunables_upgrade import (
+        run_migration as _pdf_tunables_migration,
+        install_db_lookup as _pdf_install_db_lookup,
+    )
+    from pdf_chat.migrations.bridge_upgrade import run_migration as _pdf_bridge_migration
+    from pdf_chat.migrations.comprehension_upgrade import (
+        apply_comprehension_migration as _pdf_comprehension_migration,
+    )
+    from pdf_chat.migrations.control_plane_upgrade import (
+        run_migration as _pdf_control_plane_migration,
+    )
+
+    try:
+        await _pdf_tunables_migration(engine)
+        _pdf_install_db_lookup(async_session)
+    except Exception as exc:
+        chat_logger.warning("pdf_tunables_migration_failed", error=str(exc)[:300])
+    try:
+        await _pdf_bridge_migration(engine)
+    except Exception as exc:
+        chat_logger.warning("pdf_bridge_migration_failed", error=str(exc)[:300])
+    try:
+        await _pdf_comprehension_migration(engine)
+    except Exception as exc:
+        chat_logger.warning("pdf_comprehension_migration_failed", error=str(exc)[:300])
+    try:
+        await _pdf_control_plane_migration(engine)
+    except Exception as exc:
+        chat_logger.warning("pdf_control_plane_migration_failed", error=str(exc)[:300])
+
     # Pre-warm DataFusion  session pool — pays UDF-registration cost once at startup
     # so the first   N concurrent queries borrow a ready context without overhead.
     try:
@@ -299,6 +332,19 @@ app.include_router(access_router, prefix="/api")
 app.include_router(organizations_router, prefix="/api")
 app.include_router(dashboards_router, prefix="/api")
 app.include_router(onboarding_router, prefix="/api")
+
+# PDF chat module routers (self-prefixed: pdf_router=/api/pdf,
+# pdf_onboarding_router=/api/pdf/onboarding). Aliased to avoid the name
+# collision with the app's org onboarding_router above. Both routers derive the
+# principal from pdf_chat.api.routes._resolve_current_user; binding it once to
+# the app's get_current_user authenticates BOTH (onboarding reuses the same seam).
+from pdf_chat.api.routes import pdf_router, _resolve_current_user as _pdf_resolve_user
+from pdf_chat.api.onboarding import onboarding_router as pdf_onboarding_router
+from app.dependencies import get_current_user as _app_get_current_user
+
+app.dependency_overrides[_pdf_resolve_user] = _app_get_current_user
+app.include_router(pdf_router)            # already prefixed with /api/pdf
+app.include_router(pdf_onboarding_router) # already prefixed with /api/pdf/onboarding
 
 
 @app.get("/api/health")

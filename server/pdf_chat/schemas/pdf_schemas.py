@@ -73,7 +73,14 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(..., min_length=1, description="Natural-language question.")
-    tenant_id: str = Field(..., description="Tenant isolation key (also enforced from JWT).")
+    tenant_id: str | None = Field(
+        default=None,
+        description="Tenant isolation key (optional; the route derives the trusted tenant from the JWT principal when omitted).",
+    )
+    container_id: str | None = Field(
+        default=None,
+        description="Optional container scope; defaults to the trusted tenant when omitted.",
+    )
     doc_ids: list[str] | None = Field(
         default=None, description="Restrict retrieval to these document ids (None = all)."
     )
