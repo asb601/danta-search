@@ -334,6 +334,16 @@ async def build_relationship_map(
                 or getattr(r, "shared_column", None),
                 "confidence": conf,
                 "join_type": getattr(r, "join_type", None),
+                # P0b: forward (do NOT consume) the fan-out/cardinality provenance the
+                # Phase-2 join gate needs. Missing fields stay None — never coerce a
+                # missing signal to a "safe to join" default; the gate fails closed.
+                # edge_provenance is forwarded opaquely (its sub-keys are the gate's
+                # concern, not the catalog loader's).
+                "value_overlap_pct": getattr(r, "value_overlap_pct", None),
+                "evidence_count": getattr(r, "evidence_count", None),
+                "edge_provenance": getattr(r, "edge_provenance", None),
+                "role_source": getattr(r, "role_source", None),
+                "semantic_role": getattr(r, "semantic_role", None),
             }
         )
     return out

@@ -62,6 +62,10 @@ class WidgetIntent:
     nl_query: str
     requested_viz: str | None = None   # e.g. "pie_chart" if user named one
     hints: dict = field(default_factory=dict)
+    # P0: the planner's validated spec ({"schema_version", "planned": {...}}),
+    # carried so the route can pin a planned+bound contract into the persisted
+    # config. None on the decompose_prompt fallback path (no lattice available).
+    spec: dict | None = None
 
 
 @dataclass

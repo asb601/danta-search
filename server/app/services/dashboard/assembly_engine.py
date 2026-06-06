@@ -119,7 +119,10 @@ def assemble(
         )
 
     return {
-        "version": "1.1",
+        # 1.2 = spec-pin era (config.widgets[].provenance.spec present). Inert
+        # metadata only — no reader branches on version; legacy 1.1 configs (no
+        # spec) render unchanged.
+        "version": "1.2",
         "title": title,
         "description": description or "",
         "generated_at": generated_at,

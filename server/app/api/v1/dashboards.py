@@ -30,7 +30,7 @@ from app.schemas.dashboard import (
 )
 from app.services.dashboard import assembly_engine, board_planner, data_catalog, query_engine
 from app.services.dashboard.component_catalog import catalog_as_metadata
-from app.services.dashboard.recommendation_engine import recommend
+from app.services.dashboard.recommendation_engine import build_pinned_spec, recommend
 
 router = APIRouter()
 
@@ -434,6 +434,10 @@ async def generate_dashboard(
         if not rows:
             empty_titles.append(intent.title)
         widget = recommend(shape, intent, rows, provenance=provenance)
+        # P0: pin the validated planned+bound spec into the widget's provenance so
+        # every later phase has a stable, inspectable, re-runnable contract. This
+        # only adds provenance.spec — render output is unchanged.
+        widget.provenance["spec"] = build_pinned_spec(intent, widget, shape)
         widget_ids.append(widget.widget_id)
         resolved.append(widget)
 

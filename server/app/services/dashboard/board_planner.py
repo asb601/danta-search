@@ -453,11 +453,26 @@ def specs_to_intents(specs: list[WidgetSpec], catalog: list) -> list[WidgetInten
         if win and win_phrase and not (str(win[0]) in nl or str(win[1]) in nl):
             nl = nl.rstrip(".") + f". Restrict to the period between {win[0]} and {win[1]}."
 
+        # P0: pin the planner's validated lattice as the "planned" half of the
+        # spec contract. nl_query is the exact re-run handle that goes to the agent.
+        planned = {
+            "question_type": s.question_type,
+            "table": s.table,
+            "measure": s.measure,
+            "dimension": s.dimension,
+            "dimension2": s.dimension2,
+            "comparison": s.comparison,
+            "viz": s.viz,
+            "chart_rationale": s.chart_rationale,
+            "nl_query": nl,
+        }
+
         intents.append(WidgetIntent(
             title=s.title,
             nl_query=nl,
             requested_viz=viz,
             hints=hints,
+            spec={"schema_version": 1, "planned": planned},
         ))
     return intents
 

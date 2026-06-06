@@ -163,6 +163,38 @@ def _empty_widget(intent: WidgetIntent, provenance: dict) -> ResolvedWidget:
     )
 
 
+def build_pinned_spec(intent: WidgetIntent, widget: ResolvedWidget, shape: DatasetShape) -> dict:
+    """
+    P0: build the planned+bound contract pinned into the persisted config.
+
+    `planned` = the planner's lattice (what was ASKED; None on the fallback path).
+    `bound`   = what the recommender actually bound/rendered.
+
+    Faithfulness rules (data-science gate):
+    - aggregation is recorded as `aggregation_inferred` — it is profiled from the
+      result shape, NOT the aggregate the agent's SQL actually applied. Never label
+      it as executed.
+    - No `sql` field: run_agent_query does not surface executed SQL, so a re-derived
+      query would be an unfaithful claim. The honest re-run handle (nl_query,
+      files_used, route, row_count) lives in the parent provenance dict.
+    """
+    planned = (intent.spec or {}).get("planned")
+    bound = {
+        "component_id": widget.component_id,
+        "component_type": widget.component_type,
+        "config": widget.config,
+        "aggregation_inferred": getattr(shape, "aggregation", None),
+        "score": widget.score,
+        "rationale": widget.rationale,
+    }
+    return {
+        "schema_version": 1,
+        "planned": planned,
+        "bound": bound,
+        "empty": not widget.dataset,
+    }
+
+
 def recommend(
     shape: DatasetShape,
     intent: WidgetIntent,
