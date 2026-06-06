@@ -1,15 +1,22 @@
 "use client";
 
-import { Send, RefreshCw, X, PanelLeft, Sparkles } from "lucide-react";
-import { useState as useInputFocusState } from "react";
+import { RefreshCw, PanelLeft, Sparkles, FileText } from "lucide-react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useChat } from "./_hooks/useChat";
+import { usePdfChat } from "./_hooks/usePdfChat";
 import { AssistantMessage } from "./_components/AssistantMessage";
+import { PdfMessage } from "./_components/PdfMessage";
 import { ConversationSidebar } from "./_components/ConversationSidebar";
 import { ContainerPicker } from "./_components/ContainerPicker";
+import { ModeSwitcher } from "./_components/ModeSwitcher";
+import { PdfDocumentPicker } from "./_components/PdfDocumentPicker";
+import { Composer } from "./_components/Composer";
+import type { ChatMode } from "./_components/types.pdf";
 
 const PROMPTS = ["Summarise sales last month", "Show top 10 customers", "Compare Q1 vs Q2"];
+const PDF_PROMPTS = ["Summarise this document", "What are the key terms?", "List the main findings"];
 
 const msgVariants = {
   hidden: { opacity: 0, y: 14, scale: 0.98 },
@@ -17,7 +24,22 @@ const msgVariants = {
 };
 
 export default function ChatPage() {
-  const [inputFocused, setInputFocused] = useInputFocusState(false);
+  // ── Mode (default "excel"; persisted; never restore the disabled "combined") ──
+  const [mode, setMode] = useState<ChatMode>(() => {
+    if (typeof window === "undefined") return "excel";
+    return localStorage.getItem("gchat_mode") === "pdf" ? "pdf" : "excel";
+  });
+  useEffect(() => {
+    if (mode === "combined") return; // never persist the disabled mode
+    localStorage.setItem("gchat_mode", mode);
+  }, [mode]);
+  // Guard: "combined" is dummy/disabled — never let it become the active driver.
+  const handleModeChange = (m: ChatMode) => {
+    if (m === "combined") return;
+    setMode(m);
+  };
+
+  // ── The Excel hook is UNCHANGED and remains the default driver. ──
   const {
     messages, input, setInput, isLoading, expandedMsgId, setExpandedMsgId,
     scrollRef, handleSubmit, handleStop, handleKeyDown,
@@ -27,10 +49,31 @@ export default function ChatPage() {
     selectedContainerId, setSelectedContainerId,
   } = useChat();
 
+  // ── The PDF hook owns its own ephemeral state (never touches conversations). ──
+  const {
+    input: pdfInput, setInput: setPdfInput, isLoading: pdfLoading,
+    scrollRef: pdfScrollRef, handleSubmit: pdfSubmit, handleStop: pdfStop,
+    handleKeyDown: pdfKeyDown, messages: pdfMessages,
+    documents: pdfDocuments, docsLoading: pdfDocsLoading, docsError: pdfDocsError,
+    loadDocuments: pdfLoadDocuments, selectedDocIds: pdfSelectedDocIds,
+    selectAllDocuments: pdfSelectAll, toggleDocument: pdfToggleDocument,
+    upload: pdfUpload, uploadPdf: pdfUploadPdf, clearUpload: pdfClearUpload,
+  } = usePdfChat({ mode });
+
+  const isPdf = mode === "pdf";
+
+  // Active composer driver (the page picks by mode). Combined never reaches send.
+  const composerInput = isPdf ? pdfInput : input;
+  const composerSetInput = isPdf ? setPdfInput : setInput;
+  const composerLoading = isPdf ? pdfLoading : isLoading;
+  const composerSubmit = isPdf ? pdfSubmit : handleSubmit;
+  const composerStop = isPdf ? pdfStop : handleStop;
+  const composerKeyDown = isPdf ? pdfKeyDown : handleKeyDown;
+
   return (
     <div className="flex h-full bg-white overflow-hidden">
 
-      {/* ── Conversation sidebar (desktop: inline panel; mobile: drawer) ── */}
+      {/* ── Conversation sidebar (Excel-bound; PDF turns are NOT persisted) ── */}
       <ConversationSidebar
         conversations={conversations}
         activeId={activeConvId}
@@ -47,7 +90,7 @@ export default function ChatPage() {
       {/* ── Main chat column ─────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 w-full overflow-hidden">
 
-        {/* ── Top bar: container picker + mobile sidebar toggle ──────── */}
+        {/* ── Top bar: mobile sidebar toggle (scope controls moved into composer) ── */}
         <div className="app-topbar px-3 sm:px-4">
           <div className="flex items-center gap-2 min-w-0">
             <AnimatePresence>
@@ -59,218 +102,311 @@ export default function ChatPage() {
                   transition={{ duration: 0.18 }}
                   onClick={() => setSidebarOpen(true)}
                   className="sm:hidden btn-ghost p-1.5 rounded-lg shrink-0"
+                  aria-label="Open conversations"
                 >
                   <PanelLeft className="w-4 h-4" />
                 </motion.button>
               )}
             </AnimatePresence>
-            <ContainerPicker value={selectedContainerId} onChange={setSelectedContainerId} />
+            <span className="text-[13px] font-semibold text-[#0a0a0a] truncate">
+              {isPdf ? "PDF chat" : "Excel chat"}
+            </span>
           </div>
         </div>
 
-        {/* ── Messages area ─────────────────────────────────────────── */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto">
-          {loadingConv ? (
-            <div className="flex items-center justify-center h-full">
+        {/* ── Messages area (branches by mode) ───────────────────────── */}
+        {isPdf ? (
+          // ─── PDF thread (ephemeral) ───
+          <div ref={pdfScrollRef} className="flex-1 overflow-y-auto">
+            {pdfMessages.length === 0 ? (
               <motion.div
-                animate={{ rotate: 360 }}
-                transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-              >
-                <RefreshCw className="w-5 h-5 text-[#a3a3a3]" />
-              </motion.div>
-            </div>
-          ) : messages.length === 0 ? (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.5, ease: "easeOut" }}
-              className="flex flex-col items-center justify-center h-full px-4 text-center"
-            >
-              {/* Avatar with pulse ring */}
-              <div className="relative mb-6">
-                <motion.div
-                  animate={{ scale: [1, 1.12, 1], opacity: [0.15, 0.3, 0.15] }}
-                  transition={{ repeat: Infinity, duration: 2.8, ease: "easeInOut" }}
-                  className="absolute inset-0 rounded-2xl bg-[#0a0a0a]"
-                  style={{ margin: "-6px" }}
-                />
-                <div className="bubble-avatar w-12 h-12 rounded-2xl relative z-10">
-                  <Sparkles className="w-5 h-5 text-[#0a0a0a]" />
-                </div>
-              </div>
-
-              <motion.h2
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.1, duration: 0.4 }}
-                className="text-[20px] font-bold text-[#0a0a0a] mb-2"
+                transition={{ duration: 0.5, ease: "easeOut" }}
+                className="flex flex-col items-center justify-center h-full px-4 text-center"
               >
-                Start a conversation
-              </motion.h2>
-              <motion.p
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.17, duration: 0.4 }}
-                className="text-[13.5px] text-[#737373] max-w-xs leading-relaxed mb-7"
-              >
-                Ask anything about your data. The AI will search, query, and analyse it for you.
-              </motion.p>
-
-              {/* Prompt chips */}
-              <div className="flex gap-2 flex-wrap justify-center">
-                {PROMPTS.map((s, i) => (
-                  <motion.button
-                    key={s}
-                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    transition={{ delay: 0.24 + i * 0.08, duration: 0.32, ease: "easeOut" }}
-                    whileHover={{ scale: 1.03, y: -1 }}
-                    whileTap={{ scale: 0.97 }}
-                    onClick={() => setInput(s)}
-                    className="btn-outline px-3.5 py-2 rounded-xl text-[12.5px]"
-                  >
-                    {s}
-                  </motion.button>
-                ))}
-              </div>
-            </motion.div>
-          ) : (
-            <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 sm:space-y-5">
-              <AnimatePresence initial={false}>
-                {messages.map((msg) => (
+                <div className="relative mb-6">
                   <motion.div
-                    key={msg.id}
-                    variants={msgVariants}
-                    initial="hidden"
-                    animate="show"
-                    className={cn("flex gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
-                  >
-                    {msg.role === "user" ? (
-                      <motion.div
-                        whileHover={{ scale: 1.005 }}
-                        className="bubble-user"
-                      >
-                        {msg.content}
-                      </motion.div>
-                    ) : (
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start gap-2.5">
-                          <motion.div
-                            initial={{ scale: 0.7, opacity: 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            transition={{ delay: 0.05, duration: 0.22, ease: "easeOut" }}
-                            className="bubble-avatar mt-0.5 shrink-0"
-                          >
-                            <Sparkles className="w-3 h-3 text-[#0a0a0a]" />
-                          </motion.div>
-                          <motion.div
-                            initial={{ opacity: 0, x: -6 }}
-                            animate={{ opacity: 1, x: 0 }}
-                            transition={{ delay: 0.08, duration: 0.24 }}
-                            className="flex-1 min-w-0"
-                          >
-                            <AssistantMessage
-                              msg={msg}
-                              isExpanded={expandedMsgId === msg.id}
-                              onToggle={() => setExpandedMsgId((p) => p === msg.id ? null : msg.id)}
-                            />
-                          </motion.div>
-                        </div>
-                      </div>
-                    )}
-                  </motion.div>
-                ))}
-              </AnimatePresence>
-
-              {/* Typing indicator */}
-              {isLoading && (
-                <motion.div
+                    animate={{ scale: [1, 1.12, 1], opacity: [0.15, 0.3, 0.15] }}
+                    transition={{ repeat: Infinity, duration: 2.8, ease: "easeInOut" }}
+                    className="absolute inset-0 rounded-2xl bg-[#0a0a0a]"
+                    style={{ margin: "-6px" }}
+                  />
+                  <div className="bubble-avatar w-12 h-12 rounded-2xl relative z-10">
+                    <FileText className="w-5 h-5 text-[#0a0a0a]" />
+                  </div>
+                </div>
+                <motion.h2
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.1, duration: 0.4 }}
+                  className="text-[20px] font-bold text-[#0a0a0a] mb-2"
+                >
+                  Chat with your documents
+                </motion.h2>
+                <motion.p
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 4 }}
-                  transition={{ duration: 0.22 }}
-                  className="flex items-start gap-2.5"
+                  transition={{ delay: 0.17, duration: 0.4 }}
+                  className="text-[13.5px] text-[#737373] max-w-xs leading-relaxed mb-7"
                 >
-                  <div className="bubble-avatar shrink-0">
-                    <Sparkles className="w-3 h-3 text-[#0a0a0a]" />
-                  </div>
-                  <div className="bubble-assistant inline-flex">
-                    <div className="flex gap-1.5 items-center py-0.5">
-                      <span className="typing-dot" />
-                      <span className="typing-dot" />
-                      <span className="typing-dot" />
-                    </div>
-                  </div>
-                </motion.div>
-              )}
-            </div>
-          )}
-        </div>
+                  Ask questions across your uploaded PDFs. Answers cite the exact document and page.
+                </motion.p>
+                <div className="flex gap-2 flex-wrap justify-center">
+                  {PDF_PROMPTS.map((s, i) => (
+                    <motion.button
+                      key={s}
+                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      transition={{ delay: 0.24 + i * 0.08, duration: 0.32, ease: "easeOut" }}
+                      whileHover={{ scale: 1.03, y: -1 }}
+                      whileTap={{ scale: 0.97 }}
+                      onClick={() => setPdfInput(s)}
+                      className="btn-outline px-3.5 py-2 rounded-xl text-[12.5px]"
+                    >
+                      {s}
+                    </motion.button>
+                  ))}
+                </div>
+              </motion.div>
+            ) : (
+              <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 sm:space-y-5">
+                <p className="pdf-ephemeral-hint !mt-0 !mb-2">
+                  PDF answers aren’t saved to your conversation history.
+                </p>
+                <AnimatePresence initial={false}>
+                  {pdfMessages.map((msg) => (
+                    <motion.div
+                      key={msg.id}
+                      variants={msgVariants}
+                      initial="hidden"
+                      animate="show"
+                      className={cn("flex gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
+                    >
+                      {msg.role === "user" ? (
+                        <div className="bubble-user">{msg.content}</div>
+                      ) : (
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-start gap-2.5">
+                            <div className="bubble-avatar mt-0.5 shrink-0">
+                              <FileText className="w-3 h-3 text-[#0a0a0a]" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <PdfMessage msg={msg} />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
 
-        {/* ── Input bar ─────────────────────────────────────────────── */}
-        <div className="border-t border-[#e5e5e5] bg-white px-3 sm:px-4 pt-3 pb-3">
-          <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
-            <div
-              className="flex items-end gap-2 border rounded-2xl px-3 py-2 transition-all duration-150"
-              style={{
-                borderColor: inputFocused ? "var(--border-strong)" : "var(--border)",
-                boxShadow: inputFocused ? "0 0 0 3px rgba(10,10,10,0.06)" : "0 1px 3px rgba(0,0,0,0.06)",
-                backgroundColor: inputFocused ? "var(--bg)" : "var(--surface)",
-              }}
-            >
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                onFocus={() => setInputFocused(true)}
-                onBlur={() => setInputFocused(false)}
-                placeholder="Ask a question about your data…"
-                rows={1}
-                className="flex-1 bg-transparent border-none outline-none resize-none text-[13.5px] text-[#0a0a0a] placeholder:text-[#a3a3a3] leading-relaxed py-1 font-[family-name:var(--font-sans)] max-h-36 overflow-y-auto"
-              />
-              <AnimatePresence mode="wait">
-                {isLoading ? (
-                  <motion.button
-                    key="stop"
-                    initial={{ scale: 0.8, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.8, opacity: 0 }}
-                    transition={{ duration: 0.15 }}
-                    type="button"
-                    onClick={handleStop}
-                    className="shrink-0 w-8 h-8 rounded-xl bg-[#dc2626] flex items-center justify-center text-white hover:opacity-90 transition-opacity"
+                {pdfLoading && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    transition={{ duration: 0.22 }}
+                    className="flex items-start gap-2.5"
                   >
-                    <X className="w-3.5 h-3.5" />
-                  </motion.button>
-                ) : (
-                  <motion.button
-                    key="send"
-                    initial={{ scale: 0.8, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.8, opacity: 0 }}
-                    transition={{ duration: 0.15 }}
-                    type="submit"
-                    disabled={!input.trim()}
-                    whileHover={input.trim() ? { scale: 1.06 } : {}}
-                    whileTap={input.trim() ? { scale: 0.94 } : {}}
-                    className="shrink-0 w-8 h-8 rounded-xl flex items-center justify-center transition-all duration-150"
-                    style={{
-                      background: input.trim()
-                        ? "linear-gradient(180deg, #1f1f1f 0%, #080808 100%)"
-                        : "#f0f0f0",
-                      boxShadow: input.trim() ? "inset 0 1px 0 rgba(255,255,255,0.12)" : "none",
-                    }}
-                  >
-                    <Send className="w-3.5 h-3.5" style={{ color: input.trim() ? "#ffffff" : "#c4c4c4" }} />
-                  </motion.button>
+                    <div className="bubble-avatar shrink-0">
+                      <FileText className="w-3 h-3 text-[#0a0a0a]" />
+                    </div>
+                    <div className="bubble-assistant inline-flex">
+                      <div className="flex gap-1.5 items-center py-0.5">
+                        <span className="typing-dot" />
+                        <span className="typing-dot" />
+                        <span className="typing-dot" />
+                      </div>
+                    </div>
+                  </motion.div>
                 )}
-              </AnimatePresence>
-            </div>
-          </form>
-          <p className="text-center text-[11px] text-[#c4c4c4] mt-2">
-            AI may make mistakes — verify important information.
-          </p>
-        </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          // ─── Excel thread (UNCHANGED — existing SSE-driven path) ───
+          <div ref={scrollRef} className="flex-1 overflow-y-auto">
+            {loadingConv ? (
+              <div className="flex items-center justify-center h-full">
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                >
+                  <RefreshCw className="w-5 h-5 text-[#a3a3a3]" />
+                </motion.div>
+              </div>
+            ) : messages.length === 0 ? (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5, ease: "easeOut" }}
+                className="flex flex-col items-center justify-center h-full px-4 text-center"
+              >
+                {/* Avatar with pulse ring */}
+                <div className="relative mb-6">
+                  <motion.div
+                    animate={{ scale: [1, 1.12, 1], opacity: [0.15, 0.3, 0.15] }}
+                    transition={{ repeat: Infinity, duration: 2.8, ease: "easeInOut" }}
+                    className="absolute inset-0 rounded-2xl bg-[#0a0a0a]"
+                    style={{ margin: "-6px" }}
+                  />
+                  <div className="bubble-avatar w-12 h-12 rounded-2xl relative z-10">
+                    <Sparkles className="w-5 h-5 text-[#0a0a0a]" />
+                  </div>
+                </div>
+
+                <motion.h2
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.1, duration: 0.4 }}
+                  className="text-[20px] font-bold text-[#0a0a0a] mb-2"
+                >
+                  Start a conversation
+                </motion.h2>
+                <motion.p
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.17, duration: 0.4 }}
+                  className="text-[13.5px] text-[#737373] max-w-xs leading-relaxed mb-7"
+                >
+                  Ask anything about your data. The AI will search, query, and analyse it for you.
+                </motion.p>
+
+                {/* Prompt chips */}
+                <div className="flex gap-2 flex-wrap justify-center">
+                  {PROMPTS.map((s, i) => (
+                    <motion.button
+                      key={s}
+                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      transition={{ delay: 0.24 + i * 0.08, duration: 0.32, ease: "easeOut" }}
+                      whileHover={{ scale: 1.03, y: -1 }}
+                      whileTap={{ scale: 0.97 }}
+                      onClick={() => setInput(s)}
+                      className="btn-outline px-3.5 py-2 rounded-xl text-[12.5px]"
+                    >
+                      {s}
+                    </motion.button>
+                  ))}
+                </div>
+              </motion.div>
+            ) : (
+              <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 sm:space-y-5">
+                <AnimatePresence initial={false}>
+                  {messages.map((msg) => (
+                    <motion.div
+                      key={msg.id}
+                      variants={msgVariants}
+                      initial="hidden"
+                      animate="show"
+                      className={cn("flex gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
+                    >
+                      {msg.role === "user" ? (
+                        <motion.div
+                          whileHover={{ scale: 1.005 }}
+                          className="bubble-user"
+                        >
+                          {msg.content}
+                        </motion.div>
+                      ) : (
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-start gap-2.5">
+                            <motion.div
+                              initial={{ scale: 0.7, opacity: 0 }}
+                              animate={{ scale: 1, opacity: 1 }}
+                              transition={{ delay: 0.05, duration: 0.22, ease: "easeOut" }}
+                              className="bubble-avatar mt-0.5 shrink-0"
+                            >
+                              <Sparkles className="w-3 h-3 text-[#0a0a0a]" />
+                            </motion.div>
+                            <motion.div
+                              initial={{ opacity: 0, x: -6 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              transition={{ delay: 0.08, duration: 0.24 }}
+                              className="flex-1 min-w-0"
+                            >
+                              <AssistantMessage
+                                msg={msg}
+                                isExpanded={expandedMsgId === msg.id}
+                                onToggle={() => setExpandedMsgId((p) => p === msg.id ? null : msg.id)}
+                              />
+                            </motion.div>
+                          </div>
+                        </div>
+                      )}
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+
+                {/* Typing indicator */}
+                {isLoading && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    transition={{ duration: 0.22 }}
+                    className="flex items-start gap-2.5"
+                  >
+                    <div className="bubble-avatar shrink-0">
+                      <Sparkles className="w-3 h-3 text-[#0a0a0a]" />
+                    </div>
+                    <div className="bubble-assistant inline-flex">
+                      <div className="flex gap-1.5 items-center py-0.5">
+                        <span className="typing-dot" />
+                        <span className="typing-dot" />
+                        <span className="typing-dot" />
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Composer (redesigned; mode switcher + mode-aware scope) ───── */}
+        <Composer
+          value={composerInput}
+          onChange={composerSetInput}
+          onSubmit={composerSubmit}
+          onStop={composerStop}
+          onKeyDown={composerKeyDown}
+          isLoading={composerLoading}
+          placeholder={
+            isPdf ? "Ask a question about your documents…" : "Ask a question about your data…"
+          }
+          modeSwitcher={<ModeSwitcher mode={mode} onChange={handleModeChange} />}
+          scopeControl={
+            isPdf ? (
+              <PdfDocumentPicker
+                documents={pdfDocuments}
+                docsLoading={pdfDocsLoading}
+                docsError={pdfDocsError}
+                selectedDocIds={pdfSelectedDocIds}
+                onSelectAll={pdfSelectAll}
+                onToggle={pdfToggleDocument}
+                onRefresh={pdfLoadDocuments}
+                upload={pdfUpload}
+                onUpload={pdfUploadPdf}
+                onClearUpload={pdfClearUpload}
+              />
+            ) : (
+              <ContainerPicker value={selectedContainerId} onChange={setSelectedContainerId} />
+            )
+          }
+          subHint={
+            isPdf ? (
+              <p className="pdf-ephemeral-hint">
+                PDF answers are session-only and aren’t saved to your conversation history.
+              </p>
+            ) : (
+              <p className="text-center text-[11px] text-[#c4c4c4] mt-2">
+                AI may make mistakes — verify important information.
+              </p>
+            )
+          }
+        />
       </div>
     </div>
   );
