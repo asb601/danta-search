@@ -23,6 +23,7 @@ from app.models.file import File
 from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
+from app.services import semantic_roles as _sr
 from app.services.ingestion_config import IngestStatus
 
 # A file is dashboard-ready once ingestion has produced metadata/parquet. The
@@ -46,19 +47,19 @@ def _first_present(*values):
 
 
 def _role_kind(semantic_role: str | None) -> str:
-    """Map a 'custom:kind:label' semantic role string to a coarse kind."""
+    """Map a 'custom:kind:label' semantic role to a coarse dashboard kind via the
+    CANONICAL role taxonomy (exact dispatch through semantic_roles), not by
+    substring-guessing the role string. A malformed/non-canonical role fails safe
+    to 'dimension' (never silently promoted to a summable measure)."""
     if not semantic_role:
         return "unknown"
-    parts = str(semantic_role).split(":")
-    kind = parts[1] if len(parts) >= 2 else parts[0]
-    kind = kind.lower()
-    if any(k in kind for k in ("metric", "measure", "amount", "value", "quantity")):
+    if _sr.is_metric_role(semantic_role):          # additive_measure | non_additive_measure
         return "measure"
-    if any(k in kind for k in ("date", "time", "period", "month", "year")):
+    if _sr.is_date_role(semantic_role):
         return "date"
-    if any(k in kind for k in ("key", "id", "code")):
+    if _sr.is_entity_key_role(semantic_role) or _sr.is_reference_key_role(semantic_role):
         return "key"
-    return "dimension"
+    return "dimension"                              # attribute, or anything unrecognized
 
 
 @dataclass
@@ -347,6 +348,15 @@ async def build_relationship_map(
             }
         )
     return out
+
+
+def role_map_for_table(table: "DataCatalogTable | None") -> dict:
+    """{column_name -> semantic_role} for a catalog table, used to drive the
+    recommender's data-driven format/binding. Columns without a role are dropped
+    (so a missing role fails closed to name-based formatting downstream)."""
+    if table is None:
+        return {}
+    return {c.name: c.semantic_role for c in getattr(table, "columns", []) if c.semantic_role}
 
 
 def _render_join_section(tables: list[DataCatalogTable], relationships: list[dict]) -> str:

@@ -19,6 +19,10 @@ from app.services.dashboard.component_catalog import (
     list_components,
 )
 from app.services.dashboard.query_engine import DatasetShape, WidgetIntent
+from app.services.semantic_roles import (
+    is_additive_measure_role,
+    is_non_additive_measure_role,
+)
 
 
 @dataclass
@@ -99,52 +103,149 @@ def score_component(comp: ComponentDefinition, shape: DatasetShape, intent: Widg
     return score
 
 
-def _format_for_role(name: str, shape: DatasetShape) -> str:
-    low = name.lower()
-    if any(k in low for k in ("amount", "revenue", "cost", "price", "value", "sales", "spend")):
-        return "currency"
-    if any(k in low for k in ("pct", "percent", "rate", "ratio", "share")):
-        return "percent"
-    return "number"
+# Currency-UNIT hint, applied ONLY inside a role-proven additive measure (never as
+# a classifier). This is the bounded, TL+user-sanctioned P1 remnant — kept so the
+# demo's revenue/cost KPIs render `$` without a real currency signal at ingestion.
+_MONEY_HINTS = ("amount", "revenue", "cost", "price", "value", "sales", "spend")
 
 
-def _bind_config(comp: ComponentDefinition, shape: DatasetShape) -> dict:
-    """Bind dataset columns to the component's config schema."""
+def _looks_money(name: str) -> bool:
+    low = (name or "").lower()
+    return any(k in low for k in _MONEY_HINTS)
+
+
+def _format_for_role(name: str, shape: DatasetShape, role: str | None = None) -> str:
+    """Display format for a bound MEASURE.
+
+    The semantic ROLE is the classifier (data-driven): a non-additive measure
+    (ratio/rate/balance) is NEVER currency; the column name is only a currency-unit
+    hint INSIDE a role-proven additive measure. `percent` is NEVER emitted — the
+    renderer appends `%` without scaling, so a ratio's correct display depends on an
+    unknown ×100 contract (0.23 -> "0.2%" vs 23.0 -> "23%"); ratios render as plain
+    numbers instead. Fail-closed: with no role, fall back to the name hint (currency
+    or number), still never percent.
+    """
+    if role is not None:
+        if is_non_additive_measure_role(role):
+            return "number"
+        if is_additive_measure_role(role):
+            return "currency" if _looks_money(name) else "number"
+        return "auto"  # keys / dates / attributes are not summable measures
+    return "currency" if _looks_money(name) else "number"
+
+
+def _norm(value) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _resolve_named(name, candidates) -> tuple:
+    """Reconcile a planner-named column to an actual (often SQL-aliased) result
+    column. Returns (resolved_name, match_kind) or (None, None). Never guesses on
+    ambiguity — two containment matches => no match."""
+    if not name or not candidates:
+        return None, None
+    if name in candidates:
+        return name, "exact"
+    nm = _norm(name)
+    by_norm = {_norm(c): c for c in candidates}
+    if nm in by_norm:
+        return by_norm[nm], "normalized"
+    contained = [c for c in candidates if nm and (nm in _norm(c) or _norm(c) in nm)]
+    if len(contained) == 1:
+        return contained[0], "contains"
+    return None, None
+
+
+def _resolve_measure(planned, shape: DatasetShape, role_map, intent, warnings):
+    """Bind the planner-NAMED measure to a result column; fail-closed to positional
+    WITH a warning when the named measure is absent. Returns (measure, role)."""
+    measures = shape.measures
+    requested = (planned or {}).get("measure")
+    if not requested:
+        m = measures[0] if measures else None
+        return m, (role_map.get(m) if (role_map and m) else None)
+    bound, _match = _resolve_named(requested, measures)
+    if bound is None and len(measures) == 1:
+        bound = measures[0]
+    if bound is None:
+        bound = measures[0] if measures else None
+        if warnings is not None and bound is not None:
+            warnings.append(
+                f"Widget '{intent.title}': planned measure '{requested}' not found in "
+                f"results; showing '{bound}' instead."
+            )
+    role = None
+    if role_map:
+        # `requested` is the planner's CATALOG column name and role_map is catalog-
+        # keyed, so it is authoritative. `bound` (a possibly SQL-aliased result name)
+        # is only a fallback for the no-planned-measure path.
+        role = role_map.get(requested) or (role_map.get(bound) if bound else None)
+    return bound, role
+
+
+def _resolve_dimension(planned, shape: DatasetShape):
+    """Bind the planner-NAMED dimension to a result column; else positional."""
+    requested = (planned or {}).get("dimension")
+    dims = shape.dimensions
+    if requested:
+        bound, _ = _resolve_named(requested, dims)
+        if bound:
+            return bound
+    return dims[0] if dims else None
+
+
+def _bind_config(
+    comp: ComponentDefinition,
+    shape: DatasetShape,
+    *,
+    measure: str | None = None,
+    dim: str | None = None,
+    measure_role: str | None = None,
+) -> dict:
+    """Bind dataset columns to the component's config schema.
+
+    `measure`/`dim` are the planner-RECONCILED bindings (P1); when None we fall
+    back to positional first-column (today's behavior). `measure_role` drives the
+    data-driven number format.
+    """
     ct = comp.component_type
-    measure = shape.measures[0] if shape.measures else None
-    dim = shape.dimensions[0] if shape.dimensions else None
+    measure = measure if measure is not None else (shape.measures[0] if shape.measures else None)
+    dim = dim if dim is not None else (shape.dimensions[0] if shape.dimensions else None)
     temporal = shape.temporal[0] if shape.temporal else None
+    fmt = _format_for_role(measure or "", shape, measure_role)
 
     if ct in (ComponentType.KPI_CARD, ComponentType.METRIC_TILE):
         return {
             "value": measure,
             "label": comp.name if not measure else measure,
-            "format": _format_for_role(measure or "", shape),
+            "format": fmt,
         }
     if ct in (ComponentType.LINE_CHART, ComponentType.AREA_CHART):
         x = temporal or dim
         series = shape.dimensions[0] if (temporal and shape.dimensions) else None
+        # Keep the planner-named measure first in a multi-measure trend, capped at 3.
+        ys = ([measure] + [m for m in shape.measures[:3] if m != measure])[:3] if measure else shape.measures[:3]
         return {
             "x": x,
-            "y": shape.measures[:3] or [measure],
+            "y": ys or [measure],
             "series": series,
-            "format": _format_for_role(measure or "", shape),
+            "format": fmt,
         }
     if ct == ComponentType.BAR_CHART:
         return {
             "x": dim or temporal,
             "y": measure,
             "orientation": "vertical",
-            "format": _format_for_role(measure or "", shape),
+            "format": fmt,
         }
     if ct == ComponentType.PIE_CHART:
-        return {"label": dim, "value": measure, "format": _format_for_role(measure or "", shape)}
+        return {"label": dim, "value": measure, "format": fmt}
     if ct == ComponentType.HEATMAP:
-        x = shape.dimensions[0] if len(shape.dimensions) >= 1 else temporal
+        x = dim or (shape.dimensions[0] if len(shape.dimensions) >= 1 else temporal)
         y = shape.dimensions[1] if len(shape.dimensions) >= 2 else (temporal or dim)
-        return {"x": x, "y": y, "value": measure, "format": _format_for_role(measure or "", shape)}
+        return {"x": x, "y": y, "value": measure, "format": fmt}
     if ct == ComponentType.FUNNEL:
-        return {"stage": dim, "value": measure, "format": _format_for_role(measure or "", shape)}
+        return {"stage": dim, "value": measure, "format": fmt}
     # TABLE — show everything, with type-aware formatting handled by the renderer.
     return {"columns": [c.name for c in shape.columns]}
 
@@ -201,12 +302,24 @@ def recommend(
     dataset: list,
     *,
     provenance: dict | None = None,
+    role_map: dict | None = None,
+    warnings: list | None = None,
 ) -> ResolvedWidget:
-    """Pick the best component for a dataset and bind its config."""
+    """Pick the best component for a dataset and bind its config.
+
+    P1: bind the planner-NAMED measure/dimension (intent.spec.planned) reconciled
+    to the result columns, and drive number format from the column's semantic role
+    (role_map: {catalog_column -> semantic_role}). Fail-closed to positional binding
+    + a surfaced warning when a named column is absent — never a silent wrong column.
+    """
     provenance = provenance or {}
 
     if not dataset or shape.row_count == 0:
         return _empty_widget(intent, provenance)
+
+    planned = (intent.spec or {}).get("planned") if intent.spec else None
+    measure, measure_role = _resolve_measure(planned, shape, role_map, intent, warnings)
+    dim = _resolve_dimension(planned, shape)
 
     # STEP 1 — explicit user request wins if it can bind the dataset.
     if intent.requested_viz:
@@ -219,7 +332,7 @@ def recommend(
                     component_type=comp.component_type.value,
                     title=intent.title,
                     dataset=dataset,
-                    config=_bind_config(comp, shape),
+                    config=_bind_config(comp, shape, measure=measure, dim=dim, measure_role=measure_role),
                     score=99.0,
                     rationale=f"Used the explicitly requested {comp.name}.",
                     provenance=provenance,
@@ -251,7 +364,7 @@ def recommend(
         component_type=best.component_type.value,
         title=intent.title,
         dataset=dataset,
-        config=_bind_config(best, shape),
+        config=_bind_config(best, shape, measure=measure, dim=dim, measure_role=measure_role),
         score=round(best_score, 3),
         rationale=rationale,
         provenance=provenance,

@@ -433,7 +433,15 @@ async def generate_dashboard(
             source_file_ids.add(str(f))
         if not rows:
             empty_titles.append(intent.title)
-        widget = recommend(shape, intent, rows, provenance=provenance)
+        # P1: role map {catalog_column -> semantic_role} for the widget's source
+        # table, so the recommender formats/binds from ingestion semantics (not the
+        # column name). Empty when the table can't be resolved -> fail-closed.
+        src_table = ((intent.spec or {}).get("planned") or {}).get("table") or intent.hints.get("table")
+        tbl = next((t for t in catalog if t.table_name == src_table), None) if src_table else None
+        role_map: dict = data_catalog.role_map_for_table(tbl)
+        widget = recommend(
+            shape, intent, rows, provenance=provenance, role_map=role_map, warnings=warnings
+        )
         # P0: pin the validated planned+bound spec into the widget's provenance so
         # every later phase has a stable, inspectable, re-runnable contract. This
         # only adds provenance.spec — render output is unchanged.
