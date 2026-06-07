@@ -343,6 +343,34 @@ async def run_widget(
                 "row_count": 0, "files_used": [], "error": str(exc)[:200]}
 
 
+async def run_widgets(intents: list, run_one, *, concurrency: int, parallel: bool) -> list:
+    """Fan-out coordinator (P3). Run `run_one(intent)` for every intent and return
+    the results IN INPUT ORDER.
+
+    parallel=True -> bounded `asyncio.gather` under a semaphore of `concurrency`
+    (each `run_one` must supply its own resources, e.g. a fresh DB session, since
+    the request session is not concurrency-safe); else strictly sequential. Only the
+    I/O-bound `run_one` runs concurrently — callers MUST keep every shared-state
+    transform (profiling, recommend, warnings, aggregation) in a SEQUENTIAL pass over
+    the returned list, so output is byte-identical regardless of the flag.
+
+    In parallel mode exceptions are returned IN PLACE (`return_exceptions=True`) so a
+    single failing widget never cancels its siblings; the caller maps them. Sequential
+    mode preserves today's behavior (a raise propagates).
+    """
+    if not intents:
+        return []
+    if not parallel:
+        return [await run_one(intent) for intent in intents]
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _guarded(intent):
+        async with sem:
+            return await run_one(intent)
+
+    return await asyncio.gather(*[_guarded(i) for i in intents], return_exceptions=True)
+
+
 # --------------------------------------------------------------------------
 # 3. Dataset profiling
 # --------------------------------------------------------------------------

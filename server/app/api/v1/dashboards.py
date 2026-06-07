@@ -17,6 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.chat_common import resolve_chat_scope
+from app.core.config import get_settings
+from app.core.database import async_session
 from app.core.logger import chat_logger
 from app.dependencies import get_current_user, get_db
 from app.models.dashboard import Dashboard, DashboardFolder
@@ -409,16 +411,38 @@ async def generate_dashboard(
     if len(intents) >= body.max_widgets:
         warnings.append(f"Widget count capped at {body.max_widgets}.")
 
-    # 3-5. Run each widget through the existing agent (SEQUENTIAL — the async DB
-    #      session is not concurrency-safe), profile, recommend.
+    # 3-5. Run each widget through the existing agent, then profile + recommend.
+    #      P3: agent calls run CONCURRENTLY when DASHBOARD_PARALLEL_WIDGETS is on,
+    #      each on its OWN AsyncSession (the request `db` is NOT concurrency-safe and
+    #      is reserved for the pre-loop reads + final commit). ALL post-processing
+    #      below stays SEQUENTIAL in input order -> output byte-identical to the
+    #      flag-off path (only widget_id/generated_at differ, as they always do).
+    _settings = get_settings()
+
+    async def _run_one(intent):
+        async with async_session() as ws:
+            return await query_engine.run_widget(intent, db=ws, scope=scope, catalog=catalog)
+
+    results = await query_engine.run_widgets(
+        intents,
+        _run_one,
+        concurrency=_settings.DASHBOARD_WIDGET_CONCURRENCY,
+        parallel=_settings.DASHBOARD_PARALLEL_WIDGETS,
+    )
+
     resolved = []
     source_file_ids: set[str] = set()
     widget_ids: list[str] = []
     empty_titles: list[str] = []
-    for intent in intents:
-        result = await query_engine.run_widget(
-            intent, db=db, scope=scope, catalog=catalog
-        )
+    for intent, result in zip(intents, results):
+        if isinstance(result, Exception):
+            # A per-widget task failed (e.g. session acquisition); degrade only this
+            # widget to the same safe-empty shape run_widget returns on error.
+            chat_logger.warning(
+                "dashboard_widget_task_error", title=intent.title, error=str(result)[:200]
+            )
+            result = {"answer": f"Could not generate '{intent.title}'.", "data": [],
+                      "chart": None, "row_count": 0, "files_used": [], "error": str(result)[:200]}
         rows = result.get("data") or []
         shape = query_engine.profile_dataset(rows, result.get("chart"))
         provenance = {

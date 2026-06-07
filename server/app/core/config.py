@@ -90,6 +90,19 @@ class Settings(BaseSettings):
     ORG_AI_KEYS_ENABLED: bool = True
     ONBOARDING_REQUIRED: bool = True
 
+    # DASHBOARD_PARALLEL_WIDGETS — when True, /dashboards/.../generate runs each
+    #   widget's agent call CONCURRENTLY, each on its OWN AsyncSession, bounded by
+    #   DASHBOARD_WIDGET_CONCURRENCY. Default OFF (dark launch): the proven
+    #   sequential path. Only the agent I/O is parallelized — all profiling/
+    #   recommend/assembly stays sequential over input order, so output is
+    #   byte-identical (modulo the always-random widget_id and generated_at).
+    # DASHBOARD_WIDGET_CONCURRENCY — semaphore bound. 3 keeps the Azure OpenAI burst
+    #   (each widget = several LLM calls) under typical TPM, inside the DataFusion
+    #   warm context pool (8) and the DB pool (50/worker). Lower to 2 if 429s appear;
+    #   never raise toward pool_size without resizing the connection pool.
+    DASHBOARD_PARALLEL_WIDGETS: bool = False
+    DASHBOARD_WIDGET_CONCURRENCY: int = 3
+
     # ORG_LIVE_DB_ENABLED — gate for the live read-only org Postgres data source.
     #   Naturally gated: the org_postgres tools only activate when an org actually
     #   has a non-empty postgres_url resolved from OrgAISettings. When True, a
