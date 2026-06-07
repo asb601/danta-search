@@ -52,6 +52,15 @@ class FileMetadata(Base):
     ingestion_confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     ingestion_confidence_signals: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
 
+    # SME Phase-1 trust/quarantine layer — coarse per-file trust state derived
+    # (at ingest completion, flag-gated) from the EXISTING confidence level +
+    # ingestion-audit severity. See services/trust_state.py for the contract.
+    # server_default "trusted" so pre-existing rows and the flag-off path are
+    # byte-identical to today.
+    trust_state: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="trusted"
+    )
+
     # Retrieval-engine columns (PHASE 1)
     search_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_embedding: Mapped[list[float] | None] = mapped_column(

@@ -1067,6 +1067,60 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
                     level=ing_conf.level,
                     signals=ing_conf.signals,
                 )
+
+                # ── SME Phase-1 trust/quarantine: wire the audit → trust_state ──
+                # Flag-gated (SME_MODE_ENABLED AND SME_QUARANTINE_ENABLED). When
+                # off this whole block is skipped, so the runtime is byte-identical
+                # to today (trust_state stays at its 'trusted' server default).
+                # Non-fatal and isolated: a trust failure never undoes the
+                # confidence write above and never fails ingestion.
+                try:
+                    from app.core.config import get_settings as _get_settings  # noqa: PLC0415
+
+                    _s = _get_settings()
+                    if bool(getattr(_s, "SME_MODE_ENABLED", False)) and bool(
+                        getattr(_s, "SME_QUARANTINE_ENABLED", False)
+                    ):
+                        from app.services.ingestion_audit import run_ingestion_audit  # noqa: PLC0415
+                        from app.services.trust_state import derive_trust_state, findings_for_file  # noqa: PLC0415
+
+                        # Audit is container-scoped; runs the existing (currently
+                        # dead) trustworthiness checks against the same session.
+                        # Attribute findings to THIS file only — a container-level
+                        # defect must not quarantine clean files (reviewer 4a).
+                        audit = await run_ingestion_audit(meta.container_id, db)
+                        meta.trust_state = derive_trust_state(
+                            ing_conf.level, findings_for_file(audit.findings, meta.file_id)
+                        )
+                        # Stash a short audit summary in the EXISTING signals JSONB
+                        # (no new audit table — out of scope). Re-assign the dict so
+                        # SQLAlchemy detects the mutation.
+                        _signals = dict(meta.ingestion_confidence_signals or {})
+                        _signals["audit_summary"] = {
+                            "has_errors": audit.has_errors,
+                            "has_warnings": audit.has_warnings,
+                            "finding_count": len(audit.findings),
+                            "error_codes": sorted(
+                                {f.code for f in audit.findings if f.severity == "error"}
+                            ),
+                        }
+                        meta.ingestion_confidence_signals = _signals
+                        await db.commit()
+                        ingest_logger.info(
+                            "ingestion_trust_state",
+                            file_id=file_id,
+                            container_id=meta.container_id,
+                            trust_state=meta.trust_state,
+                            confidence_level=ing_conf.level,
+                            audit_has_errors=audit.has_errors,
+                            audit_finding_count=len(audit.findings),
+                        )
+                except Exception as exc:
+                    ingest_logger.warning(
+                        "ingestion_trust_state_failed",
+                        file_id=file_id,
+                        error=str(exc)[:200],
+                    )
         except Exception as exc:
             ingest_logger.warning(
                 "ingestion_confidence_failed", file_id=file_id, error=str(exc)[:200]

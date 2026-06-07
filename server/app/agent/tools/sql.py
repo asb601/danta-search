@@ -21,7 +21,11 @@ from app.core.logger import chat_logger, pipeline_logger
 from app.core import metrics
 from app.agent.tools.sql_safety import validate_and_normalise
 import app.services.sql_repair as _repair
-from app.services.execution_guards import ExecutionGuard, ExecutionGuardError
+from app.services.execution_guards import (
+    ExecutionGuard,
+    ExecutionGuardError,
+    check_joins_approved,
+)
 from app.services.file_identity import FileIdentityMap
 from app.services.logical_sql import (
     SQLCanonicalizationError,
@@ -275,6 +279,55 @@ def build_sql_tools(
                         "error": gate_payload.get("error", "schema gate rejected"),
                     })
                     return json.dumps(gate_payload)
+
+                # ── Relationship-graph join enforcement (SME, flag-gated) ──────
+                # CLAUDE.md rule #3: joins must be relationship-validated. The
+                # structural ExecutionGuard below only checks JOIN shape (count,
+                # cartesian, scan cap); it cannot tell an approved pair from a
+                # fabricated one. When SME join-enforce is on, reject any JOIN
+                # whose table pair is not in the approved relationship set the
+                # context already carries. Default OFF → byte-identical behavior.
+                # Checked on LOGICAL SQL (table names intact, pre-physical rewrite).
+                # Fail-OPEN: an unexpected error here must never crash run_sql on
+                # the hot path — on any exception we log and fall through to the
+                # existing structural guards + execution (mirrors GATE-B).
+                try:
+                    _settings = get_settings()
+                    if (
+                        getattr(_settings, "SME_MODE_ENABLED", False)
+                        and getattr(_settings, "SME_JOIN_ENFORCE_ENABLED", False)
+                    ):
+                        _approved = getattr(sql_ctx, "approved_joins", None) or []
+                        _join_report = check_joins_approved(
+                            canonical.logical_sql, _approved, file_identities
+                        )
+                        if not _join_report.ok:
+                            _pair = _join_report.unapproved_pair or ("?", "?")
+                            _pair_str = f"{_pair[0]} ⋈ {_pair[1]}"
+                            pipeline_logger.info(
+                                "sme_join_enforce_reject",
+                                unapproved_pair=list(_pair),
+                                checked_joins=_join_report.checked_joins,
+                                approved_pairs=_join_report.approved_pair_count,
+                                sql_preview=canonical.logical_sql[:200],
+                            )
+                            metrics.inc("sme_join_enforce_rejected")
+                            _attempt.update({
+                                "status": "join_not_approved",
+                                "error": f"join_not_approved: {_pair_str}",
+                            })
+                            return json.dumps({
+                                "error": "join_not_approved",
+                                "detail": (
+                                    f"{_pair_str} is not a validated relationship; "
+                                    "analyze the tables independently or use an approved "
+                                    "join path. Call extract_relations to see the approved "
+                                    "join paths for these tables."
+                                ),
+                            })
+                except Exception as _je:
+                    pipeline_logger.warning("sme_join_enforce_error", error=str(_je)[:200])
+
                 sql = canonical.executable_sql
             except SQLCanonicalizationError as ve:
                 error_msg = str(ve)

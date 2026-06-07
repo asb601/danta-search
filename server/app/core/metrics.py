@@ -66,7 +66,26 @@ _counters: dict[str, int | float] = {
     # Confidence telemetry
     "low_confidence_query_count":  0,   # orchestration confidence < 0.50
     "ingestion_audit_error_count": 0,   # ingestion audit found error-level findings
+    # Planner telemetry
+    "planner_fallback_count":      0,   # deterministic planner declined → LangGraph agent path taken
 }
+
+
+# ── Named increment helpers ───────────────────────────────────────────────────
+# Thin wrappers over inc() so call-sites read intentionally and the counter name
+# is referenced in exactly one place (typo-proof, grep-able).
+
+def inc_planner_fallback(amount: int = 1) -> None:
+    """Record that the deterministic semantic planner declined and the query
+    fell back to the LangGraph agent path.
+
+    CLAUDE.md names this the primary quality metric for the planner layer: the
+    fallback rate drives ontology-coverage work. Increment it at the single
+    site where a high-confidence deterministic plan would have bypassed the
+    agent but did not (see TODO in app/agent/graph/graph.py — Dev-B does not
+    own graph.py, so the increment site is wired by the lead).
+    """
+    inc("planner_fallback_count", amount)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

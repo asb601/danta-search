@@ -159,6 +159,94 @@ async def _run_semantic_enrichment_for_file(file_id: str) -> int:
     return int(result.get("additions") or 0)
 
 
+async def apply_trust_states(container_id: str, db: AsyncSession) -> dict[str, Any]:
+    """Recompute per-file ``trust_state`` over EXISTING metadata — no re-ingest.
+
+    Backfill counterpart of the ingestion-time trust wiring (see
+    ingestion_stages.complete_ingestion_stage). For every FileMetadata in the
+    container it recomputes, from already-persisted signals only:
+
+      trust_state = derive_trust_state(<ingestion confidence level>,
+                                       <container audit findings>)
+
+    where the confidence level is recomputed by ``compute_ingestion_confidence``
+    (pure: reads FileMetadata + its FileRelationship rows) and the audit findings
+    come from ``run_ingestion_audit`` (read-only DB inspection, run ONCE per
+    container since the audit is container-scoped). No LLM, no parquet, no
+    re-embedding — purely a deterministic re-derivation over stored metadata.
+
+    Flag-gated: a no-op returning {"applied": False} unless SME_MODE_ENABLED and
+    SME_QUARANTINE_ENABLED are both on, so default-off behaviour is unchanged.
+    The result maps every distinct trust state to its file count for the rebuild
+    summary; the per-state keys are whatever ``derive_trust_state`` returns —
+    nothing about the state vocabulary is hardcoded here.
+    """
+    settings = get_settings()
+    if not (settings.SME_MODE_ENABLED and settings.SME_QUARANTINE_ENABLED):
+        return {"applied": False}
+
+    from app.services.ingestion_audit import run_ingestion_audit
+    from app.services.ingestion_confidence import compute_ingestion_confidence
+    from app.services.trust_state import derive_trust_state, findings_for_file
+
+    await _require_container(container_id, db)
+
+    # Container-scoped audit findings: computed once, reused for every file —
+    # mirrors the ingestion path, which audits the whole container per file.
+    audit = await run_ingestion_audit(container_id, db)
+
+    counts: dict[str, int] = {}
+    scanned = 0
+    failed = 0
+
+    metas = (
+        await db.execute(
+            select(FileMetadata)
+            .join(File, File.id == FileMetadata.file_id)
+            .where(File.container_id == container_id)
+        )
+    ).scalars().all()
+
+    for meta in metas:
+        scanned += 1
+        try:
+            rels = (
+                await db.execute(
+                    select(FileRelationship).where(
+                        or_(
+                            FileRelationship.file_a_id == meta.file_id,
+                            FileRelationship.file_b_id == meta.file_id,
+                        )
+                    )
+                )
+            ).scalars().all()
+            ing_conf = compute_ingestion_confidence(meta, list(rels))
+            # Attribute container-level audit findings to THIS file only, so one
+            # container defect cannot quarantine clean files (reviewer 4a).
+            state = derive_trust_state(
+                ing_conf.level, findings_for_file(audit.findings, meta.file_id)
+            )
+            meta.trust_state = state
+            counts[state] = counts.get(state, 0) + 1
+        except Exception as exc:  # never fail the rebuild on one file
+            failed += 1
+            ingest_logger.warning(
+                "trust_state_backfill_file_failed",
+                file_id=meta.file_id,
+                error=str(exc)[:300],
+            )
+
+    await db.commit()
+    result = {
+        "applied": True,
+        "scanned": scanned,
+        "failed": failed,
+        "by_state": dict(sorted(counts.items())),
+    }
+    ingest_logger.info("trust_state_backfill_complete", container_id=container_id, **result)
+    return result
+
+
 async def rebuild_container_semantics(
     container_id: str,
     *,
@@ -265,6 +353,31 @@ async def rebuild_container_semantics(
                 if len(counters["file_failures"]) < failure_sample_limit:
                     counters["file_failures"].append({"file_id": file_id, "stage": "semantic_enrichment", "error": str(exc)[:300]})
                 ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="semantic_enrichment", error=str(exc)[:300])
+
+    # SME canonical-master election (container-level). No-op unless the flags
+    # are on. Runs over the freshly-built semantic layer; recomputable on demand
+    # over existing metadata (no re-ingest). ISOLATED: an election failure must
+    # never abort the trust backfill / evaluation that follow (reviewer HIGH).
+    if settings.SME_MODE_ENABLED and settings.SME_MASTER_ELECTION_ENABLED:
+        try:
+            from app.services.semantic_layer_builder import apply_master_election
+
+            async with async_session() as db:
+                counters["master_election"] = await apply_master_election(container_id, db)
+        except Exception as exc:
+            counters["master_election"] = {"error": str(exc)[:300]}
+            ingest_logger.warning("sme_master_election_failed", container_id=container_id, error=str(exc)[:300])
+
+    # SME trust-state backfill (container-level). No-op unless the flags are on.
+    # Recomputes per-file trust_state from already-persisted confidence + audit
+    # signals over the freshly-rebuilt semantic layer — no re-ingest, no LLM.
+    if settings.SME_MODE_ENABLED and settings.SME_QUARANTINE_ENABLED:
+        try:
+            async with async_session() as db:
+                counters["trust_states"] = await apply_trust_states(container_id, db)
+        except Exception as exc:
+            counters["trust_states"] = {"error": str(exc)[:300]}
+            ingest_logger.warning("sme_trust_states_failed", container_id=container_id, error=str(exc)[:300])
 
     async with async_session() as db:
         counters["evaluation"] = await evaluate_container_semantics(container_id, db, batch_size=batch_size)

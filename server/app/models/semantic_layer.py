@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,6 +29,10 @@ class SemanticEntity(Base):
     confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
     source: Mapped[str] = mapped_column(String(50), default="ingestion")
     status: Mapped[str] = mapped_column(String(20), default="active")
+    # SME master election (set by apply_master_election; default keeps pre-SME
+    # behavior — every entity is a non-elected peer until election runs).
+    is_canonical_master: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    master_for_entity: Mapped[str | None] = mapped_column(String(120), nullable=True)
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

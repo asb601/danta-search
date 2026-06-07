@@ -152,6 +152,20 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         chat_logger.warning("semantic_layer_migration_failed", error=str(exc)[:300])
 
+    # SME master-election columns on semantic_entities (additive; no-op until flags on)
+    from app.migrations.sme_master_election_upgrade import migrate as _sme_master_migrate
+    try:
+        await _sme_master_migrate()
+    except Exception as exc:
+        chat_logger.warning("sme_master_election_migration_failed", error=str(exc)[:300])
+
+    # SME trust-state column on file_metadata (additive; no-op until flags on)
+    from app.migrations.sme_trust_state_upgrade import migrate as _sme_trust_migrate
+    try:
+        await _sme_trust_migrate()
+    except Exception as exc:
+        chat_logger.warning("sme_trust_state_migration_failed", error=str(exc)[:300])
+
     # Dashboard layer: dashboards + dashboard_folders (metadata-driven dashboards)
     from app.migrations.dashboard_upgrade import migrate as _dashboard_migrate
     try:

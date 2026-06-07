@@ -129,6 +129,43 @@ class Settings(BaseSettings):
     ORG_DB_QUERY_TIMEOUT_SECONDS: int = 15
     ORG_DB_MAX_ROWS: int = 1000
 
+    # ── SME mode (Reviewer-board build) ─────────────────────────────────────
+    # Promotes the already-built-but-observe-only "analyst brain" from telemetry
+    # to control. Master switch + per-capability sub-flags. ALL default False:
+    # with these defaults runtime behavior is byte-identical to today. A
+    # capability is active only when SME_MODE_ENABLED AND its own flag are True.
+    #
+    #   SME_MASTER_ELECTION_ENABLED  — knowledge layer: elect ONE canonical master
+    #     table per entity, auto-promote single-column master-key joins, and
+    #     demote ubiquitous/audit columns from join candidacy (all data-driven,
+    #     recomputed from existing metadata via semantic_rebuild — no re-ingest).
+    #   SME_QUARANTINE_ENABLED       — trust gate: hard-exclude error-/low-trust
+    #     knowledge from retrieval + SQL context (today it is only soft-attenuated).
+    #   SME_RETRIEVAL_FIRST_ENABLED  — narrow first: run retrieval BEFORE entity
+    #     resolution / workflow closure and scope them to the shortlist (kills the
+    #     "un-narrowing" that re-introduces wrong tables).
+    #   SME_JOIN_ENFORCE_ENABLED     — reject any JOIN whose table pair is not in
+    #     the approved relationship graph at execution time (no fabricated joins).
+    #   SME_CONFIDENCE_ROUTER_ENABLED— route on the deterministic confidence score:
+    #     high → answer, medium → answer + caveat, low → honest refusal.
+    SME_MODE_ENABLED: bool = False
+    SME_MASTER_ELECTION_ENABLED: bool = False
+    SME_QUARANTINE_ENABLED: bool = False
+    SME_RETRIEVAL_FIRST_ENABLED: bool = False
+    SME_JOIN_ENFORCE_ENABLED: bool = False
+    SME_CONFIDENCE_ROUTER_ENABLED: bool = False
+    # Ubiquity = data-driven audit/system-column detection (no name lists). A key
+    # column is "system/audit" if it is broadly present AND does not strongly
+    # value-reconcile (audit columns appear everywhere but don't join). Broadly
+    # present = present in >= SME_AUDIT_ABS_COVERAGE of the container's files
+    # (catches templated audit headers), OR > SME_AUDIT_UBIQUITY_MULTIPLE x the
+    # container's MEDIAN per-column file count (catches sparse-data outliers).
+    # Skipped entirely below SME_AUDIT_MIN_FILES files (small-sample guard). All
+    # relative to the container's own distribution — generalizes to any tenant.
+    SME_AUDIT_UBIQUITY_MULTIPLE: float = 4.0
+    SME_AUDIT_ABS_COVERAGE: float = 0.6
+    SME_AUDIT_MIN_FILES: int = 8
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 

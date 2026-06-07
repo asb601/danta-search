@@ -110,6 +110,70 @@ def _trust_attenuate(
         return fused  # never block retrieval
 
 
+# ── SME quarantine hard-exclusion (flag-gated) ───────────────────────────────
+# When SME mode + the quarantine flag are BOTH on, hard-EXCLUDE files whose
+# persisted trust_state is QUARANTINED from the retrieval result set. This is
+# ADDITIVE to the existing soft post-RRF trust attenuation (_trust_attenuate),
+# which stays in place — attenuation down-weights, this removes.
+#
+# 100% data-driven: the decision reads the per-file `trust_state` column that
+# Dev-A derives at ingestion from already-persisted confidence + audit signals
+# (derive_trust_state). No literals, name lists, or score thresholds live here.
+#
+# Demo-safety net: if excluding quarantined files would empty the result set,
+# fall back to the pre-filter list — quarantine must never cause zero results.
+def _filter_quarantined(
+    fused: list[tuple[FileMetadata, float]],
+) -> list[tuple[FileMetadata, float]]:
+    """Drop QUARANTINED files from a fused result list, flag-gated and safe.
+
+    No-op (returns the input unchanged) when the SME quarantine flag is off,
+    when Dev-A's trust_state contract is not yet importable, or on any error —
+    so default-off behaviour is byte-identical to today.
+    """
+    try:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        if not (settings.SME_MODE_ENABLED and settings.SME_QUARANTINE_ENABLED):
+            return fused
+
+        # Integration dependency: Dev-A owns trust_state.py + the trust_state
+        # column. Import lazily so this module still loads if Dev-A has not
+        # landed yet (the flag is default-off, so the off-path never reaches here).
+        from app.services.trust_state import QUARANTINED
+
+        kept = [
+            (meta, score)
+            for meta, score in fused
+            if getattr(meta, "trust_state", None) != QUARANTINED
+        ]
+        excluded = len(fused) - len(kept)
+        if excluded <= 0:
+            return fused  # nothing quarantined — return as-is (no log noise)
+
+        # Demo-safety net: never return zero results because of quarantine.
+        if not kept:
+            chat_logger.warning(
+                "retrieval_quarantine_safety_fallback",
+                excluded=excluded,
+                kept=0,
+                note="all candidates quarantined — falling back to pre-filter set",
+            )
+            return fused
+
+        chat_logger.info(
+            "retrieval_quarantine_excluded",
+            excluded=excluded,
+            kept=len(kept),
+        )
+        return kept
+    except Exception as exc:
+        # Never block retrieval on the trust gate (e.g. trust_state not yet wired).
+        chat_logger.warning("retrieval_quarantine_skipped", error=str(exc)[:200])
+        return fused
+
+
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _prune_and_dedup(
@@ -221,7 +285,8 @@ async def retrieve_with_scores(
                 _os_cm.setdefault(_m.file_id, []).append("graph")
             retrieval_channel_map.set(_os_cm)
             retrieval_all_candidate_fids.set(set(_os_cm))
-            return _os_fused
+            # SME quarantine hard-exclusion (flag-gated, additive to attenuation).
+            return _filter_quarantined(_os_fused)
 
     # SQLAlchemy async sessions share one connection and do not support
     # concurrent operations. Run BM25, fuzzy, vector sequentially.
@@ -310,6 +375,8 @@ async def retrieve_with_scores(
             _trim = min(_excess, len(_all_candidates[_trim_idx]))
             _all_candidates[_trim_idx] = _all_candidates[_trim_idx][:-_trim]
     fused = _trust_attenuate(rrf_fuse(_all_candidates, top_k=top_k))
+    # SME quarantine hard-exclusion (flag-gated, additive to attenuation above).
+    fused = _filter_quarantined(fused)
 
     # ── Telemetry side-effects (Postgres path) ───────────────────────────────
     # Build channel membership map BEFORE _all_candidates is trimmed above;

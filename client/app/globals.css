@@ -45,6 +45,31 @@
   --warn-bg:     color-mix(in oklab, var(--fg) 6%, var(--bg));
   --warn-border: color-mix(in oklab, var(--fg) 20%, transparent);
 
+  /* ── GOVERNANCE PANEL ──
+     Semantic status colors for the answer MODE badge. Intentionally OUTSIDE the
+     monochrome chart ramp: the whole point of "visible governance" is that a
+     refusal / caveat is impossible to miss. green=answered, amber=caveated,
+     red=refused. Each has a fg + a low-alpha surface bg + border. */
+  --gov-strip-bg:        color-mix(in oklab, var(--fg) 3%, var(--bg));
+  --gov-strip-border:    var(--border);
+
+  --gov-answer-fg:       #15803d;
+  --gov-answer-bg:       color-mix(in srgb, #16a34a 12%, transparent);
+  --gov-answer-border:   color-mix(in srgb, #16a34a 32%, transparent);
+
+  --gov-caveat-fg:       #b45309;
+  --gov-caveat-bg:       color-mix(in srgb, #d97706 14%, transparent);
+  --gov-caveat-border:   color-mix(in srgb, #d97706 34%, transparent);
+
+  --gov-refusal-fg:      #b91c1c;
+  --gov-refusal-bg:      color-mix(in srgb, #dc2626 12%, transparent);
+  --gov-refusal-border:  color-mix(in srgb, #dc2626 34%, transparent);
+
+  /* trust-state dots on files: trusted=green, quarantined=red, unknown=gray */
+  --gov-trust-ok:        #16a34a;
+  --gov-trust-bad:       #dc2626;
+  --gov-trust-unknown:   var(--fg-subtle);
+
   /* Fonts — --font-sans is set by Next.js font loader (Plus Jakarta Sans).
      One family for everything; headings just use heavier weights. */
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
@@ -140,6 +165,20 @@
   --color-warn-fg:            var(--warn-fg);
   --color-warn-bg:            var(--warn-bg);
   --color-warn-border:        var(--warn-border);
+  --color-gov-strip-bg:       var(--gov-strip-bg);
+  --color-gov-strip-border:   var(--gov-strip-border);
+  --color-gov-answer-fg:      var(--gov-answer-fg);
+  --color-gov-answer-bg:      var(--gov-answer-bg);
+  --color-gov-answer-border:  var(--gov-answer-border);
+  --color-gov-caveat-fg:      var(--gov-caveat-fg);
+  --color-gov-caveat-bg:      var(--gov-caveat-bg);
+  --color-gov-caveat-border:  var(--gov-caveat-border);
+  --color-gov-refusal-fg:     var(--gov-refusal-fg);
+  --color-gov-refusal-bg:     var(--gov-refusal-bg);
+  --color-gov-refusal-border: var(--gov-refusal-border);
+  --color-gov-trust-ok:       var(--gov-trust-ok);
+  --color-gov-trust-bad:      var(--gov-trust-bad);
+  --color-gov-trust-unknown:  var(--gov-trust-unknown);
   --font-sans:    var(--font-sans);
   --font-mono:    var(--font-mono);
   --radius-sm: calc(var(--radius) - 4px);
@@ -1108,6 +1147,15 @@ html.dark {
   --input:              var(--border);
   --sidebar:            var(--surface);
   --sidebar-border:     var(--border);
+
+  /* governance: brighten fg, keep low-alpha surfaces (which ride on the hexes
+     below via color-mix and stay legible on near-black). strip-bg/border ride
+     on --fg/--bg/--border and flip for free. */
+  --gov-answer-fg:      #4ade80;
+  --gov-caveat-fg:      #fbbf24;
+  --gov-refusal-fg:     #f87171;
+  --gov-trust-ok:       #4ade80;
+  --gov-trust-bad:      #f87171;
 }
 
 html.dark body {

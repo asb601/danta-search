@@ -63,6 +63,16 @@ from app.services.sql_ast_validator import (
     validate_sql_ast,
 )
 
+try:
+    import sqlglot
+    import sqlglot.errors
+    from sqlglot import exp as _sg_exp
+    _SQLGLOT_IMPORT_OK = True
+except ImportError:  # pragma: no cover
+    sqlglot = None  # type: ignore[assignment]
+    _sg_exp = None  # type: ignore[assignment]
+    _SQLGLOT_IMPORT_OK = False
+
 
 # ── Regex patterns ─────────────────────────────────────────────────────────────
 
@@ -388,6 +398,22 @@ class ExecutionGuard:
                 "Split into multiple focused queries, one per analytical domain."
             )
 
+    # ── Relationship-graph join approval (additive, flag-gated) ────────────────
+
+    def check_joins_approved(
+        self,
+        logical_sql: str,
+        approved_joins,
+        file_identities,
+    ) -> "JoinApprovalReport":
+        """Verify every JOIN's table pair is an approved relationship.
+
+        Thin instance wrapper over the module-level check_joins_approved so the
+        relationship guard sits alongside the structural guards on the same
+        object. Stateless — no config dependency. Never raises.
+        """
+        return check_joins_approved(logical_sql, approved_joins, file_identities)
+
     # ── Post-execution (soft warning, never raises) ────────────────────────────
 
     def check_post_execution(self, rows: list, total: int) -> str | None:
@@ -411,3 +437,225 @@ class ExecutionGuard:
         except Exception:
             pass
         return None
+
+
+# ── Relationship-graph join approval (no fabricated joins) ──────────────────────
+#
+# CLAUDE.md rule #3: "Never generate arbitrary LLM joins — joins must be
+# relationship-validated and ontology-backed." The structural ExecutionGuard
+# above only checks JOIN *shape* (count, cartesian, scan cap); it does not know
+# WHICH table pairs are a validated relationship. This guard closes that gap:
+# it rejects any JOIN whose two tables are not present, as a pair, in the
+# request's approved relationship set (SemanticRelationship edges surfaced via
+# SQLContext.approved_joins).
+#
+# Fully data-driven: the approved set is the per-request graph the context
+# already carries — there are NO hardcoded table names, key lists, or magic
+# literals here. Identity resolution is delegated to the request-local
+# FileIdentityMap so a logical-table name maps to the SAME canonical id on both
+# the SQL side and the approved-edge side regardless of which partition/alias
+# the model wrote.
+
+@dataclass
+class JoinApprovalReport:
+    """Result of the join-approval check. Never raised — inspected by caller.
+
+    ok                 — True when every JOIN's table pair is approved (or the
+                         query has no resolvable cross-table joins to check).
+    parse_ok           — False when sqlglot could not parse the SQL (fail-open:
+                         the structural ExecutionGuard already ran; this guard
+                         declines rather than blocking on an unparseable string).
+    unapproved_pair    — ("LEFT_TABLE", "RIGHT_TABLE") display names of the first
+                         join whose pair was not in the approved set (None on ok).
+    checked_joins      — count of cross-table joins inspected (telemetry).
+    approved_pair_count— size of the approved relationship set (telemetry).
+    """
+    ok: bool = True
+    parse_ok: bool = True
+    unapproved_pair: tuple[str, str] | None = None
+    checked_joins: int = 0
+    approved_pair_count: int = 0
+
+
+def _approved_canonical_pairs(approved_joins, file_identities) -> set[frozenset[str]]:
+    """Project the approved-join set to a set of unordered canonical-id pairs.
+
+    Each ApprovedJoin carries left_file_id / right_file_id — these may be any
+    member partition id of a logical table. We collapse both endpoints to the
+    logical table's representative canonical_id via the identity map so the
+    comparison is partition-agnostic. Endpoints that don't resolve are kept as
+    their raw id (still a valid equality key) so a missing identity never
+    silently widens approval.
+    """
+    pairs: set[frozenset[str]] = set()
+    by_id = getattr(file_identities, "by_id", {}) or {}
+    for j in approved_joins or []:
+        left = getattr(j, "left_file_id", None)
+        right = getattr(j, "right_file_id", None)
+        if not left or not right:
+            continue
+        left_canon = getattr(by_id.get(left), "canonical_id", None) or left
+        right_canon = getattr(by_id.get(right), "canonical_id", None) or right
+        pairs.add(frozenset((left_canon, right_canon)))
+    return pairs
+
+
+def _resolve_canonical(table_name: str, file_identities) -> str | None:
+    """Resolve a logical table name to its representative canonical id, or None."""
+    try:
+        return file_identities.resolve_table(table_name).canonical_id
+    except Exception:
+        return None
+
+
+def check_joins_approved(
+    logical_sql: str,
+    approved_joins,
+    file_identities,
+) -> JoinApprovalReport:
+    """Reject any JOIN whose table pair is not a validated relationship.
+
+    Operates on LOGICAL SQL (table names still present, pre-physical-rewrite).
+    For every JOIN, the joined table is paired with each table already in scope
+    from the same FROM (the left side may carry multiple base tables across a
+    chain of joins). Each (left, joined) canonical-id pair must be present in the
+    approved set. The first pair that is absent yields ok=False.
+
+    Data-safety contract:
+      • Single-table queries (no JOIN) → ok (nothing to check).
+      • Unparseable SQL → parse_ok=False, ok=True (decline; structural guard
+        already ran — never hard-fail an unparseable string here).
+      • A join table that cannot be resolved to a canonical id is skipped (it is
+        not provably unapproved; canonicalization/auth handles unknown tables).
+      • Empty approved set + a real cross-table join → ok=False with the offending
+        pair, so the agent degrades to independent analysis (never crashes).
+
+    Never raises. Returns a JoinApprovalReport for the caller to act on.
+    """
+    report = JoinApprovalReport()
+    if not logical_sql or not _SQLGLOT_IMPORT_OK or file_identities is None:
+        report.parse_ok = _SQLGLOT_IMPORT_OK
+        return report
+
+    try:
+        tree = sqlglot.parse_one(
+            logical_sql,
+            dialect="duckdb",
+            error_level=sqlglot.errors.ErrorLevel.RAISE,
+        )
+    except Exception:
+        report.parse_ok = False
+        return report
+
+    approved_pairs = _approved_canonical_pairs(approved_joins, file_identities)
+    report.approved_pair_count = len(approved_pairs)
+
+    # CTE names are query-local aliases, not catalog tables — never treat them as
+    # a logical table for join approval.
+    cte_names = {
+        (getattr(cte, "alias_or_name", "") or "").strip().strip('`"[]').lower()
+        for cte in tree.find_all(_sg_exp.CTE)
+    }
+
+    def _is_real_table(node) -> bool:
+        name = node.name
+        return bool(name) and name.strip().strip('`"[]').lower() not in cte_names
+
+    def _qual_key(value: str) -> str:
+        return (value or "").strip().strip('`"[]').lower()
+
+    # Inspect each SELECT scope independently so a join in a subquery is paired
+    # only with the tables of its OWN scope, not tables from an outer scope.
+    for select in tree.find_all(_sg_exp.Select):
+        # sqlglot stores the FROM clause under "from" in some versions and
+        # "from_" in others; accept either so the guard is version-robust.
+        from_node = select.args.get("from") or select.args.get("from_")
+        joins = select.args.get("joins") or []
+        if not joins:
+            continue
+
+        # Scope alias/name → canonical id. A table is addressable in the ON
+        # clause by its alias if it has one, else by its bare name; we register
+        # both so the ON-qualifier lookup resolves either form.
+        alias_to_canon: dict[str, str] = {}
+
+        def _register(tbl) -> None:
+            if not _is_real_table(tbl):
+                return
+            canon = _resolve_canonical(tbl.name, file_identities)
+            if canon is None:
+                return
+            alias = tbl.alias_or_name
+            alias_to_canon[_qual_key(alias)] = canon
+            alias_to_canon[_qual_key(tbl.name)] = canon
+
+        # FROM base tables resolved to canonical ids — the fallback pairing target
+        # for join conditions we cannot attribute to specific tables (USING /
+        # unqualified ON), so a fabricated USING-join cannot slip through.
+        from_canons: list[str] = []
+        if from_node is not None:
+            for tbl in from_node.find_all(_sg_exp.Table):
+                _register(tbl)
+                if _is_real_table(tbl):
+                    canon = _resolve_canonical(tbl.name, file_identities)
+                    if canon:
+                        from_canons.append(canon)
+        for join in joins:
+            for tbl in join.find_all(_sg_exp.Table):
+                _register(tbl)
+
+        for join in joins:
+            join_tables = [
+                t for t in join.find_all(_sg_exp.Table) if _is_real_table(t)
+            ]
+            if not join_tables:
+                # Subquery / derived-table join with no direct catalog table —
+                # its own inner SELECT scope is inspected separately by the loop.
+                continue
+
+            # The relationship a join ASSERTS is exactly the table pair its
+            # ON/USING condition connects. Read the distinct table qualifiers
+            # referenced in the ON condition and resolve them to canonical ids.
+            on_node = join.args.get("on")
+            using_node = join.args.get("using")
+            cond_canons: set[str] = set()
+            if on_node is not None:
+                for col in on_node.find_all(_sg_exp.Column):
+                    qual = _qual_key(col.table)
+                    canon = alias_to_canon.get(qual) if qual else None
+                    if canon:
+                        cond_canons.add(canon)
+
+            for jt in join_tables:
+                right_canon = _resolve_canonical(jt.name, file_identities)
+                if right_canon is None:
+                    # Unknown table — not provably unapproved; auth handles it.
+                    continue
+                # Pair the joined table with the OTHER side(s) of its own ON
+                # condition. Self-pairs (same canonical id — two partitions of one
+                # logical table) are not cross-table joins and are skipped.
+                partners = {c for c in cond_canons if c != right_canon}
+                # Fallback: a USING clause, or an ON whose qualifiers we could not
+                # attribute, still asserts a real relationship. Pair against the
+                # FROM base table(s) so a fabricated join cannot bypass the gate by
+                # using USING(col) or an unqualified ON.
+                if not partners and (using_node is not None or on_node is not None):
+                    partners = {c for c in from_canons if c != right_canon}
+                for partner in sorted(partners):
+                    report.checked_joins += 1
+                    if frozenset((partner, right_canon)) not in approved_pairs:
+                        report.ok = False
+                        report.unapproved_pair = (
+                            _display_name(partner, file_identities),
+                            _display_name(right_canon, file_identities),
+                        )
+                        return report
+
+    return report
+
+
+def _display_name(canonical_id: str, file_identities) -> str:
+    """Best-effort human-readable table name for an error message."""
+    by_id = getattr(file_identities, "by_id", {}) or {}
+    identity = by_id.get(canonical_id)
+    return getattr(identity, "sql_name", None) or canonical_id

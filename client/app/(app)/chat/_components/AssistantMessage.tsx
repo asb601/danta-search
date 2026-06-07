@@ -4,6 +4,7 @@ import { AlertCircle } from "lucide-react";
 import { motion } from "framer-motion";
 import { AnswerText, stripTabularContent } from "./AnswerText";
 import { ResultsAccordion } from "./ResultsAccordion";
+import { GovernancePanel } from "./GovernancePanel";
 import type { Message } from "./types";
 
 export function AssistantMessage({
@@ -49,6 +50,9 @@ export function AssistantMessage({
           isOpen={isExpanded}
           onToggle={onToggle}
         />
+      )}
+      {msg.payload?.governance && (
+        <GovernancePanel governance={msg.payload.governance} />
       )}
     </motion.div>
   );

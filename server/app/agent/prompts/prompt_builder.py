@@ -181,6 +181,28 @@ _DIM_METRIC_LIMIT = 4  # max key_dimensions / key_metrics shown per file
 _PROMPT_COLUMN_LIMIT = 40  # exact columns shown for priority files
 
 
+# ── SME join-enforcement prompt swap (flag-gated, byte-identical when off) ─────
+# When relationship-graph join enforcement is active, the execution layer will
+# REJECT any JOIN whose table pair is not an approved relationship. The default
+# Phase-3 guidance below licenses the model to "join manually and flag it as
+# unverified" — which directly contradicts that enforcement (the manual join is
+# rejected, not flagged). When the flag is on we replace ONLY that sentence with
+# the approved-path-or-independent instruction, leaving the rest of the prompt
+# verbatim. When the flag is off, no substitution runs and the prompt is the
+# unchanged template (byte-identical).
+_JOIN_LICENSE_ORIGINAL = (
+    "If no direct\n"
+    "relationship exists, request a bounded multi-hop path; if none is returned, join\n"
+    "manually and flag it as unverified in your response."
+)
+_JOIN_LICENSE_ENFORCED = (
+    "If no direct\n"
+    "relationship exists, request a bounded multi-hop path; if none is returned, do NOT\n"
+    "join the tables — analyze each table independently and state that no validated\n"
+    "relationship exists between them. A manual/invented join will be rejected at execution."
+)
+
+
 def _column_names_for_prompt(entry: dict | None) -> list[str]:
     if not entry:
         return []
@@ -412,6 +434,23 @@ def build_system_prompt(
         last_year_end=last_year_end.isoformat(),
         last_30_start=last_30_start.isoformat(),
     )
+
+    # SME join enforcement: when joins are rejected at execution, the prompt must
+    # not license a manual/unverified join. Swap that one sentence (flag-gated).
+    # Default OFF → no substitution → byte-identical prompt.
+    try:
+        from app.core.config import get_settings as _gs  # noqa: PLC0415
+        _s = _gs()
+        if (
+            getattr(_s, "SME_MODE_ENABLED", False)
+            and getattr(_s, "SME_JOIN_ENFORCE_ENABLED", False)
+            and _JOIN_LICENSE_ORIGINAL in system_prompt
+        ):
+            system_prompt = system_prompt.replace(
+                _JOIN_LICENSE_ORIGINAL, _JOIN_LICENSE_ENFORCED, 1
+            )
+    except Exception as _exc:  # never let prompt assembly fail on a flag read
+        chat_logger.warning("sme_join_prompt_swap_error", error=str(_exc)[:200])
 
     # Inject validated SQL context right before the HOW TO WORK behavioural rules
     # so the LLM reads its constraints alongside its work instructions.

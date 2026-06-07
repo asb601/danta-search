@@ -197,6 +197,10 @@ async def chat_message_stream(
                             "row_count": final_payload.get("row_count", 0),
                             "files_used": final_payload.get("files_used", []),
                             "tool_calls": final_payload.get("tool_calls", 0),
+                            # SME governance payload — persisted so the panel
+                            # survives a conversation reload (omitted/None when off).
+                            **({"governance": final_payload["governance"]}
+                               if final_payload.get("governance") else {}),
                         },
                     ))
                     upd_conv = await save_db.get(Conversation, conv_id)

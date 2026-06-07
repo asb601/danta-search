@@ -502,6 +502,33 @@ async def _build_agent_context(
         if e.get("blob_path") in resolver_pinned_blobs and e.get("file_id")
     ] if resolver_pinned_blobs else []
 
+    # SME bind-to-master: force-pin the Phase-1 elected canonical master for each
+    # resolved entity, so a similarly-named-but-wrong table can never out-rank the
+    # authoritative master. No-op unless the flags are on; never breaks the path.
+    try:
+        from app.core.config import get_settings as _gs_master  # noqa: PLC0415
+        _s_master = _gs_master()
+        if _s_master.SME_MODE_ENABLED and _s_master.SME_RETRIEVAL_FIRST_ENABLED:
+            _master_blobs = await _pin_canonical_masters(
+                list(entity_resolution.keys()), full_catalog, resolved_container_id, db
+            )
+            if _master_blobs:
+                resolver_pinned_blobs |= _master_blobs
+                resolver_pinned_file_ids = [
+                    e["file_id"]
+                    for e in full_catalog
+                    if e.get("blob_path") in resolver_pinned_blobs and e.get("file_id")
+                ]
+                pipeline_logger.info("sme_master_pinned", count=len(_master_blobs))
+    except Exception as exc:
+        pipeline_logger.warning("sme_master_pin_failed", error=str(exc)[:200])
+        # A failed SELECT leaves the async session in an aborted-txn state;
+        # roll back so subsequent context-build queries on this db don't raise.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
     # Soft seeds: all resolver candidates ≥ seed_threshold. Their file_ids are
     # passed as anchor_file_ids so graph_expand includes their semantic neighbors
     # in RRF fusion. Whether a sub-entity concept is already covered as a column
@@ -1063,6 +1090,16 @@ async def _build_agent_context(
     )
     if confidence.level == "low":
         metrics.inc("low_confidence_query_count")
+    # SME: a non-high-confidence answer means the brain fell back to the agent
+    # rather than a deterministic high-confidence plan (CLAUDE.md's primary
+    # quality metric). Counted only under the router flag.
+    try:
+        from app.core.config import get_settings as _gs_fb  # noqa: PLC0415
+        _s_fb = _gs_fb()
+        if _s_fb.SME_MODE_ENABLED and _s_fb.SME_CONFIDENCE_ROUTER_ENABLED and confidence.level != "high":
+            metrics.inc_planner_fallback()
+    except Exception:
+        pass
 
     pipeline_logger.info(
         "orchestration_confidence",
@@ -1328,6 +1365,21 @@ async def _build_agent_context(
         "is_first_turn": False,
     }
 
+    # SME confidence router: build the optional governance payload (mode +
+    # confidence + files + approved joins + feasibility) the UI renders. No-op
+    # unless the flags are on; never breaks context-build.
+    _governance = None
+    try:
+        from app.core.config import get_settings as _gs_gov  # noqa: PLC0415
+        _s_gov = _gs_gov()
+        if _s_gov.SME_MODE_ENABLED and _s_gov.SME_CONFIDENCE_ROUTER_ENABLED:
+            _meta_by_id = {m.file_id: m for m in _meta_list}
+            _governance = _build_governance_payload(
+                confidence, _feasibility, sql_ctx, catalog, _meta_by_id
+            )
+    except Exception as exc:
+        pipeline_logger.warning("sme_governance_build_failed", error=str(exc)[:200])
+
     return {
         "graph": graph,
         "initial_state": initial_state,
@@ -1346,7 +1398,131 @@ async def _build_agent_context(
         "graph_health": graph_health,
         "confidence": confidence,
         "feasibility": _feasibility,
+        "governance": _governance,
     }
+
+
+# ── SME Phase-2: bind-to-master + confidence router + governance payload ──────
+
+async def _pin_canonical_masters(
+    entity_keys: list[str],
+    full_catalog: list[dict],
+    container_id: str | None,
+    db: AsyncSession,
+) -> set[str]:
+    """Return blob_paths of canonical-master tables (Phase-1 election) that match
+    a resolved entity, for force-pinning. Match = token overlap between the
+    resolved entity key and the master's entity label — no hardcoded names.
+    Empty set on any failure / when no masters exist."""
+    if not container_id or not entity_keys:
+        return set()
+    from app.models.semantic_layer import SemanticEntity  # noqa: PLC0415
+
+    rows = (await db.execute(
+        select(SemanticEntity.entity_name, SemanticEntity.file_id).where(
+            SemanticEntity.container_id == container_id,
+            SemanticEntity.is_canonical_master.is_(True),
+        )
+    )).all()
+    if not rows:
+        return set()
+    blob_by_fid = {e.get("file_id"): e.get("blob_path") for e in full_catalog}
+    key_token_sets = [set(str(k).lower().split("_")) for k in entity_keys]
+    out: set[str] = set()
+    for entity_name, file_id in rows:
+        name_tokens = set(str(entity_name).lower().split("_"))
+        # Require the master's FULL label to be contained in a resolved key
+        # (master ⊆ key), so a generic shared token (e.g. "order") can't pin both
+        # sales_order and purchase_order masters — only a key specific enough to
+        # contain the whole label matches.
+        if name_tokens and any(name_tokens <= kt for kt in key_token_sets):
+            blob = blob_by_fid.get(file_id)
+            if blob:
+                out.add(blob)
+    return out
+
+
+def _clean_blob_name(blob_path: str) -> str:
+    base = (blob_path or "").rsplit("/", 1)[-1]
+    if "." in base:
+        base = base.rsplit(".", 1)[0]
+    return base or (blob_path or "file")
+
+
+def _build_governance_payload(confidence, feasibility, sql_ctx, catalog, meta_by_id: dict) -> dict:
+    """Map the deterministic confidence level → an answer MODE and surface the
+    evidence the UI panel renders. high→answer, medium→caveat, low→refusal;
+    an explicitly-infeasible question is also a refusal."""
+    level = (getattr(confidence, "level", None) or "high")
+    score = round(float(getattr(confidence, "score", 0.0) or 0.0), 3)
+
+    answerable = True
+    if feasibility is not None:
+        answerable = bool(getattr(feasibility, "feasible", True))
+
+    # Refuse ONLY on deterministic infeasibility (date/coverage math). A low
+    # confidence SCORE must NOT refuse: the score weights join availability ~35%,
+    # so on a single-domain container a perfectly answerable single-table question
+    # scores "low" and would be false-refused on stage. Low/medium confidence →
+    # caveat, not refusal. Fabricated cross-domain joins are refused separately by
+    # join enforcement (which rejects the unapproved join at execution).
+    if not answerable:
+        mode = "refusal"
+    elif level in ("low", "medium"):
+        mode = "caveat"
+    else:
+        mode = "answer"
+
+    chain = getattr(confidence, "degradation_chain", None) or []
+    if mode == "refusal":
+        reason = "Not answerable from the available data" + ((": " + ", ".join(chain)) if chain else "")
+    elif mode == "caveat":
+        reason = (level or "lower").capitalize() + " confidence" + ((": " + ", ".join(chain)) if chain else "") + " — verify before relying on it"
+    else:
+        reason = None
+
+    files = []
+    for e in (catalog or [])[:12]:
+        m = meta_by_id.get(e.get("file_id"))
+        entry = {"name": _clean_blob_name(e.get("blob_path") or "")}
+        ts = getattr(m, "trust_state", None) if m else None
+        if ts:
+            entry["trust_state"] = ts
+        files.append(entry)
+
+    joins = []
+    for j in (getattr(sql_ctx, "approved_joins", None) or []):
+        on = j.left_col if j.left_col == j.right_col else f"{j.left_col}={j.right_col}"
+        joins.append({"from": j.left_table, "to": j.right_table, "on": on})
+
+    return {
+        "mode": mode,
+        "confidence": {"level": level, "score": score},
+        "reason": reason,
+        "files": files,
+        "approved_joins": joins,
+        "feasibility": {"answerable": answerable, "note": (reason if not answerable else None)},
+    }
+
+
+def _apply_governance_mode(answer: str, governance: dict | None) -> str:
+    """Transform the user-facing answer per the routed mode (refusal replaces,
+    caveat prepends, answer passes through)."""
+    if not governance:
+        return answer
+    mode = governance.get("mode")
+    reason = governance.get("reason")
+    if mode == "refusal":
+        msg = "I don't have enough validated evidence to answer this confidently from your data, so I won't guess."
+        if reason:
+            msg += f" ({reason})."
+        return msg + " See the Governance panel for the details."
+    if mode == "caveat":
+        prefix = "⚠️ Lower-confidence answer — please verify before relying on it."
+        if reason:
+            prefix += f" {reason}."
+        return prefix + "\n\n" + (answer or "")
+    return answer
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -1492,6 +1668,11 @@ async def run_agent_query(
     )
     trace.emit()
 
+    # SME confidence router: refusal replaces / caveat prepends (no-op when off).
+    _gov = ctx.get("governance")
+    if _gov:
+        answer = _apply_governance_mode(answer, _gov)
+
     return {
         "answer": answer,
         "data": sql_results,
@@ -1505,6 +1686,7 @@ async def run_agent_query(
             for blob in extract_blob_paths(msg.content)
         }) or _files_used_from_store(store, ctx.get("file_identity_map")),
         "tool_calls": tool_calls_made,
+        "governance": _gov,
     }
 
 
@@ -1610,6 +1792,32 @@ async def run_agent_query_stream(
                 "tool_calls": 0,
                 "retrieved_files": ctx["catalog_len"],
                 "total_files": ctx["total_files"],
+            },
+        }
+        return
+
+    # SME confidence router: honest refusal BEFORE running the agent loop, so the
+    # system says "I can't" instead of spending a turn fabricating a low-confidence
+    # answer. No-op unless the router flag is on (governance is None).
+    _gov = ctx.get("governance")
+    if _gov and _gov.get("mode") == "refusal":
+        with _stores_lock:
+            _request_stores.pop(req_id, None)
+        _ref = _apply_governance_mode("", _gov)
+        trace.set_execution_outcome(rows=0, total=0, duration_ms=0.0)
+        trace.emit()
+        yield {"type": "token", "content": _ref}
+        yield {
+            "type": "done",
+            "payload": {
+                "answer": _ref,
+                "data": [], "chart": None, "route": "sme_refusal",
+                "row_count": 0,
+                "files_used": [],
+                "tool_calls": 0,
+                "retrieved_files": ctx["catalog_len"],
+                "total_files": ctx["total_files"],
+                "governance": _gov,
             },
         }
         return
@@ -1834,6 +2042,13 @@ async def run_agent_query_stream(
     # payload below, so rewriting final_answer here corrects what the client renders.
     final_answer = _gate_negative_claim(final_answer, store, ctx.get("file_identity_map"))
 
+    # SME confidence router: prepend the caveat on a medium-confidence answer.
+    # The `done` payload is authoritative — the client renders this over the
+    # streamed tokens (see the client's done handler). Refusals already
+    # short-circuited above. No-op when governance is None.
+    if _gov and _gov.get("mode") == "caveat":
+        final_answer = _apply_governance_mode(final_answer, _gov)
+
     chart = infer_chart(final_answer, sql_results)
     sql_total_rows = store.get("sql_total_rows", len(sql_results))
 
@@ -1857,5 +2072,6 @@ async def run_agent_query_stream(
             "tool_calls": tool_calls_made,
             "retrieved_files": ctx["catalog_len"],
             "total_files": ctx["total_files"],
+            "governance": _gov,
         },
     }

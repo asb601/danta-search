@@ -357,3 +357,202 @@ async def build_semantic_layer_for_file(file_id: str, db: AsyncSession) -> dict:
         "entity": entity.entity_name if entity else None,
         "relationships": relationship_count,
     }
+
+
+# ── SME canonical-master election (container-level, flag-gated) ──────────────
+# Generic STRUCTURAL priors for the master ranker — NOT dataset-fitted constants
+# and NOT business rules. Same shape as ingestion_confidence's weighted score.
+# A master table is: key-distinct (high unique_rate / low null on its primary
+# key), attribute-rich rather than measure-heavy, and the target of many
+# value-overlap edges. Every INPUT below is computed from the data; only these
+# blend weights are fixed. The four STRUCTURAL weights sum to 1.0; the edge term
+# is a SEPARATE bounded bonus in [0, _MASTER_W_EDGE_BONUS] — it is saturated so a
+# transaction "supernode" (a generic id linked everywhere) can never out-rank a
+# clean dimension master on edge count alone. No column-name lists anywhere.
+_MASTER_W_UNIQUE = 0.40        # distinct cardinality of the key
+_MASTER_W_NONNULL = 0.20       # 1 - null_rate of the key
+_MASTER_W_HAS_KEY = 0.20       # has a usable primary key at all
+_MASTER_W_ATTR_RICH = 0.20     # 1 - measure_density (masters describe, not measure)
+_MASTER_W_EDGE_BONUS = 0.10    # max contribution of the (bounded) inbound-edge bonus
+_MASTER_EDGE_SATURATION = 5.0  # half-saturation point: edges/(edges+this) in [0,1)
+
+
+def _master_score(
+    ent: SemanticEntity,
+    reg_by_file_col: dict[tuple[str, str], ColumnKeyRegistry],
+    inbound_edges: dict[str, int],
+) -> float:
+    pk = ent.primary_key
+    reg = reg_by_file_col.get((ent.file_id, pk)) if pk else None
+    unique_rate = reg.unique_rate if reg else 0.0
+    null_rate = reg.null_rate if reg else 1.0
+
+    n_metrics = len(ent.metrics or [])
+    total_cols = max(n_metrics + len(ent.attributes or []) + len(ent.dimensions or []), 1)
+    measure_density = n_metrics / total_cols
+
+    # Bounded saturating edge signal in [0,1): no unbounded log term, so the edge
+    # bonus can never exceed its weight or dominate the key-quality signals.
+    edges = inbound_edges.get(ent.file_id, 0)
+    edge_signal = edges / (edges + _MASTER_EDGE_SATURATION)
+
+    return (
+        _MASTER_W_UNIQUE * unique_rate
+        + _MASTER_W_NONNULL * (1.0 - null_rate)
+        + _MASTER_W_HAS_KEY * (1.0 if (pk and unique_rate > 0) else 0.0)
+        + _MASTER_W_ATTR_RICH * (1.0 - measure_density)
+        + _MASTER_W_EDGE_BONUS * edge_signal
+    )
+
+
+async def apply_master_election(container_id: str, db: AsyncSession) -> dict:
+    """Container-level SME pass over EXISTING semantic artifacts (no re-ingest).
+
+    1. Elect ONE canonical master table per entity label by data evidence.
+    2. Demote join keys that are ubiquitous/system columns (data-derived, NOT a
+       hardcoded name list) to `candidate`.
+    3. Promote single-column joins whose PK side is a canonical master's primary
+       key (and that clear the value-overlap floor) to `approved`.
+
+    Idempotent. No-op unless SME_MODE_ENABLED and SME_MASTER_ELECTION_ENABLED.
+    """
+    settings = get_settings()
+    if not (settings.SME_MODE_ENABLED and settings.SME_MASTER_ELECTION_ENABLED):
+        return {"skipped": "flag_off"}
+
+    entities = (await db.execute(
+        select(SemanticEntity).where(
+            SemanticEntity.container_id == container_id,
+            SemanticEntity.status == "active",
+        ).order_by(SemanticEntity.file_id)  # deterministic election across runs
+    )).scalars().all()
+    if not entities:
+        return {"entities": 0, "masters_elected": 0, "promoted": 0, "demoted": 0}
+
+    registry = (await db.execute(
+        select(ColumnKeyRegistry).where(ColumnKeyRegistry.container_id == container_id)
+    )).scalars().all()
+    relationships = (await db.execute(
+        select(SemanticRelationship).where(
+            SemanticRelationship.container_id == container_id,
+            SemanticRelationship.status == "active",
+        )
+    )).scalars().all()
+
+    reg_by_file_col: dict[tuple[str, str], ColumnKeyRegistry] = {
+        (r.file_id, r.column_name): r for r in registry
+    }
+
+    # Ubiquity = system/audit-column detection, purely distributional (no name
+    # list). A column is system/audit if it is BROADLY PRESENT *and* does not
+    # strongly value-reconcile: audit columns (created_by, ...) appear in most
+    # tables but never join, whereas a conformed dimension key (vendor_id) is
+    # also widespread but HAS strong value overlap — the corroboration below
+    # protects those real keys from being demoted.
+    policy = get_semantic_policy()
+    strong_reconciler_columns: set[str] = set()
+    for rel in relationships:
+        if ((rel.join_rule or {}).get("value_overlap_pct") or 0.0) >= policy.min_join_overlap:
+            strong_reconciler_columns.add(rel.from_column)
+            strong_reconciler_columns.add(rel.to_column)
+
+    files_per_column: dict[str, set[str]] = {}
+    all_files: set[str] = set()
+    for r in registry:
+        files_per_column.setdefault(r.column_name, set()).add(r.file_id)
+        all_files.add(r.file_id)
+
+    ubiquitous_columns: set[str] = set()
+    total_files = len(all_files)
+    if files_per_column and total_files >= settings.SME_AUDIT_MIN_FILES:
+        counts = sorted(len(s) for s in files_per_column.values())
+        median = counts[len(counts) // 2]
+        rel_threshold = median * settings.SME_AUDIT_UBIQUITY_MULTIPLE
+        abs_threshold = settings.SME_AUDIT_ABS_COVERAGE * total_files
+        for col, files in files_per_column.items():
+            n = len(files)
+            broadly_present = n >= abs_threshold or n > rel_threshold
+            if broadly_present and col not in strong_reconciler_columns:
+                ubiquitous_columns.add(col)
+
+    # Inbound value-overlap edges per PK/target-side file (a master signal).
+    inbound_edges: dict[str, int] = {}
+    for rel in relationships:
+        rtype = rel.relationship_type
+        if rtype == "one_to_many" or rtype == "one_to_one":
+            pk_file = rel.file_a_id
+        elif rtype == "many_to_one":
+            pk_file = rel.file_b_id
+        else:
+            continue  # many_to_many is not a master signal
+        inbound_edges[pk_file] = inbound_edges.get(pk_file, 0) + 1
+
+    # Elect a master per entity label.
+    by_label: dict[str, list[SemanticEntity]] = {}
+    for ent in entities:
+        by_label.setdefault(ent.entity_name, []).append(ent)
+
+    masters_elected = 0
+    for label, members in by_label.items():
+        # file_id breaks score ties deterministically (entities are ORDER BY file_id).
+        best = max(members, key=lambda e: (_master_score(e, reg_by_file_col, inbound_edges), e.file_id))
+        for ent in members:
+            elected = ent is best
+            ent.is_canonical_master = elected
+            ent.master_for_entity = label if elected else None
+        masters_elected += 1
+
+    master_pk_by_file = {
+        e.file_id: e.primary_key
+        for e in entities
+        if e.is_canonical_master and e.primary_key
+    }
+
+    # Re-approve relationships: demote ubiquitous keys, promote master keys.
+    promoted = 0
+    demoted = 0
+    for rel in relationships:
+        if rel.from_column in ubiquitous_columns or rel.to_column in ubiquitous_columns:
+            if rel.approval_status != "candidate":
+                demoted += 1
+            rel.approval_status = "candidate"
+            rel.risk_reason = "ubiquitous/system column (data-derived ubiquity), not a business join key"
+            continue
+        if (rel.join_rule or {}).get("composite_candidate"):
+            continue
+        rtype = rel.relationship_type
+        if rtype == "one_to_many":
+            pk_file, pk_col = rel.file_a_id, rel.from_column
+        elif rtype == "many_to_one":
+            pk_file, pk_col = rel.file_b_id, rel.to_column
+        else:
+            continue
+        # value_overlap_pct lives in the SemanticRelationship's join_rule JSONB
+        # (it is a FileRelationship column, not a SemanticRelationship one).
+        overlap = (rel.join_rule or {}).get("value_overlap_pct") or 0.0
+        confidence = rel.confidence_score or 0.0
+        # Promotion bypasses ONLY the risky-single-column guard — never the
+        # evidence bar. It must clear the real confidence floor AND the strong
+        # value-overlap floor (min_join_overlap, not the weak 0.01 approval
+        # floor), so a wrongly-elected master can't bless a 1%-overlap join.
+        if (
+            master_pk_by_file.get(pk_file) == pk_col
+            and confidence >= policy.approved_join_confidence
+            and overlap >= policy.min_join_overlap
+            and rel.approval_status != "approved"
+        ):
+            rel.approval_status = "approved"
+            rel.risk_reason = None
+            promoted += 1
+
+    await db.commit()
+    result = {
+        "entities": len(entities),
+        "labels": len(by_label),
+        "masters_elected": masters_elected,
+        "ubiquitous_columns": len(ubiquitous_columns),
+        "promoted": promoted,
+        "demoted": demoted,
+    }
+    ingest_logger.info("sme_master_election", container_id=container_id, **result)
+    return result
