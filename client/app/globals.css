@@ -30,21 +30,20 @@
   --danger-bg:  #fee2e2;
   --warning:    #d97706;
 
-  /* Chart palette — 5 perceptually-even OKLch categorical hues. --chart-1 is the
-     amber brand accent (single-series charts/KPIs use it); 2–5 stay distinct so
-     pies / multi-series read cleanly. Referenced by analytics-catalog/* via var(). */
-  --chart-1: oklch(0.74 0.15 65);    /* amber — brand / primary series */
-  --chart-2: oklch(0.62 0.13 250);   /* slate-blue */
-  --chart-3: oklch(0.70 0.12 165);   /* teal-green */
-  --chart-4: oklch(0.60 0.15 25);    /* terracotta */
-  --chart-5: oklch(0.58 0.09 300);   /* muted violet */
+  /* Chart palette — MONOCHROME (black / gray / white only). A dark→light gray ramp;
+     --chart-1 is near-black (primary series / KPI accent), 5 is light gray. */
+  --chart-1: oklch(0.28 0 0);   /* near-black — primary series / accent */
+  --chart-2: oklch(0.45 0 0);   /* dark gray */
+  --chart-3: oklch(0.60 0 0);   /* mid gray */
+  --chart-4: oklch(0.73 0 0);   /* light-mid gray */
+  --chart-5: oklch(0.84 0 0);   /* light gray */
   --chart-grid: color-mix(in oklab, var(--border) 75%, transparent);
   --chart-axis: var(--fg-subtle);
 
-  /* Warning surface — a CALM amber annotation (never a red error wall). */
-  --warn-fg:     var(--warning);
-  --warn-bg:     color-mix(in oklab, var(--warning) 12%, var(--bg));
-  --warn-border: color-mix(in oklab, var(--warning) 30%, transparent);
+  /* Annotation surface — neutral gray (no color). */
+  --warn-fg:     var(--fg-muted);
+  --warn-bg:     color-mix(in oklab, var(--fg) 6%, var(--bg));
+  --warn-border: color-mix(in oklab, var(--fg) 20%, transparent);
 
   /* Fonts — --font-sans is set by Next.js font loader (Plus Jakarta Sans).
      One family for everything; headings just use heavier weights. */
@@ -1088,13 +1087,13 @@ html.dark {
   --border:         #2c2c2a;
   --border-strong:  #444440;
 
-  /* Lift L and ease chroma so the categorical hues don't vibrate on near-black.
-     grid/axis/warn ride on --border/--fg-subtle/--warning which flip for free. */
-  --chart-1: oklch(0.78 0.14 65);
-  --chart-2: oklch(0.68 0.12 250);
-  --chart-3: oklch(0.74 0.11 165);
-  --chart-4: oklch(0.66 0.14 25);
-  --chart-5: oklch(0.66 0.09 300);
+  /* Monochrome ramp inverted for dark mode: light grays on near-black.
+     grid/axis/warn ride on --border/--fg-subtle/--fg which flip for free. */
+  --chart-1: oklch(0.93 0 0);   /* near-white — primary on dark */
+  --chart-2: oklch(0.78 0 0);
+  --chart-3: oklch(0.64 0 0);
+  --chart-4: oklch(0.52 0 0);
+  --chart-5: oklch(0.42 0 0);
 
   --background:         var(--bg);
   --foreground:         var(--fg);

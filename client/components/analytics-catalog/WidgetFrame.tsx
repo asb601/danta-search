@@ -160,8 +160,9 @@ export function DeltaBadge({
 }) {
   const positive = value >= 0;
   const Icon = positive ? TrendingUp : TrendingDown;
+  // Monochrome: neutral gray badge; direction is carried by the arrow + sign.
   return (
-    <Badge variant={positive ? "success" : "danger"}>
+    <Badge variant="muted">
       <Icon className="h-3 w-3" />
       {positive ? "+" : "−"}
       {formatValue(Math.abs(value), format)}
@@ -190,8 +191,7 @@ const _WARNING = new Set([
 export function statusVariant(raw: string): BadgeVariant | null {
   const v = raw.trim().toLowerCase();
   if (!v) return null;
-  if (_DANGER.has(v)) return "danger";
-  if (_SUCCESS.has(v)) return "success";
-  if (_WARNING.has(v)) return "warning";
+  // Monochrome: a known status gets a neutral gray badge (no semantic color).
+  if (_DANGER.has(v) || _SUCCESS.has(v) || _WARNING.has(v)) return "muted";
   return null;
 }

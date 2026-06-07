@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useCallback, use } from "react";
-import { ArrowLeft, Sparkles, Loader2, RefreshCw, LayoutDashboard } from "lucide-react";
+import { ArrowLeft, Sparkles, Loader2, RefreshCw, LayoutDashboard, Copy, Trash2 } from "lucide-react";
 import { apiFetch } from "@/lib/auth";
 import { DashboardFull, DashboardConfig } from "@/components/analytics-catalog/types";
 import { DashboardRenderer } from "@/components/analytics-catalog/DashboardRenderer";
@@ -76,6 +76,21 @@ export default function DashboardDetailPage({
     if (lastPrompt) generate({ promptOverride: lastPrompt, filters });
   };
 
+  const handleDuplicate = async () => {
+    const res = await apiFetch(`/api/dashboards/${dashboardId}/duplicate`, { method: "POST" });
+    if (res.ok) {
+      const dup = await res.json().catch(() => null);
+      if (dup?.id) router.push(`/dashboards/${dup.id}`);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!window.confirm(`Delete "${dashboard?.title || "this dashboard"}"? This can't be undone.`)) return;
+    const res = await apiFetch(`/api/dashboards/${dashboardId}`, { method: "DELETE" });
+    if (res.ok || res.status === 404) router.push("/dashboards");
+    else setError("Failed to delete dashboard.");
+  };
+
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -142,6 +157,18 @@ export default function DashboardDetailPage({
                 <RefreshCw className="w-3.5 h-3.5" />
               </Button>
             )}
+            <Button variant="ghost" size="icon" onClick={handleDuplicate} title="Duplicate dashboard">
+              <Copy className="w-3.5 h-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleDelete}
+              title="Delete dashboard"
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </Button>
           </div>
         </div>
       </header>

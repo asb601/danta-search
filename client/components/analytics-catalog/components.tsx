@@ -115,7 +115,7 @@ export function KpiCard({ widget, spark }: Props & { spark?: number[] }) {
           {explicitDelta !== undefined ? (
             <DeltaBadge value={explicitDelta} format={widget.config.format} />
           ) : trendPct !== undefined && Number.isFinite(trendPct) ? (
-            <span className={`inline-flex items-center gap-0.5 text-[11px] font-semibold ${trendPct >= 0 ? "text-success" : "text-danger"}`}>
+            <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-muted-foreground">
               {trendPct >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
               {Math.abs(trendPct).toFixed(0)}%
             </span>
