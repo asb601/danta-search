@@ -30,7 +30,7 @@ from app.schemas.dashboard import (
     DashboardGenerateRequest,
     DashboardUpdate,
 )
-from app.services.dashboard import assembly_engine, board_planner, data_catalog, join_gate, query_engine
+from app.services.dashboard import assembly_engine, board_planner, data_catalog, join_gate, query_engine, tieout
 from app.services.dashboard.empty_state import classify_empty
 from app.services.dashboard.insight import compute_insight
 from app.services.semantic_roles import is_additive_measure_role
@@ -507,6 +507,17 @@ async def generate_dashboard(
                 widget.config["insight"] = _ins
         widget_ids.append(widget.widget_id)
         resolved.append(widget)
+
+    # P5 tie-out (flag-gated): the binding number-level catch. Over already-returned
+    # data (no second query), flag any additive-measure breakdown whose parts SUM TO
+    # MORE than its KPI total — a definite double-count symptom. Warn-only on
+    # parts>whole (zero false positives); never on the normal top-N parts<whole.
+    if _settings.DASHBOARD_TIEOUT_RECONCILE:
+        _tie_warnings, _tie_badges = tieout.reconcile_tieout(resolved)
+        for _w in resolved:
+            if _w.widget_id in _tie_badges:
+                _w.provenance["tie_out"] = _tie_badges[_w.widget_id]
+        warnings.extend(_tie_warnings)
 
     # Surface empty widgets at the dashboard level so failures aren't silent.
     if empty_titles:

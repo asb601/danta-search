@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     DASHBOARD_PARALLEL_WIDGETS: bool = False
     DASHBOARD_WIDGET_CONCURRENCY: int = 3
 
+    # DASHBOARD_TIEOUT_RECONCILE — when True, a post-assembly pass flags any additive-
+    #   measure breakdown whose parts sum to MORE than its KPI total (a double-count
+    #   symptom) via the dashboard warnings + a per-widget provenance "tie_out" badge.
+    #   Warn-only on parts>whole (zero false positives — top-N parts<whole never warn).
+    #   Default OFF (dark launch / shadow-soak before flipping on for the demo).
+    DASHBOARD_TIEOUT_RECONCILE: bool = False
+
     # ORG_LIVE_DB_ENABLED — gate for the live read-only org Postgres data source.
     #   Naturally gated: the org_postgres tools only activate when an org actually
     #   has a non-empty postgres_url resolved from OrgAISettings. When True, a
