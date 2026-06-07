@@ -16,6 +16,15 @@ export function useChat() {
   // ── Conversation state ─────────────────────────────────────────────────────
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  // Synchronous mirror of activeConvId. State updates are async, but a streaming
+  // request that started for conversation A must know — the instant the user
+  // switches — that it no longer owns the view, so it can suppress its writes.
+  const activeConvIdRef = useRef<string | null>(null);
+  // Backstop: keep the ref aligned with state on every commit (covers any path
+  // that sets activeConvId without updating the ref inline).
+  useEffect(() => {
+    activeConvIdRef.current = activeConvId;
+  }, [activeConvId]);
   // Desktop sidebar is always visible via CSS (hidden sm:flex).
   // This state only controls the mobile drawer — default closed.
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -53,6 +62,7 @@ export function useChat() {
   // ── Load a conversation's messages ─────────────────────────────────────────
   const loadConversation = useCallback(async (convId: string) => {
     setLoadingConv(true);
+    activeConvIdRef.current = convId; // sync: in-flight streams must see the switch immediately
     setActiveConvId(convId);
     setMessages([]);
     setExpandedMsgId(null);
@@ -78,6 +88,7 @@ export function useChat() {
 
   // ── New / delete / rename conversations ───────────────────────────────────
   const startNewChat = useCallback(() => {
+    activeConvIdRef.current = null; // sync: in-flight streams must see the switch immediately
     setActiveConvId(null);
     setMessages([]);
     setExpandedMsgId(null);
@@ -128,6 +139,16 @@ export function useChat() {
     e.preventDefault();
     const trimmed = input.trim();
     if (!trimmed || isLoading) return;
+
+    // ── Ownership guard ───────────────────────────────────────────────────────
+    // Bind this stream to the conversation it was started for. If the user
+    // navigates away mid-stream, every view-affecting update below is suppressed
+    // (isStale === true) so this stream can't leak into the now-active thread.
+    // The backend persists the conversation, so the suppressed answer is fully
+    // recoverable by navigating back — which is why we do NOT abort the request.
+    const ownerAtStart = activeConvId;
+    let ownerConvId = ownerAtStart; // mutable: a brand-new chat learns its real id on `started`
+    const isStale = () => activeConvIdRef.current !== ownerConvId;
 
     const userMsg: Message = { id: crypto.randomUUID(), role: "user", content: trimmed };
     setMessages((prev) => [...prev, userMsg]);
@@ -181,10 +202,22 @@ export function useChat() {
             const event = JSON.parse(line.slice(6));
 
             if (event.event === "started" && event.conversation_id) {
-              if (!activeConvId || activeConvId !== event.conversation_id) {
-                setActiveConvId(event.conversation_id);
+              // Adopt the server-assigned conversation id ONLY if the user is
+              // still on the view this stream was started from. isStale() MUST be
+              // evaluated BEFORE reassigning ownerConvId: for a brand-new chat the
+              // owner is the (null) new-chat view, so the stream is "current" and
+              // adopts the real id; if the user has already navigated away, it
+              // stays stale and never steals the view — and never adopts an id
+              // that would make its own subsequent updates suppress themselves.
+              if (!isStale()) {
+                ownerConvId = event.conversation_id;
+                activeConvIdRef.current = event.conversation_id; // keep ref in lock-step
+                if (!activeConvId || activeConvId !== event.conversation_id) {
+                  setActiveConvId(event.conversation_id);
+                }
               }
             } else if (event.event === "pipeline_step" && event.step === "retrieval") {
+              if (isStale()) continue; // user navigated away — don't touch the active thread
               const r: number = event.retrieved_files ?? 0;
               const t: number = event.total_files ?? 0;
               const label =
@@ -201,6 +234,7 @@ export function useChat() {
                 ]);
               }
             } else if (event.event === "thinking") {
+              if (isStale()) continue; // user navigated away — don't touch the active thread
               const toolName = event.tool || "tools";
               if (!streamMsgId) {
                 streamMsgId = crypto.randomUUID();
@@ -217,7 +251,8 @@ export function useChat() {
                 );
               }
             } else if (event.event === "token") {
-              streamedContent += event.content;
+              streamedContent += event.content; // accumulate even if stale (kept for parity)
+              if (isStale()) continue; // user navigated away — don't touch the active thread
               if (!streamMsgId) {
                 streamMsgId = crypto.randomUUID();
                 setMessages((prev) => [
@@ -234,8 +269,11 @@ export function useChat() {
                 );
               }
             } else if (event.event === "done") {
+              // Capture the result REGARDLESS of staleness — the optimistic
+              // sidebar update below is keyed by resultConvId, not the viewed
+              // conversation, so counts must still update after navigating away.
               finalResult = event.result;
-              if (streamMsgId && finalResult) {
+              if (!isStale() && streamMsgId && finalResult) {
                 const fResult = finalResult;
                 const sId = streamMsgId;
                 setMessages((prev) =>
@@ -247,7 +285,7 @@ export function useChat() {
                   setExpandedMsgId(sId);
                 }
               }
-              if (finalResult?.warning) {
+              if (!isStale() && finalResult?.warning) {
                 const warnMsg = finalResult.warning;
                 setMessages((prev) => [
                   ...prev,
@@ -265,8 +303,11 @@ export function useChat() {
         }
       }
 
-      // Optimistic sidebar update — no full refetch needed on existing conversations
-      const resultConvId = finalResult?.conversation_id || activeConvId;
+      // Optimistic sidebar update — no full refetch needed on existing conversations.
+      // Key by THIS stream's owner (ownerConvId), never the currently-viewed
+      // activeConvId, so the count updates for the right conversation even if the
+      // user has navigated away mid-stream.
+      const resultConvId = finalResult?.conversation_id || ownerConvId;
       if (resultConvId) {
         setConversations((prev) => {
           const exists = prev.some((c) => c.id === resultConvId);
@@ -289,6 +330,9 @@ export function useChat() {
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "AbortError") {
         // User clicked stop — don't show an error
+      } else if (isStale()) {
+        // User navigated away — a background stream's error must not surface in
+        // the now-active thread. The persisted conversation is unaffected.
       } else {
         const errMsg = err instanceof Error ? err.message : "Something went wrong.";
         setMessages((prev) => [

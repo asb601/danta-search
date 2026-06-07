@@ -43,6 +43,18 @@ export function usePdfChat({ mode }: { mode: ChatMode }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // ── Ownership guard ─────────────────────────────────────────────────────────
+  // A PDF turn belongs to PDF mode. Mode can change mid-request (the user switches
+  // back to Excel chat), so a still-pending /api/pdf/chat response must NOT mutate
+  // this ephemeral thread once we've left PDF mode — otherwise the answer leaks in
+  // when the user returns. A synchronous ref mirrors `mode` so the in-flight
+  // request sees the switch immediately (state reads inside an async closure are
+  // stale). We do NOT abort — the request just completes silently.
+  const modeRef = useRef<ChatMode>(mode);
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
   // ── Document picker state ───────────────────────────────────────────────────
   const [documents, setDocuments] = useState<PdfDocument[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
@@ -103,6 +115,12 @@ export function usePdfChat({ mode }: { mode: ChatMode }) {
       const trimmed = raw.trim();
       if (!trimmed || isLoading) return;
 
+      // Bind this turn to the mode it was started in. If the user switches away
+      // from PDF mode before the response lands, suppress the write so it can't
+      // leak into the (now-hidden) thread and surprise the user on return.
+      const ownerMode = modeRef.current;
+      const isStale = () => modeRef.current !== ownerMode;
+
       const userMsg: PdfMessage = {
         id: crypto.randomUUID(),
         role: "user",
@@ -146,6 +164,7 @@ export function usePdfChat({ mode }: { mode: ChatMode }) {
         }
 
         const data: PdfChatResponse = await res.json();
+        if (isStale()) return; // user left PDF mode — drop the answer (no leak)
         setMessages((prev) => [
           ...prev,
           {
@@ -160,6 +179,8 @@ export function usePdfChat({ mode }: { mode: ChatMode }) {
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === "AbortError") {
           // user stopped — no error bubble
+        } else if (isStale()) {
+          // user left PDF mode — don't surface a background error in the thread
         } else {
           const msg =
             err instanceof Error ? err.message : "Something went wrong.";
