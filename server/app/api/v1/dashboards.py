@@ -28,7 +28,8 @@ from app.schemas.dashboard import (
     DashboardGenerateRequest,
     DashboardUpdate,
 )
-from app.services.dashboard import assembly_engine, board_planner, data_catalog, query_engine
+from app.services.dashboard import assembly_engine, board_planner, data_catalog, join_gate, query_engine
+from app.services.semantic_roles import is_additive_measure_role
 from app.services.dashboard.component_catalog import catalog_as_metadata
 from app.services.dashboard.recommendation_engine import build_pinned_spec, recommend
 
@@ -446,6 +447,22 @@ async def generate_dashboard(
         # every later phase has a stable, inspectable, re-runnable contract. This
         # only adds provenance.spec — render output is unchanged.
         widget.provenance["spec"] = build_pinned_spec(intent, widget, shape)
+        # P2 Layer 3 (honest catch): grounding is advisory, so verify post-hoc that
+        # the result did not span tables lacking a validated safe join. Surface a
+        # warning instead of shipping a silent double-counted headline.
+        js = join_gate.widget_join_safety(provenance["files_used"], catalog, relationships)
+        if js["multi_table"] and not js["safe"]:
+            widget.provenance["join_warning"] = "multi_table_no_validated_join"
+            warnings.append(
+                f"Widget '{intent.title}' combined data from multiple tables without a "
+                "validated relationship — its headline number may double-count."
+            )
+        # P2 G2: record whether the bound measure is provably additive (drives P5
+        # tie-out). Absent key == unproven; never assert summable without a role.
+        _pm = ((intent.spec or {}).get("planned") or {}).get("measure")
+        _role = role_map.get(_pm) if _pm else None
+        if _role is not None:
+            widget.provenance["summable"] = is_additive_measure_role(_role)
         widget_ids.append(widget.widget_id)
         resolved.append(widget)
 

@@ -288,6 +288,20 @@ def _build_widget_grounding(intent: WidgetIntent, catalog: list | None) -> str:
             val_bits.append(f"{c.name} ∈ {{{', '.join(str(v) for v in c.top_values[:8])}}}")
     if val_bits:
         lines.append("- Real values (never invent others): " + " | ".join(val_bits[:6]) + ".")
+    # P2 ADDITIVITY (G2): if the planned measure's ingestion role is non-additive
+    # (ratio/rate/percentage), instruct the agent never to SUM it. Role-driven only
+    # (never the column name); fail-closed (no role -> no directive, no claim).
+    measure = ((intent.spec or {}).get("planned") or {}).get("measure")
+    if measure:
+        from app.services import semantic_roles as _sr
+        from app.services.dashboard.data_catalog import role_map_for_table
+
+        if _sr.is_non_additive_measure_role(role_map_for_table(match).get(measure)):
+            lines.append(
+                f"- ADDITIVITY: '{measure}' is a non-additive measure (ratio/rate/"
+                f"percentage). NEVER SUM it across rows — AVERAGE it, or recompute it "
+                f"from its numerator and denominator. Summing it is meaningless."
+            )
     lines.append(
         "- Prefer this single table. Do not join to a different business domain. "
         "Do not invent columns or filter values."

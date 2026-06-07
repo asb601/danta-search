@@ -116,14 +116,19 @@ def test_min_confidence_filter_unchanged():
     assert len(_run([_rel(confidence_score=0.4)], min_confidence=0.3)) == 1
 
 
-def test_render_join_section_byte_identical_with_enriched_dicts():
-    # The new provenance keys must NOT leak into LLM grounding text — same input
-    # joins, identical rendered block whether or not the enrichment is present.
+def test_render_join_section_renders_safe_edge_without_leaking_provenance():
+    # P2 update: _render_join_section now filters to SAFE joins (the P0b byte-frozen
+    # guarantee is intentionally superseded — see test_dashboard_join_gate.py). The
+    # forwarded provenance still must NOT leak into the LLM grounding text; it only
+    # gates inclusion.
     tables = [SimpleNamespace(file_id="A", table_name="orders"),
               SimpleNamespace(file_id="B", table_name="vendors")]
-    legacy = [{"file_a_id": "A", "file_b_id": "B", "shared_column": "Vendor_ID",
-               "related_column": "Vendor_ID", "confidence": 0.8, "join_type": "INNER JOIN"}]
-    enriched = [{**legacy[0], "value_overlap_pct": 0.92, "evidence_count": 14,
-                 "edge_provenance": {"card_a": 100}, "role_source": "fingerprint_index",
-                 "semantic_role": "custom:entity_key:record"}]
-    assert _render_join_section(tables, enriched) == _render_join_section(tables, legacy)
+    safe = {"file_a_id": "A", "file_b_id": "B", "shared_column": "Vendor_ID",
+            "related_column": "Vendor_ID", "confidence": 0.8, "join_type": "INNER JOIN",
+            "value_overlap_pct": 0.92, "evidence_count": 14,
+            "edge_provenance": {"card_a": 100, "card_b": 50, "key_kind_a": "pk", "key_kind_b": "fk"},
+            "role_source": "fingerprint_index", "semantic_role": "custom:entity_key:record"}
+    out = _render_join_section(tables, [safe])
+    assert "Vendor_ID" in out                                  # the safe join is advertised
+    for leak in ("0.92", "card_a", "fingerprint_index", "evidence"):
+        assert leak not in out                                 # provenance never leaks into grounding

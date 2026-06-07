@@ -24,6 +24,7 @@ from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
 from app.services import semantic_roles as _sr
+from app.services.dashboard.join_gate import safe_join
 from app.services.ingestion_config import IngestStatus
 
 # A file is dashboard-ready once ingestion has produced metadata/parquet. The
@@ -367,6 +368,11 @@ def _render_join_section(tables: list[DataCatalogTable], relationships: list[dic
     lines: list[str] = ["", "KNOWN JOINS (use ONLY these to span tables; do not invent others):"]
     seen: set = set()
     for r in relationships:
+        # P2 JOIN GATE: only advertise relationship-validated, non-fan-out joins
+        # (cardinality not many-to-many AND value overlap above the referential
+        # floor). Fail-closed: unproven/legacy edges are NOT offered to the agent.
+        if not safe_join(r):
+            continue
         a = name_by_id.get(r["file_a_id"])
         b = name_by_id.get(r["file_b_id"])
         if not a or not b:
