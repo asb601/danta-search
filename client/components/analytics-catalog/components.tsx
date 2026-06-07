@@ -7,7 +7,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { DashboardWidget } from "./types";
-import { WidgetFrame, EmptyState, DeltaBadge, statusVariant } from "./WidgetFrame";
+import { WidgetFrame, EmptyState, DeltaBadge, WarningChips, statusVariant } from "./WidgetFrame";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
@@ -82,15 +82,24 @@ export function KpiCard({ widget }: Props) {
         <p className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground leading-tight truncate">
           {widget.title}
         </p>
-        {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} />}
+        <div className="flex items-center gap-1 shrink-0">
+          <WarningChips provenance={widget.provenance} />
+          {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} />}
+        </div>
       </div>
       <div>
         <p className="text-3xl font-bold leading-none tracking-tight tabular-nums text-foreground">
           {raw === undefined ? "—" : formatValue(raw, widget.config.format)}
         </p>
-        {valueKey && (
+        {raw === undefined && widget.provenance?.empty_message ? (
+          // Honest blank: explain WHY the KPI has no value (error / missing / no rows),
+          // instead of an undiagnosable em-dash.
+          <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
+            {widget.provenance.empty_message}
+          </p>
+        ) : valueKey ? (
           <p className="mt-2 text-xs text-muted-foreground truncate">{humanize(valueKey)}</p>
-        )}
+        ) : null}
         {typeof rowCount === "number" && rowCount > 1 && (
           <p className="mt-0.5 text-[11px] text-subtle-foreground">
             across {compactNumber(rowCount)} records
@@ -119,8 +128,16 @@ export function MetricTile({ widget }: Props) {
         <p className="text-2xl font-bold leading-none tracking-tight tabular-nums text-foreground">
           {raw === undefined ? "—" : formatValue(raw, widget.config.format)}
         </p>
-        {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} />}
+        <div className="flex items-center gap-1 shrink-0">
+          <WarningChips provenance={widget.provenance} />
+          {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} />}
+        </div>
       </div>
+      {raw === undefined && widget.provenance?.empty_message && (
+        <p className="text-[10px] leading-snug text-muted-foreground">
+          {widget.provenance.empty_message}
+        </p>
+      )}
     </Card>
   );
 }
@@ -135,8 +152,11 @@ export function CatalogTable({ widget }: Props) {
       (widget.provenance?.error ? `Could not generate this widget: ${widget.provenance.error}` : undefined) ||
       (widget.provenance?.empty ? "No rows were returned for this query." : undefined);
     return (
-      <WidgetFrame title={widget.title} rationale={widget.rationale}>
-        <EmptyState message={msg} />
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance}>
+        <EmptyState
+          reason={widget.provenance?.empty_reason}
+          message={widget.provenance?.empty_message ?? msg}
+        />
       </WidgetFrame>
     );
   }
@@ -155,6 +175,8 @@ export function CatalogTable({ widget }: Props) {
     <WidgetFrame
       title={widget.title}
       rationale={widget.rationale}
+      provenance={widget.provenance}
+      insight={widget.config.insight}
       footer={rows.length > shown.length ? `Showing ${shown.length} of ${rows.length} rows` : undefined}
     >
       <div className="h-full overflow-auto rounded-lg">
@@ -254,8 +276,11 @@ function LineLike({ widget, area }: Props & { area: boolean }) {
 
   if (!allRows.length || !xKey || !series.length) {
     return (
-      <WidgetFrame title={widget.title} rationale={widget.rationale}>
-        <EmptyState message={widget.provenance?.answer} />
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance}>
+        <EmptyState
+          reason={widget.provenance?.empty_reason}
+          message={widget.provenance?.empty_message ?? widget.provenance?.answer}
+        />
       </WidgetFrame>
     );
   }
@@ -290,7 +315,7 @@ function LineLike({ widget, area }: Props & { area: boolean }) {
     ) : undefined;
 
   return (
-    <WidgetFrame title={widget.title} rationale={widget.rationale} action={toggle}>
+    <WidgetFrame title={widget.title} rationale={widget.rationale} action={toggle} provenance={widget.provenance} insight={widget.config.insight}>
       <div className="flex h-full flex-col">
         <div ref={ref} className="w-full flex-1 min-h-0">
         <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%">
@@ -309,9 +334,9 @@ function LineLike({ widget, area }: Props & { area: boolean }) {
               <g key={i}>
                 <line
                   x1={PAD.left} y1={y} x2={W - PAD.right} y2={y}
-                  stroke="var(--border)" strokeWidth={1} strokeDasharray="3 4" {...STROKE}
+                  stroke="var(--chart-grid)" strokeWidth={1} {...STROKE}
                 />
-                <text x={PAD.left - 6} y={y + 3.5} textAnchor="end" fontSize={9} fill="var(--muted-foreground)">
+                <text x={PAD.left - 6} y={y + 3.5} textAnchor="end" fontSize={10} fill="var(--chart-axis)">
                   {compactNumber(t)}
                 </text>
               </g>
@@ -338,7 +363,7 @@ function LineLike({ widget, area }: Props & { area: boolean }) {
           {rows.map((r, i) => {
             if (rows.length > 12 && i % Math.ceil(rows.length / 8) !== 0) return null;
             return (
-              <text key={i} x={xAt(i)} y={H - 9} textAnchor="middle" fontSize={9} fill="var(--muted-foreground)">
+              <text key={i} x={xAt(i)} y={H - 9} textAnchor="middle" fontSize={10} fill="var(--chart-axis)">
                 {str(r[xKey]).slice(0, 10)}
               </text>
             );
@@ -377,8 +402,11 @@ export function BarChart({ widget }: Props) {
   const { ref, w: W, h: H } = useChartSize();
   if (!rows.length || !xKey || !yKey) {
     return (
-      <WidgetFrame title={widget.title} rationale={widget.rationale}>
-        <EmptyState message={widget.provenance?.answer} />
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance}>
+        <EmptyState
+          reason={widget.provenance?.empty_reason}
+          message={widget.provenance?.empty_message ?? widget.provenance?.answer}
+        />
       </WidgetFrame>
     );
   }
@@ -390,7 +418,7 @@ export function BarChart({ widget }: Props) {
   const gradId = `bgrad-${widget.widget_id}`;
 
   return (
-    <WidgetFrame title={widget.title} rationale={widget.rationale}>
+    <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
       <div ref={ref} className="h-full w-full">
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%">
         <defs>
@@ -405,9 +433,9 @@ export function BarChart({ widget }: Props) {
             <g key={i}>
               <line
                 x1={PAD.left} y1={y} x2={W - PAD.right} y2={y}
-                stroke="var(--border)" strokeWidth={1} strokeDasharray="3 4" {...STROKE}
+                stroke="var(--chart-grid)" strokeWidth={1} {...STROKE}
               />
-              <text x={PAD.left - 6} y={y + 3.5} textAnchor="end" fontSize={9} fill="var(--muted-foreground)">
+              <text x={PAD.left - 6} y={y + 3.5} textAnchor="end" fontSize={10} fill="var(--chart-axis)">
                 {compactNumber(t)}
               </text>
             </g>
@@ -423,7 +451,7 @@ export function BarChart({ widget }: Props) {
               <title>{`${str(r[xKey])}: ${formatValue(v, widget.config.format)}`}</title>
               <rect x={x} y={y} width={barW} height={Math.max(h, 1)} rx={3} fill={`url(#${gradId})`} />
               {rows.length <= 12 && (
-                <text x={x + barW / 2} y={H - 9} textAnchor="middle" fontSize={9} fill="var(--muted-foreground)">
+                <text x={x + barW / 2} y={H - 9} textAnchor="middle" fontSize={10} fill="var(--chart-axis)">
                   {str(r[xKey]).slice(0, 8)}
                 </text>
               )}
@@ -444,8 +472,11 @@ export function PieChart({ widget }: Props) {
   const valueKey = widget.config.value || firstY(widget);
   if (!rows.length || !labelKey || !valueKey) {
     return (
-      <WidgetFrame title={widget.title} rationale={widget.rationale}>
-        <EmptyState message={widget.provenance?.answer} />
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance}>
+        <EmptyState
+          reason={widget.provenance?.empty_reason}
+          message={widget.provenance?.empty_message ?? widget.provenance?.answer}
+        />
       </WidgetFrame>
     );
   }
@@ -467,7 +498,7 @@ export function PieChart({ widget }: Props) {
   });
 
   return (
-    <WidgetFrame title={widget.title} rationale={widget.rationale}>
+    <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
       <div className="flex h-full items-center gap-4 px-2">
         <svg viewBox="0 0 180 200" className="h-full max-h-[180px] shrink-0">
           {slices.map((s, i) => (
@@ -476,7 +507,7 @@ export function PieChart({ widget }: Props) {
           <text x={cx} y={cy - 4} textAnchor="middle" fontSize={15} fontWeight="700" fill="var(--foreground)">
             {compactNumber(total)}
           </text>
-          <text x={cx} y={cy + 12} textAnchor="middle" fontSize={9} fill="var(--muted-foreground)">
+          <text x={cx} y={cy + 12} textAnchor="middle" fontSize={10} fill="var(--chart-axis)">
             total
           </text>
         </svg>
@@ -505,8 +536,11 @@ export function Heatmap({ widget }: Props) {
   const valueKey = widget.config.value;
   if (!rows.length || !xKey || !yKey || !valueKey || typeof yKey !== "string") {
     return (
-      <WidgetFrame title={widget.title} rationale={widget.rationale}>
-        <EmptyState message={widget.provenance?.answer} />
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance}>
+        <EmptyState
+          reason={widget.provenance?.empty_reason}
+          message={widget.provenance?.empty_message ?? widget.provenance?.answer}
+        />
       </WidgetFrame>
     );
   }
@@ -521,7 +555,7 @@ export function Heatmap({ widget }: Props) {
     if (v > maxV) maxV = v;
   }
   return (
-    <WidgetFrame title={widget.title} rationale={widget.rationale}>
+    <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
       <div className="h-full overflow-auto px-2">
         <div
           className="inline-grid gap-0.5"
@@ -583,15 +617,18 @@ export function Funnel({ widget }: Props) {
   const valueKey = widget.config.value || firstY(widget);
   if (!rows.length || !stageKey || !valueKey) {
     return (
-      <WidgetFrame title={widget.title} rationale={widget.rationale}>
-        <EmptyState message={widget.provenance?.answer} />
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance}>
+        <EmptyState
+          reason={widget.provenance?.empty_reason}
+          message={widget.provenance?.empty_message ?? widget.provenance?.answer}
+        />
       </WidgetFrame>
     );
   }
   const maxV = Math.max(1, ...rows.map((r) => num(r[valueKey])));
   const firstV = num(rows[0]?.[valueKey]) || maxV;
   return (
-    <WidgetFrame title={widget.title} rationale={widget.rationale}>
+    <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
       <div className="flex h-full flex-col justify-center gap-2 px-2">
         {rows.map((r, i) => {
           const v = num(r[valueKey]);

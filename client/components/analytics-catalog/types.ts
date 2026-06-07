@@ -28,6 +28,15 @@ export interface WidgetProvenance {
   query?: string;
   empty?: boolean;
   error?: string;
+  // P4 — honest empty-state classification + message.
+  empty_reason?: "empty" | "missing" | "error";
+  empty_message?: string;
+  // P2 / P5 — per-widget correctness annotations (calm amber chips, not errors).
+  join_warning?: "multi_table_no_validated_join";
+  tie_out?: "over";
+  // P2 — additive-measure flag; P0 — pinned spec (opaque to the renderer).
+  summable?: boolean;
+  spec?: Record<string, unknown>;
 }
 
 export interface WidgetConfig {
@@ -41,6 +50,8 @@ export interface WidgetConfig {
   orientation?: "vertical" | "horizontal";
   columns?: string[] | "all";
   format?: "currency" | "percent" | "number" | "auto";
+  // P4 — deterministic one-line analyst caption (absent when uncomputable).
+  insight?: string;
   [key: string]: unknown;
 }
 

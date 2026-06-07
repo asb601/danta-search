@@ -33,11 +33,18 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
   return (
     <div className="space-y-4">
       {config?.warnings && config.warnings.length > 0 && (
-        <div className="flex items-start gap-2 rounded-lg border border-accent-foreground/20 bg-accent px-3 py-2 text-xs text-accent-foreground">
-          <svg className="mt-0.5 w-3.5 h-3.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-          </svg>
-          <span>{config.warnings.join(" · ")}</span>
+        <div className="rounded-lg border border-warn-border bg-warn-bg px-3.5 py-2.5">
+          <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-warn-fg">
+            <svg className="h-3.5 w-3.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+            </svg>
+            Analyst notes
+          </div>
+          <ul className="space-y-0.5 text-xs text-foreground/80">
+            {config.warnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
         </div>
       )}
 

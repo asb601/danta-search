@@ -30,6 +30,22 @@
   --danger-bg:  #fee2e2;
   --warning:    #d97706;
 
+  /* Chart palette — 5 perceptually-even OKLch categorical hues. --chart-1 is the
+     amber brand accent (single-series charts/KPIs use it); 2–5 stay distinct so
+     pies / multi-series read cleanly. Referenced by analytics-catalog/* via var(). */
+  --chart-1: oklch(0.74 0.15 65);    /* amber — brand / primary series */
+  --chart-2: oklch(0.62 0.13 250);   /* slate-blue */
+  --chart-3: oklch(0.70 0.12 165);   /* teal-green */
+  --chart-4: oklch(0.60 0.15 25);    /* terracotta */
+  --chart-5: oklch(0.58 0.09 300);   /* muted violet */
+  --chart-grid: color-mix(in oklab, var(--border) 75%, transparent);
+  --chart-axis: var(--fg-subtle);
+
+  /* Warning surface — a CALM amber annotation (never a red error wall). */
+  --warn-fg:     var(--warning);
+  --warn-bg:     color-mix(in oklab, var(--warning) 12%, var(--bg));
+  --warn-border: color-mix(in oklab, var(--warning) 30%, transparent);
+
   /* Fonts — --font-sans is set by Next.js font loader (Plus Jakarta Sans).
      One family for everything; headings just use heavier weights. */
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
@@ -115,6 +131,16 @@
   --color-danger-bg:          var(--danger-bg);
   --color-border-strong:      var(--border-strong);
   --color-subtle-foreground:  var(--fg-subtle);
+  --color-chart-1:            var(--chart-1);
+  --color-chart-2:            var(--chart-2);
+  --color-chart-3:            var(--chart-3);
+  --color-chart-4:            var(--chart-4);
+  --color-chart-5:            var(--chart-5);
+  --color-chart-grid:         var(--chart-grid);
+  --color-chart-axis:         var(--chart-axis);
+  --color-warn-fg:            var(--warn-fg);
+  --color-warn-bg:            var(--warn-bg);
+  --color-warn-border:        var(--warn-border);
   --font-sans:    var(--font-sans);
   --font-mono:    var(--font-mono);
   --radius-sm: calc(var(--radius) - 4px);
@@ -1061,6 +1087,14 @@ html.dark {
   --surface-raised: #1f1f1e;
   --border:         #2c2c2a;
   --border-strong:  #444440;
+
+  /* Lift L and ease chroma so the categorical hues don't vibrate on near-black.
+     grid/axis/warn ride on --border/--fg-subtle/--warning which flip for free. */
+  --chart-1: oklch(0.78 0.14 65);
+  --chart-2: oklch(0.68 0.12 250);
+  --chart-3: oklch(0.74 0.11 165);
+  --chart-4: oklch(0.66 0.14 25);
+  --chart-5: oklch(0.66 0.09 300);
 
   --background:         var(--bg);
   --foreground:         var(--fg);
