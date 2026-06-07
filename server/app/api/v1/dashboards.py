@@ -30,7 +30,7 @@ from app.schemas.dashboard import (
     DashboardGenerateRequest,
     DashboardUpdate,
 )
-from app.services.dashboard import assembly_engine, board_planner, data_catalog, join_gate, query_engine, tieout
+from app.services.dashboard import assembly_engine, board_planner, conformed, data_catalog, join_gate, query_engine, tieout
 from app.services.dashboard.empty_state import classify_empty
 from app.services.dashboard.insight import compute_insight
 from app.services.semantic_roles import is_additive_measure_role
@@ -421,9 +421,27 @@ async def generate_dashboard(
     #      flag-off path (only widget_id/generated_at differ, as they always do).
     _settings = get_settings()
 
+    # P7: resolve CONFORMED-dimension slicers, then validate the requested global
+    # filters against them — a filter on a non-conformed dimension is REJECTED with a
+    # warning, never silently applied (the cross-file-inconsistency landmine).
+    available_filters = (
+        conformed.resolve_conformed_dimensions(catalog) if _settings.DASHBOARD_GLOBAL_FILTERS else []
+    )
+    active_filters: list[dict] = []
+    if available_filters and body.global_filters:
+        _allowed = {d.semantic_role for d in available_filters} | {d.label for d in available_filters}
+        for f in body.global_filters:
+            if f.dimension in _allowed and f.values:
+                active_filters.append({"dimension": f.dimension, "values": list(f.values)})
+            else:
+                warnings.append(f"Filter on '{f.dimension}' ignored — not a conformed board dimension.")
+
     async def _run_one(intent):
+        _applied, _ = conformed.resolve_widget_filters(intent, available_filters, active_filters)
         async with async_session() as ws:
-            return await query_engine.run_widget(intent, db=ws, scope=scope, catalog=catalog)
+            return await query_engine.run_widget(
+                intent, db=ws, scope=scope, catalog=catalog, applied_filters=_applied
+            )
 
     results = await query_engine.run_widgets(
         intents,
@@ -505,6 +523,16 @@ async def generate_dashboard(
             )
             if _ins:
                 widget.config["insight"] = _ins
+        # P7: honest filter status — a widget the slicer can't touch (its table lacks
+        # the conformed dimension) is marked, never silently shown as if filtered.
+        if active_filters:
+            _af, _na = conformed.resolve_widget_filters(intent, available_filters, active_filters)
+            if _na:
+                widget.provenance["filter_status"] = {"status": "not_affected", "dimensions": _na}
+            elif _af:
+                widget.provenance["filter_status"] = {
+                    "status": "applied", "dimensions": [a["label"] for a in _af]
+                }
         widget_ids.append(widget.widget_id)
         resolved.append(widget)
 
@@ -549,6 +577,15 @@ async def generate_dashboard(
         d.config = merged
     else:
         d.config = config
+
+    # P7: advertise the conformed slicers + active filters on the persisted config so
+    # the frontend slicer bar can render them. Additive JSONB keys (no migration).
+    if _settings.DASHBOARD_GLOBAL_FILTERS and isinstance(d.config, dict):
+        d.config["available_filters"] = [
+            {"dimension": x.semantic_role, "label": x.label, "values": x.values, "tables": x.tables}
+            for x in available_filters
+        ]
+        d.config["global_filters"] = active_filters
 
     history = list(d.prompt_history or [])
     history.append({"prompt": prompt, "created_at": generated_at, "widget_ids": widget_ids})

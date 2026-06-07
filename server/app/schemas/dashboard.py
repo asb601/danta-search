@@ -41,11 +41,20 @@ class DashboardUpdate(BaseModel):
     is_pinned: bool | None = None
 
 
+class GlobalFilter(BaseModel):
+    # P7 — a board-level slicer on a CONFORMED dimension. `dimension` is the conformed
+    # dimension's semantic_role or label (validated against the board's available_filters;
+    # a non-conformed dimension is rejected with a warning, never silently applied).
+    dimension: str
+    values: list[str] = Field(default_factory=list, max_length=50)
+
+
 class DashboardGenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
     container_id: str | None = None
     max_widgets: int = Field(default=6, ge=1, le=8)
     append: bool = False
+    global_filters: list[GlobalFilter] = Field(default_factory=list)
 
 
 class DashboardSummary(BaseModel):

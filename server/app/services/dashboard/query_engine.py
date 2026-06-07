@@ -245,7 +245,7 @@ Return ONLY JSON of this shape (max {max_widgets} widgets):
 # 2. Run a widget through the existing agent
 # --------------------------------------------------------------------------
 
-def _build_widget_grounding(intent: WidgetIntent, catalog: list | None) -> str:
+def _build_widget_grounding(intent: WidgetIntent, catalog: list | None, *, applied_filters: list | None = None) -> str:
     """
     Build a short, agent-facing grounding block for ONE widget from the planner's
     hinted table + the matching catalog row. Passed via conversation_context
@@ -302,6 +302,15 @@ def _build_widget_grounding(intent: WidgetIntent, catalog: list | None) -> str:
                 f"percentage). NEVER SUM it across rows — AVERAGE it, or recompute it "
                 f"from its numerator and denominator. Summing it is meaningless."
             )
+    # P7 GLOBAL FILTER: a board-level slicer on a CONFORMED dimension, pre-resolved
+    # to THIS widget's physical column. Text-only (the agent applies the predicate in
+    # its own SQL); values come from the real observed members, never invented.
+    for f in (applied_filters or []):
+        vals = ", ".join(str(v) for v in (f.get("values") or []))
+        lines.append(
+            f"- GLOBAL FILTER (board-level, authoritative): restrict ALL results to rows "
+            f"where {f.get('column')} ∈ {{{vals}}}. Apply this to every aggregation in this widget."
+        )
     lines.append(
         "- Prefer this single table. Do not join to a different business domain. "
         "Do not invent columns or filter values."
@@ -310,7 +319,8 @@ def _build_widget_grounding(intent: WidgetIntent, catalog: list | None) -> str:
 
 
 async def run_widget(
-    intent: WidgetIntent, *, db, scope: dict, catalog: list | None = None
+    intent: WidgetIntent, *, db, scope: dict, catalog: list | None = None,
+    applied_filters: list | None = None,
 ) -> dict:
     """
     Execute one widget intent by REUSING the existing agent. Returns the agent
@@ -319,7 +329,7 @@ async def run_widget(
     """
     from app.agent import run_agent_query
 
-    grounding = _build_widget_grounding(intent, catalog)
+    grounding = _build_widget_grounding(intent, catalog, applied_filters=applied_filters)
 
     try:
         result = await run_agent_query(

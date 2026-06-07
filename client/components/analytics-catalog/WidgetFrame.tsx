@@ -67,10 +67,11 @@ export function WidgetFrame({
  *  verbatim; the renderer never recomputes them. */
 export function WarningChips({ provenance }: { provenance?: WidgetProvenance }) {
   if (!provenance) return null;
-  const chips: { key: string; label: string; title: string }[] = [];
+  const chips: { key: string; label: string; title: string; tone: "warn" | "muted" }[] = [];
   if (provenance.tie_out === "over") {
     chips.push({
       key: "tie",
+      tone: "warn",
       label: "May double-count",
       title: "The breakdown sums to more than the headline total — a double-counting symptom.",
     });
@@ -78,8 +79,19 @@ export function WarningChips({ provenance }: { provenance?: WidgetProvenance }) 
   if (provenance.join_warning === "multi_table_no_validated_join") {
     chips.push({
       key: "join",
+      tone: "warn",
       label: "Unvalidated join",
       title: "This widget combined tables without a validated relationship; the number may double-count.",
+    });
+  }
+  // P7 — honest "not filtered" note (informational, neutral — not an alarm).
+  const fs = provenance.filter_status;
+  if (fs?.status === "not_affected" && Array.isArray(fs.dimensions) && fs.dimensions.length) {
+    chips.push({
+      key: "na",
+      tone: "muted",
+      label: `Not filtered by ${fs.dimensions.join(", ")}`,
+      title: "This widget's table doesn't carry the slicer dimension, so the board filter doesn't apply here.",
     });
   }
   if (!chips.length) return null;
@@ -89,9 +101,13 @@ export function WarningChips({ provenance }: { provenance?: WidgetProvenance }) 
         <span
           key={c.key}
           title={c.title}
-          className="inline-flex items-center gap-1 rounded-md border border-warn-border bg-warn-bg px-1.5 py-0.5 text-[10px] font-medium text-warn-fg"
+          className={
+            c.tone === "warn"
+              ? "inline-flex items-center gap-1 rounded-md border border-warn-border bg-warn-bg px-1.5 py-0.5 text-[10px] font-medium text-warn-fg"
+              : "inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+          }
         >
-          <TriangleAlert className="h-3 w-3" />
+          {c.tone === "warn" && <TriangleAlert className="h-3 w-3" />}
           {c.label}
         </span>
       ))}

@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     DASHBOARD_PARALLEL_WIDGETS: bool = False
     DASHBOARD_WIDGET_CONCURRENCY: int = 3
 
+    # DASHBOARD_GLOBAL_FILTERS — when True, /generate advertises CONFORMED dimensions
+    #   (same semantic_role + proven member-set overlap across >=2 board tables) as
+    #   board-level slicers, validates requested global_filters against them (rejects
+    #   non-conformed ones), and injects the filter as agent grounding (zero SQL in the
+    #   dashboard layer). Default OFF (dark launch). When off, no filters are offered
+    #   or applied and output is byte-identical to today.
+    DASHBOARD_GLOBAL_FILTERS: bool = False
+
     # DASHBOARD_TIEOUT_RECONCILE — when True, a post-assembly pass flags any additive-
     #   measure breakdown whose parts sum to MORE than its KPI total (a double-count
     #   symptom) via the dashboard warnings + a per-widget provenance "tie_out" badge.

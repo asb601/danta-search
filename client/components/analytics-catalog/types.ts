@@ -37,6 +37,21 @@ export interface WidgetProvenance {
   // P2 — additive-measure flag; P0 — pinned spec (opaque to the renderer).
   summable?: boolean;
   spec?: Record<string, unknown>;
+  // P7 — whether a board global filter applied to this widget, or it's not affected
+  // (its table lacks the conformed dimension) — surfaced as an honest badge.
+  filter_status?: { status: "applied" | "not_affected"; dimensions?: string[] };
+}
+
+// P7 — a conformed dimension the board can be sliced by (advertised to the slicer bar).
+export interface ConformedFilter {
+  dimension: string;
+  label: string;
+  values: string[];
+  tables?: string[];
+}
+export interface ActiveFilter {
+  dimension: string;
+  values: string[];
 }
 
 export interface WidgetConfig {
@@ -79,6 +94,9 @@ export interface DashboardConfig {
   layout?: string;
   widgets: DashboardWidget[];
   warnings?: string[];
+  // P7 — board-level slicers (conformed dimensions) + the currently-applied filters.
+  available_filters?: ConformedFilter[];
+  global_filters?: ActiveFilter[];
 }
 
 export interface DashboardSummary {

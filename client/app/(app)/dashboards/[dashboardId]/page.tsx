@@ -6,6 +6,8 @@ import { ArrowLeft, Sparkles, Loader2, RefreshCw, LayoutDashboard } from "lucide
 import { apiFetch } from "@/lib/auth";
 import { DashboardFull, DashboardConfig } from "@/components/analytics-catalog/types";
 import { DashboardRenderer } from "@/components/analytics-catalog/DashboardRenderer";
+import { SlicerBar } from "@/components/analytics-catalog/SlicerBar";
+import { ActiveFilter } from "@/components/analytics-catalog/types";
 import { Button } from "@/components/ui/button";
 import { Badge, BadgeVariant } from "@/components/ui/badge";
 
@@ -37,8 +39,8 @@ export default function DashboardDetailPage({
 
   const widgetCount = config?.widgets?.length ?? 0;
 
-  const generate = async () => {
-    const p = prompt.trim();
+  const generate = async (opts?: { promptOverride?: string; filters?: ActiveFilter[] }) => {
+    const p = (opts?.promptOverride ?? prompt).trim();
     if (!p || generating) return;
     setGenerating(true);
     setError(null);
@@ -46,11 +48,17 @@ export default function DashboardDetailPage({
       const res = await apiFetch(`/api/dashboards/${dashboardId}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: p, append: widgetCount > 0 }),
+        // P7: re-applying a slicer regenerates the SAME board prompt (not append) with
+        // the selected global_filters; numbers are recomputed by the agent.
+        body: JSON.stringify({
+          prompt: p,
+          append: opts?.filters ? false : widgetCount > 0,
+          global_filters: opts?.filters ?? [],
+        }),
       });
       if (res.ok) {
         setDashboard(await res.json());
-        setPrompt("");
+        if (!opts?.promptOverride) setPrompt("");
       } else {
         const body = await res.json().catch(() => ({}));
         setError(body.detail || "Generation failed — check your data files are ingested.");
@@ -60,6 +68,12 @@ export default function DashboardDetailPage({
     } finally {
       setGenerating(false);
     }
+  };
+
+  // P7: apply the board slicer — regenerate the current board prompt with filters.
+  const applyFilters = (filters: ActiveFilter[]) => {
+    const lastPrompt = config?.prompt || prompt;
+    if (lastPrompt) generate({ promptOverride: lastPrompt, filters });
   };
 
   if (loading) {
@@ -151,7 +165,10 @@ export default function DashboardDetailPage({
             </div>
           )}
 
-          <DashboardRenderer config={config} />
+          <div className="space-y-4">
+            <SlicerBar config={config} onApply={applyFilters} busy={generating} />
+            <DashboardRenderer config={config} />
+          </div>
         </div>
       </main>
 
@@ -186,7 +203,7 @@ export default function DashboardDetailPage({
 
             {/* Generate button */}
             <Button
-              onClick={generate}
+              onClick={() => generate()}
               disabled={generating || !prompt.trim()}
               size="lg"
               className="shrink-0 self-stretch"
