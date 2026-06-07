@@ -1,13 +1,25 @@
 "use client";
 
-// Generic renderer: a pure function of DashboardConfig. Lays widgets out as an
-// adaptive MASONRY collage — a responsive column grid with gap-filling dense
-// auto-flow. Each widget's persisted grid.w drives its column span (1..4) and
-// grid.h drives its row span (data-adaptive height from the backend). Absolute
-// x/y are intentionally ignored; the browser packs tiles for the viewport.
+// Generic renderer: a pure function of DashboardConfig. Lays the board out in
+// narrative BANDS like a real BI dashboard — a tight KPI ribbon on top, a dense
+// chart grid (with a wide hero) in the middle, detail tables at the bottom — rather
+// than one undifferentiated masonry. KPI cards borrow a sibling trend (same measure)
+// for a sparkline + period delta. Absolute persisted x/y are intentionally ignored.
 
-import { DashboardConfig } from "./types";
+import { DashboardConfig, DashboardWidget } from "./types";
 import { resolveWidgetComponent } from "./registry";
+import { KpiCard, CatalogTable } from "./components";
+
+function plannedMeasure(w: DashboardWidget): string | undefined {
+  const p = (w.provenance?.spec as { planned?: { measure?: string } } | undefined)?.planned;
+  const m = p?.measure;
+  if (m) return m;
+  return typeof w.config?.value === "string" ? w.config.value : undefined;
+}
+function firstYKey(w: DashboardWidget): string | undefined {
+  const y = w.config?.y;
+  return Array.isArray(y) ? y[0] : typeof y === "string" ? y : undefined;
+}
 
 export function DashboardRenderer({ config }: { config: DashboardConfig | null | undefined }) {
   const widgets = config?.widgets ?? [];
@@ -30,8 +42,31 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
     );
   }
 
+  const kpis = widgets.filter((w) => w.type === "kpi_card" || w.type === "metric_tile");
+  const tables = widgets.filter((w) => w.type === "table");
+  const charts = widgets.filter((w) => w.type !== "table" && w.type !== "kpi_card" && w.type !== "metric_tile");
+
+  // measure -> trend series, so a KPI can show a sparkline of its own measure.
+  const trendByMeasure = new Map<string, number[]>();
+  for (const c of charts) {
+    if (c.type !== "line_chart" && c.type !== "area_chart") continue;
+    const m = firstYKey(c) ?? plannedMeasure(c);
+    if (!m || trendByMeasure.has(m)) continue;
+    const vals = (c.data ?? []).map((r) => Number(r[m])).filter((v) => Number.isFinite(v));
+    if (vals.length >= 2) trendByMeasure.set(m, vals);
+  }
+  const sparkFor = (w: DashboardWidget) => {
+    const m = plannedMeasure(w);
+    return m ? trendByMeasure.get(m) : undefined;
+  };
+
+  // The hero is the first trend (or the highest-scoring chart) — it gets a wide tile.
+  const hero =
+    charts.find((c) => c.type === "line_chart" || c.type === "area_chart") ??
+    [...charts].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))[0];
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {config?.warnings && config.warnings.length > 0 && (
         <div className="rounded-lg border border-warn-border bg-warn-bg px-3.5 py-2.5">
           <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-warn-fg">
@@ -48,31 +83,49 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
         </div>
       )}
 
-      {/* Adaptive masonry: 1 col (mobile) → 2 (sm) → 4 (lg). Dense auto-flow
-          back-fills gaps so short tiles (KPIs) tuck beside tall ones (charts/
-          tables) instead of leaving a ragged column. Row unit 80px + gap-4
-          (16px): h=2 ≈ 176px (KPI), h=5 ≈ 464px (chart), h=8 ≈ 752px (table).
-          A span wider than the current column count is clamped by the browser,
-          so a w=4 table is full-width on every breakpoint. */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 grid-flow-row-dense gap-4 auto-rows-[80px]">
-        {widgets.map((w) => {
-          const Comp = resolveWidgetComponent(w.type);
-          const colSpan = Math.min(Math.max(w.grid?.w ?? 2, 1), 4);
-          const rowSpan = Math.min(Math.max(w.grid?.h ?? 4, 2), 12);
-          return (
-            <div
-              key={w.widget_id}
-              className="min-w-0 h-full"
-              style={{
-                gridColumn: `span ${colSpan} / span ${colSpan}`,
-                gridRow: `span ${rowSpan} / span ${rowSpan}`,
-              }}
-            >
-              <Comp widget={w} />
+      {/* ── KPI ribbon: equal-height headline numbers, shoulder to shoulder ── */}
+      {kpis.length > 0 && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+          {kpis.map((w) => (
+            <div key={w.widget_id} className="h-[116px] min-w-0">
+              <KpiCard widget={w} spark={sparkFor(w)} />
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Chart band: dense 4-col grid, wide hero, dense back-fill ── */}
+      {charts.length > 0 && (
+        <div className="grid auto-rows-[150px] grid-cols-1 grid-flow-row-dense gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {charts.map((w) => {
+            const Comp = resolveWidgetComponent(w.type);
+            const isHero = w === hero;
+            const narrow = w.type === "pie_chart" || w.type === "funnel";
+            const colSpan = isHero ? 2 : narrow ? 1 : 2;
+            const rowSpan = isHero ? 3 : 2;
+            return (
+              <div
+                key={w.widget_id}
+                className="min-w-0"
+                style={{ gridColumn: `span ${colSpan} / span ${colSpan}`, gridRow: `span ${rowSpan} / span ${rowSpan}` }}
+              >
+                <Comp widget={w} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Detail tables: full width, bottom ── */}
+      {tables.length > 0 && (
+        <div className="space-y-3">
+          {tables.map((w) => (
+            <div key={w.widget_id} className="h-[440px] min-w-0">
+              <CatalogTable widget={w} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

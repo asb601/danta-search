@@ -6,6 +6,7 @@
 // so the catalog tracks the active theme.
 
 import { useState, useRef, useEffect } from "react";
+import { TrendingUp, TrendingDown } from "lucide-react";
 import { DashboardWidget } from "./types";
 import { WidgetFrame, EmptyState, DeltaBadge, WarningChips, statusVariant } from "./WidgetFrame";
 import { Card } from "@/components/ui/card";
@@ -68,44 +69,69 @@ function smoothPath(pts: [number, number][]): string {
 
 // ---- KPI Card ---------------------------------------------------------------
 
-export function KpiCard({ widget }: Props) {
+/** Mini sparkline (area + line) from a numeric series, in the brand chart-1 token. */
+export function Sparkline({ values, gid }: { values: number[]; gid: string }) {
+  if (!values || values.length < 2) return null;
+  const W = 100, H = 24;
+  const mn = Math.min(...values), mx = Math.max(...values), range = mx - mn || 1;
+  const pts = values.map(
+    (v, i) => [(i / (values.length - 1)) * W, H - ((v - mn) / range) * (H - 2) - 1] as [number, number],
+  );
+  const line = "M " + pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" L ");
+  const id = `spark-${gid}`;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" width="100%" height="24" className="mt-auto block">
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.3} />
+          <stop offset="100%" stopColor="var(--chart-1)" stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      <path d={`${line} L ${W},${H} L 0,${H} Z`} fill={`url(#${id})`} />
+      <path d={line} fill="none" stroke="var(--chart-1)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+export function KpiCard({ widget, spark }: Props & { spark?: number[] }) {
   const valueKey = widget.config.value;
   const deltaKey = (widget.config as { delta?: string }).delta;
   const row = widget.data?.[0];
   const raw = valueKey && row ? row[valueKey] : undefined;
-  const delta = deltaKey && row && isNumeric(row[deltaKey]) ? num(row[deltaKey]) : undefined;
-  const rowCount = widget.provenance?.row_count;
+  const explicitDelta = deltaKey && row && isNumeric(row[deltaKey]) ? num(row[deltaKey]) : undefined;
+  // Derive a sparkline + period delta from a sibling trend on the same measure.
+  const series = spark && spark.length >= 2 ? spark : undefined;
+  const trendPct = series ? ((series[series.length - 1] - series[0]) / (Math.abs(series[0]) || 1)) * 100 : undefined;
 
   return (
-    <Card className="flex h-full flex-col justify-between gap-3 p-5">
+    <Card className="relative flex h-full flex-col gap-1.5 overflow-hidden p-4 pl-5">
+      <span className="absolute left-0 top-0 h-full w-[3px] bg-chart-1" aria-hidden />
       <div className="flex items-start justify-between gap-2">
-        <p className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground leading-tight truncate">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground leading-tight truncate">
           {widget.title}
         </p>
         <div className="flex items-center gap-1 shrink-0">
           <WarningChips provenance={widget.provenance} />
-          {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} />}
+          {explicitDelta !== undefined ? (
+            <DeltaBadge value={explicitDelta} format={widget.config.format} />
+          ) : trendPct !== undefined && Number.isFinite(trendPct) ? (
+            <span className={`inline-flex items-center gap-0.5 text-[11px] font-semibold ${trendPct >= 0 ? "text-success" : "text-danger"}`}>
+              {trendPct >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+              {Math.abs(trendPct).toFixed(0)}%
+            </span>
+          ) : null}
         </div>
       </div>
-      <div>
-        <p className="text-3xl font-bold leading-none tracking-tight tabular-nums text-foreground">
-          {raw === undefined ? "—" : formatValue(raw, widget.config.format)}
-        </p>
-        {raw === undefined && widget.provenance?.empty_message ? (
-          // Honest blank: explain WHY the KPI has no value (error / missing / no rows),
-          // instead of an undiagnosable em-dash.
-          <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-            {widget.provenance.empty_message}
-          </p>
-        ) : valueKey ? (
-          <p className="mt-2 text-xs text-muted-foreground truncate">{humanize(valueKey)}</p>
-        ) : null}
-        {typeof rowCount === "number" && rowCount > 1 && (
-          <p className="mt-0.5 text-[11px] text-subtle-foreground">
-            across {compactNumber(rowCount)} records
-          </p>
-        )}
-      </div>
+      <p className="text-[26px] font-bold leading-none tracking-tight tabular-nums text-foreground">
+        {raw === undefined ? "—" : formatValue(raw, widget.config.format)}
+      </p>
+      {raw === undefined && widget.provenance?.empty_message ? (
+        <p className="text-[11px] leading-snug text-muted-foreground">{widget.provenance.empty_message}</p>
+      ) : series ? (
+        <Sparkline values={series} gid={widget.widget_id} />
+      ) : valueKey ? (
+        <p className="text-[11px] text-muted-foreground truncate">{humanize(valueKey)}</p>
+      ) : null}
     </Card>
   );
 }
