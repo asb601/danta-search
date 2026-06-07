@@ -259,7 +259,9 @@ def _empty_widget(intent: WidgetIntent, provenance: dict) -> ResolvedWidget:
         dataset=[],
         config={"columns": []},
         score=0.0,
-        rationale="No data was returned for this question.",
+        # P4: surface the honest, classified empty message (error vs missing vs
+        # ran-but-0-rows) when the route provided one; fall back to the generic.
+        rationale=provenance.get("empty_message") or "No data was returned for this question.",
         provenance={**provenance, "empty": True},
     )
 

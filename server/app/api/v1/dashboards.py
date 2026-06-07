@@ -31,6 +31,8 @@ from app.schemas.dashboard import (
     DashboardUpdate,
 )
 from app.services.dashboard import assembly_engine, board_planner, data_catalog, join_gate, query_engine
+from app.services.dashboard.empty_state import classify_empty
+from app.services.dashboard.insight import compute_insight
 from app.services.semantic_roles import is_additive_measure_role
 from app.services.dashboard.component_catalog import catalog_as_metadata
 from app.services.dashboard.recommendation_engine import build_pinned_spec, recommend
@@ -464,6 +466,13 @@ async def generate_dashboard(
         src_table = ((intent.spec or {}).get("planned") or {}).get("table") or intent.hints.get("table")
         tbl = next((t for t in catalog if t.table_name == src_table), None) if src_table else None
         role_map: dict = data_catalog.role_map_for_table(tbl)
+        # P4 G5: classify WHY a zero-row widget is empty (error vs no-table-resolved
+        # vs ran-but-0-rows) and carry an honest message. Set on provenance BEFORE
+        # recommend so the empty tile inherits it. Confident wrong "0" > explained blank.
+        if not rows:
+            _estate, _emsg = classify_empty(result, tbl, intent)
+            provenance["empty_reason"] = _estate
+            provenance["empty_message"] = _emsg
         widget = recommend(
             shape, intent, rows, provenance=provenance, role_map=role_map, warnings=warnings
         )
@@ -487,6 +496,15 @@ async def generate_dashboard(
         _role = role_map.get(_pm) if _pm else None
         if _role is not None:
             widget.provenance["summable"] = is_additive_measure_role(_role)
+        # P4: deterministic one-line insight from the returned rows (no LLM). Any
+        # %-share is gated on the additive `summable` flag; None when uncomputable.
+        if rows:
+            _ins = compute_insight(
+                widget.component_type, rows, widget.config,
+                summable=bool(widget.provenance.get("summable")),
+            )
+            if _ins:
+                widget.config["insight"] = _ins
         widget_ids.append(widget.widget_id)
         resolved.append(widget)
 
