@@ -11,7 +11,12 @@ export type WidgetType =
   | "pie_chart"
   | "area_chart"
   | "heatmap"
-  | "funnel";
+  | "funnel"
+  | "gauge_ring"
+  | "progress_kpi"
+  | "ranked_bar"
+  | "delta_kpi"
+  | "bullet";
 
 export interface WidgetGrid {
   x: number;
@@ -65,6 +70,17 @@ export interface WidgetConfig {
   orientation?: "vertical" | "horizontal";
   columns?: string[] | "all";
   format?: "currency" | "percent" | "number" | "auto";
+  // Target-driven tiles (gauge_ring / progress_kpi / bullet). `target` names a
+  // result column; `target_value` is a literal. Both ABSENT => fail-closed to a
+  // plain value (the tile never fabricates a target). Never hardcoded.
+  target?: string;
+  target_value?: number;
+  // delta_kpi — `delta` names a precomputed delta column; `spark` names the
+  // sibling-series column the Sparkline plots.
+  delta?: string;
+  spark?: string;
+  // ranked_bar — top-N cap (default 10 in the renderer when absent).
+  top_n?: number;
   // P4 — deterministic one-line analyst caption (absent when uncomputable).
   insight?: string;
   [key: string]: unknown;

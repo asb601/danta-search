@@ -194,6 +194,16 @@ def _resolve_dimension(planned, shape: DatasetShape):
     return dims[0] if dims else None
 
 
+def _second_measure(shape: DatasetShape, *, exclude: str | None) -> str | None:
+    """The first measure column that is NOT the bound value — a real result column
+    usable as a target/delta. Returns None when no distinct measure exists, so the
+    caller fails closed (omits the binding) rather than fabricating a target."""
+    for m in shape.measures:
+        if m != exclude:
+            return m
+    return None
+
+
 def _bind_config(
     comp: ComponentDefinition,
     shape: DatasetShape,
@@ -246,6 +256,39 @@ def _bind_config(
         return {"x": x, "y": y, "value": measure, "format": fmt}
     if ct == ComponentType.FUNNEL:
         return {"stage": dim, "value": measure, "format": fmt}
+
+    # Target-driven KPIs — bind a target ONLY from a real second measure column.
+    # Fail-closed: when the result carries no distinct target measure, the `target`
+    # key is OMITTED and the renderer degrades to a plain value. Never invent one.
+    if ct in (ComponentType.GAUGE_RING, ComponentType.PROGRESS_KPI, ComponentType.BULLET):
+        cfg = {"value": measure, "label": measure or comp.name, "format": fmt}
+        target = _second_measure(shape, exclude=measure)
+        if target is not None:
+            cfg["target"] = target
+        return cfg
+
+    # Delta KPI — value measure + the same measure as the sparkline series; bind a
+    # `delta` column only if a distinct second measure exists (never fabricated).
+    if ct == ComponentType.DELTA_KPI:
+        cfg = {"value": measure, "label": measure or comp.name, "format": fmt}
+        if measure is not None:
+            cfg["spark"] = measure
+        delta = _second_measure(shape, exclude=measure)
+        if delta is not None:
+            cfg["delta"] = delta
+        return cfg
+
+    # Ranked bar — top-N categories by a measure, sorted desc (the renderer sorts).
+    if ct == ComponentType.RANKED_BAR:
+        rules = comp.visualization_rules or {}
+        return {
+            "x": dim or temporal,
+            "value": measure,
+            "top_n": int(rules.get("default_top_n", 10)),
+            "orientation": "horizontal",
+            "format": fmt,
+        }
+
     # TABLE — show everything, with type-aware formatting handled by the renderer.
     return {"columns": [c.name for c in shape.columns]}
 

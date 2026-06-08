@@ -1,10 +1,12 @@
 "use client";
 
 // Generic renderer: a pure function of DashboardConfig. Lays the board out in
-// narrative BANDS like a real BI dashboard — a tight KPI ribbon on top, a dense
-// chart grid (with a wide hero) in the middle, detail tables at the bottom — rather
-// than one undifferentiated masonry. KPI cards borrow a sibling trend (same measure)
-// for a sparkline + period delta. Absolute persisted x/y are intentionally ignored.
+// narrative BANDS like a real BI dashboard — a tight KPI ribbon on top, a DENSE
+// varied collage of charts in the middle (a packed 6-col masonry where each tile
+// honors the server's persisted size intent), detail tables full-width at the
+// bottom. KPI cards borrow a sibling trend (same measure) for a sparkline +
+// period delta. Absolute persisted x/y are intentionally ignored; w/h are NOT —
+// they drive the varied tile sizing that makes the board read like PowerBI.
 
 import { DashboardConfig, DashboardWidget } from "./types";
 import { resolveWidgetComponent } from "./registry";
@@ -19,6 +21,76 @@ function plannedMeasure(w: DashboardWidget): string | undefined {
 function firstYKey(w: DashboardWidget): string | undefined {
   const y = w.config?.y;
   return Array.isArray(y) ? y[0] : typeof y === "string" ? y : undefined;
+}
+
+// ── Collage geometry ────────────────────────────────────────────────────────
+// The chart band is a packed 6-column grid. Each tile's width/height come from
+// the SERVER's size intent (widget.grid.w on its 12-col assembly grid, h in
+// assembly row units) mapped onto our 6-col / compact-row collage. When the grid
+// is absent or degenerate (legacy configs), we fall back to a per-TYPE default so
+// donuts/gauges stay small, hero trends stay wide — never a uniform 2×2 wall.
+
+const COLS = 6; // collage columns at the widest breakpoint
+
+// Per-type fallback footprint (col span out of 6, row span in 90px rows) used
+// when the server didn't persist a usable grid.w/h. Hero trends are wide; KPIs
+// compact; donut/gauge/funnel small & square-ish.
+function fallbackSpan(w: DashboardWidget, isHero: boolean): { col: number; row: number } {
+  if (isHero) return { col: 4, row: 4 };
+  switch (w.type) {
+    case "pie_chart":
+    case "gauge_ring":
+      return { col: 2, row: 3 };
+    case "funnel":
+    case "bullet":
+    case "progress_kpi":
+      return { col: 2, row: 2 };
+    case "heatmap":
+      return { col: 4, row: 3 };
+    case "ranked_bar":
+      return { col: 3, row: 3 };
+    case "bar_chart":
+      return { col: 3, row: 3 };
+    case "line_chart":
+    case "area_chart":
+      return { col: 4, row: 3 };
+    default:
+      return { col: 3, row: 3 };
+  }
+}
+
+// Map the server's persisted size intent onto the collage grid. The assembly
+// engine lays widgets on a 12-col grid; we proportionally rescale w → 6 cols and
+// clamp to [2..6]. Height is taken from grid.h (assembly rows ≈ our rows) and
+// clamped to [2..5]. A hero always gets the widest, tallest footprint so it
+// anchors the board. Degenerate/absent grids fall back to the per-type default.
+function spanFor(w: DashboardWidget, isHero: boolean): { col: number; row: number } {
+  const fb = fallbackSpan(w, isHero);
+  const g = w.grid;
+  const sw = g && Number.isFinite(g.w) ? g.w : undefined;
+  const sh = g && Number.isFinite(g.h) ? g.h : undefined;
+
+  // No real size intent persisted → type default.
+  if (!sw || sw <= 0) return fb;
+
+  // Server grid is 12-col; rescale to our 6 and round. Clamp so nothing is a
+  // sliver (<2) and nothing exceeds the row width.
+  let col = Math.round((sw / 12) * COLS);
+  if (col < 2) col = 2;
+  if (col > COLS) col = COLS;
+
+  // Height: assembly rows roughly correspond to our rows. Clamp to keep tiles
+  // from being too short to read or so tall they leave dead space.
+  let row = sh && sh > 0 ? Math.round(sh) : fb.row;
+  if (row < 2) row = 2;
+  if (row > 5) row = 5;
+
+  // The hero earns at least its fallback footprint regardless of persisted size.
+  if (isHero) {
+    col = Math.max(col, fb.col);
+    row = Math.max(row, fb.row);
+  }
+  return { col, row };
 }
 
 export function DashboardRenderer({ config }: { config: DashboardConfig | null | undefined }) {
@@ -60,7 +132,8 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
     return m ? trendByMeasure.get(m) : undefined;
   };
 
-  // The hero is the first trend (or the highest-scoring chart) — it gets a wide tile.
+  // The hero is the first trend (or the highest-scoring chart) — it gets the
+  // widest, tallest tile so the board has a clear focal anchor.
   const hero =
     charts.find((c) => c.type === "line_chart" || c.type === "area_chart") ??
     [...charts].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))[0];
@@ -85,29 +158,34 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
 
       {/* ── KPI ribbon: equal-height headline numbers, shoulder to shoulder ── */}
       {kpis.length > 0 && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
           {kpis.map((w) => (
-            <div key={w.widget_id} className="h-[116px] min-w-0">
+            <div key={w.widget_id} className="collage-tile h-[112px] min-w-0">
               <KpiCard widget={w} spark={sparkFor(w)} />
             </div>
           ))}
         </div>
       )}
 
-      {/* ── Chart band: dense 4-col grid, wide hero, dense back-fill ── */}
+      {/* ── Chart band: a PACKED, varied collage. 6 dense columns, 90px rows,
+            tight gaps; every tile honors the server's persisted size intent so
+            the board reads like a balanced PowerBI page — never a 2-col wall. ── */}
       {charts.length > 0 && (
-        <div className="grid auto-rows-[150px] grid-cols-1 grid-flow-row-dense gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div
+          className="grid grid-flow-dense grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-6"
+          style={{ gridAutoRows: "90px" }}
+        >
           {charts.map((w) => {
             const Comp = resolveWidgetComponent(w.type);
-            const isHero = w === hero;
-            const narrow = w.type === "pie_chart" || w.type === "funnel";
-            const colSpan = isHero ? 2 : narrow ? 1 : 2;
-            const rowSpan = isHero ? 3 : 2;
+            const { col, row } = spanFor(w, w === hero);
             return (
               <div
                 key={w.widget_id}
-                className="min-w-0"
-                style={{ gridColumn: `span ${colSpan} / span ${colSpan}`, gridRow: `span ${rowSpan} / span ${rowSpan}` }}
+                className="collage-tile min-w-0"
+                style={{
+                  gridColumn: `span ${col} / span ${col}`,
+                  gridRow: `span ${row} / span ${row}`,
+                }}
               >
                 <Comp widget={w} />
               </div>
@@ -120,7 +198,7 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
       {tables.length > 0 && (
         <div className="space-y-3">
           {tables.map((w) => (
-            <div key={w.widget_id} className="h-[440px] min-w-0">
+            <div key={w.widget_id} className="collage-tile h-[440px] min-w-0">
               <CatalogTable widget={w} />
             </div>
           ))}

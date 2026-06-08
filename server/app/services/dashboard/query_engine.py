@@ -47,6 +47,15 @@ _VIZ_KEYWORDS = {
     "heatmap": "heatmap",
     "heat map": "heatmap",
     "funnel": "funnel",
+    "gauge": "gauge_ring",
+    "gauge ring": "gauge_ring",
+    "progress": "progress_kpi",
+    "progress bar": "progress_kpi",
+    "bullet": "bullet",
+    "bullet chart": "bullet",
+    "ranked bar": "ranked_bar",
+    "top n": "ranked_bar",
+    "leaderboard": "ranked_bar",
 }
 
 MAX_WIDGETS = 8

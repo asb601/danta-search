@@ -2,14 +2,20 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useCallback, use } from "react";
-import { ArrowLeft, Sparkles, Loader2, RefreshCw, LayoutDashboard, Copy, Trash2 } from "lucide-react";
+import {
+  ArrowLeft, Sparkles, Loader2, RefreshCw, LayoutDashboard, Copy, Trash2,
+  LayoutGrid, ListChecks, MessageSquareText, ChevronDown,
+} from "lucide-react";
 import { apiFetch } from "@/lib/auth";
 import { DashboardFull, DashboardConfig } from "@/components/analytics-catalog/types";
 import { DashboardRenderer } from "@/components/analytics-catalog/DashboardRenderer";
+import { SummaryView } from "@/components/analytics-catalog/SummaryView";
 import { SlicerBar } from "@/components/analytics-catalog/SlicerBar";
 import { ActiveFilter } from "@/components/analytics-catalog/types";
 import { Button } from "@/components/ui/button";
 import { Badge, BadgeVariant } from "@/components/ui/badge";
+
+type BoardTab = "board" | "summary";
 
 export default function DashboardDetailPage({
   params,
@@ -23,6 +29,7 @@ export default function DashboardDetailPage({
   const [prompt, setPrompt] = useState("");
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<BoardTab>("board");
 
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/dashboards/${dashboardId}`);
@@ -137,13 +144,38 @@ export default function DashboardDetailPage({
             />
           </div>
 
+          {/* Board / Summary segmented control */}
+          {widgetCount > 0 && (
+            <div className="seg-track shrink-0">
+              <button
+                type="button"
+                data-active={tab === "board"}
+                onClick={() => setTab("board")}
+                className="seg-tab"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Board</span>
+              </button>
+              <button
+                type="button"
+                data-active={tab === "summary"}
+                onClick={() => setTab("summary")}
+                className="seg-tab"
+              >
+                <ListChecks className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Summary</span>
+              </button>
+            </div>
+          )}
+
           {/* Meta chips */}
           <div className="flex items-center gap-2 shrink-0">
             {widgetCount > 0 && (
-              <Badge variant="muted" className="hidden sm:inline-flex">
+              <Badge variant="muted" className="hidden lg:inline-flex">
                 {widgetCount} widget{widgetCount !== 1 ? "s" : ""}
               </Badge>
             )}
+            <QuestionsMenu dashboard={dashboard} config={config} />
             <StatusBadge status={dashboard.status} generating={generating} />
             {config?.generated_at && (
               <span className="hidden md:inline text-[11px] text-muted-foreground/60">
@@ -193,8 +225,14 @@ export default function DashboardDetailPage({
           )}
 
           <div className="space-y-4">
-            <SlicerBar config={config} onApply={applyFilters} busy={generating} />
-            <DashboardRenderer config={config} />
+            {tab === "board" ? (
+              <>
+                <SlicerBar config={config} onApply={applyFilters} busy={generating} />
+                <DashboardRenderer config={config} />
+              </>
+            ) : (
+              <SummaryView config={config} />
+            )}
           </div>
         </div>
       </main>
@@ -249,6 +287,83 @@ export default function DashboardDetailPage({
           </p>
         </div>
       </footer>
+    </div>
+  );
+}
+
+/* ── Questions dropdown ───────────────────────────────────────────────────────
+   The board's prompt history — every natural-language question that shaped it,
+   newest first. Reuses the kebab-menu language from the dashboards list page
+   (click-outside overlay + rounded popover on tokens). Falls back to the single
+   config.prompt when no history was persisted. */
+function QuestionsMenu({
+  dashboard,
+  config,
+}: {
+  dashboard: DashboardFull;
+  config: DashboardConfig | null;
+}) {
+  const [open, setOpen] = useState(false);
+
+  // Newest first. Fall back to the seed prompt when history is empty.
+  const history = [...(dashboard.prompt_history ?? [])].reverse();
+  const items: { prompt: string; created_at?: string }[] =
+    history.length > 0
+      ? history.map((h) => ({ prompt: h.prompt, created_at: h.created_at }))
+      : config?.prompt
+        ? [{ prompt: config.prompt, created_at: config.generated_at }]
+        : [];
+
+  if (!items.length) return null;
+
+  const fmt = (iso?: string) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString(undefined, {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+  };
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <MessageSquareText className="w-3.5 h-3.5" />
+        <span className="hidden md:inline">Questions</span>
+        <span className="tabular-nums text-muted-foreground/60">{items.length}</span>
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div
+            className="dash-pop absolute right-0 top-10 z-40 w-[340px] max-w-[calc(100vw-32px)] p-1.5"
+            role="menu"
+          >
+            <p className="px-2.5 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+              Prompt history
+            </p>
+            <div className="max-h-[320px] overflow-y-auto">
+              {items.map((it, i) => (
+                <div key={i} className="dash-pop-item">
+                  <p className="text-[12.5px] leading-snug text-foreground">{it.prompt}</p>
+                  {it.created_at && (
+                    <p className="mt-0.5 text-[10.5px] tabular-nums text-muted-foreground/60">
+                      {fmt(it.created_at)}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -7,7 +7,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { TrendingUp, TrendingDown } from "lucide-react";
-import { DashboardWidget } from "./types";
+import { DashboardWidget, WidgetConfig, WidgetRow } from "./types";
 import { WidgetFrame, EmptyState, DeltaBadge, WarningChips, statusVariant } from "./WidgetFrame";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -632,6 +632,328 @@ function HeatmapRow({
         );
       })}
     </>
+  );
+}
+
+// ---- Target helpers (shared by Gauge / Progress / Bullet) -------------------
+
+// Pull a target from config (config.target points at a result column) OR from a
+// literal config.target_value. Fail-closed: returns undefined when no real target
+// is bound — the component then degrades to a plain value, never fabricating one.
+function resolveTarget(widget: DashboardWidget, row?: WidgetRow): number | undefined {
+  const cfg = widget.config as { target?: string; target_value?: number };
+  if (cfg.target && row && isNumeric(row[cfg.target])) return num(row[cfg.target]);
+  if (typeof cfg.target_value === "number" && Number.isFinite(cfg.target_value)) {
+    return cfg.target_value;
+  }
+  return undefined;
+}
+
+/** A bare centered headline value — the fail-closed fallback for the target-driven
+ *  tiles when no target column is bound. Mirrors the KPI/MetricTile look. */
+function PlainValueBody({
+  raw, format, caption, provenance,
+}: {
+  raw: unknown;
+  format?: WidgetConfig["format"];
+  caption?: string;
+  provenance?: DashboardWidget["provenance"];
+}) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-1 px-2 text-center">
+      <p className="text-[30px] font-bold leading-none tracking-tight tabular-nums text-foreground">
+        {raw === undefined ? "—" : formatValue(raw, format)}
+      </p>
+      {raw === undefined && provenance?.empty_message ? (
+        <p className="text-[11px] leading-snug text-muted-foreground">{provenance.empty_message}</p>
+      ) : caption ? (
+        <p className="text-[11px] text-muted-foreground truncate">{caption}</p>
+      ) : null}
+    </div>
+  );
+}
+
+// ---- Gauge Ring -------------------------------------------------------------
+
+/** Radial arc gauge: a 270° track with a value/target fill arc and a centered
+ *  value. Reuses the donut arc math from PieChart. Fail-closed: with no bound
+ *  target it renders the value as a plain centered KPI (never invents a target). */
+export function GaugeRing({ widget }: Props) {
+  const valueKey = widget.config.value || firstY(widget);
+  const row = widget.data?.[0];
+  const raw = valueKey && row ? row[valueKey] : undefined;
+  const value = raw !== undefined && isNumeric(raw) ? num(raw) : undefined;
+  const target = resolveTarget(widget, row);
+
+  if (value === undefined || target === undefined || target <= 0) {
+    return (
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
+        <PlainValueBody
+          raw={raw}
+          format={widget.config.format}
+          caption={valueKey ? humanize(valueKey) : undefined}
+          provenance={widget.provenance}
+        />
+      </WidgetFrame>
+    );
+  }
+
+  const frac = Math.max(0, Math.min(1, value / target));
+  const cx = 90, cy = 90, r = 64;
+  // 270° sweep, opening downward (from 135° to 405°/ i.e. -45°), like a speedometer.
+  const startA = (135 * Math.PI) / 180;
+  const sweep = (270 * Math.PI) / 180;
+  const arcPath = (fromFrac: number, toFrac: number) => {
+    const a0 = startA + fromFrac * sweep;
+    const a1 = startA + toFrac * sweep;
+    const x0 = cx + r * Math.cos(a0), y0 = cy + r * Math.sin(a0);
+    const x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
+    const large = a1 - a0 > Math.PI ? 1 : 0;
+    return `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
+  };
+
+  return (
+    <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
+      <div className="flex h-full items-center justify-center px-2">
+        <svg viewBox="0 0 180 170" className="h-full max-h-[170px]">
+          <path
+            d={arcPath(0, 1)} fill="none" stroke="var(--chart-grid)"
+            strokeWidth={12} strokeLinecap="round" {...STROKE}
+          />
+          <path
+            d={arcPath(0, frac)} fill="none" stroke="var(--chart-1)"
+            strokeWidth={12} strokeLinecap="round" {...STROKE}
+          />
+          <text x={cx} y={cy - 2} textAnchor="middle" fontSize={24} fontWeight="700" fill="var(--foreground)" className="tabular-nums">
+            {formatValue(value, widget.config.format)}
+          </text>
+          <text x={cx} y={cy + 18} textAnchor="middle" fontSize={11} fill="var(--chart-axis)">
+            {`${(frac * 100).toFixed(0)}% of target`}
+          </text>
+          <text x={cx} y={cy + 48} textAnchor="middle" fontSize={10} fill="var(--chart-axis)">
+            {`Target ${formatValue(target, widget.config.format)}`}
+          </text>
+        </svg>
+      </div>
+    </WidgetFrame>
+  );
+}
+
+// ---- Progress KPI -----------------------------------------------------------
+
+/** A big KPI number with a horizontal progress bar toward a target. Fail-closed:
+ *  with no bound target it degrades to a plain KPI (value + optional delta), with
+ *  NO bar and NO fabricated denominator. */
+export function ProgressKpi({ widget }: Props) {
+  const valueKey = widget.config.value || firstY(widget);
+  const deltaKey = (widget.config as { delta?: string }).delta;
+  const row = widget.data?.[0];
+  const raw = valueKey && row ? row[valueKey] : undefined;
+  const value = raw !== undefined && isNumeric(raw) ? num(raw) : undefined;
+  const delta = deltaKey && row && isNumeric(row[deltaKey]) ? num(row[deltaKey]) : undefined;
+  const target = resolveTarget(widget, row);
+  const frac =
+    value !== undefined && target !== undefined && target > 0
+      ? Math.max(0, Math.min(1, value / target))
+      : undefined;
+
+  return (
+    <Card className="flex h-full flex-col justify-between gap-2 p-4">
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground truncate">
+          {widget.title}
+        </p>
+        <div className="flex items-center gap-1 shrink-0">
+          <WarningChips provenance={widget.provenance} />
+          {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} />}
+        </div>
+      </div>
+      <p className="text-[28px] font-bold leading-none tracking-tight tabular-nums text-foreground">
+        {raw === undefined ? "—" : formatValue(raw, widget.config.format)}
+      </p>
+      {frac !== undefined && target !== undefined ? (
+        <div className="space-y-1">
+          <div className="relative h-2 w-full overflow-hidden rounded-full bg-muted/50">
+            <div
+              className="h-full rounded-full bg-chart-1"
+              style={{ width: `${Math.max(frac * 100, 2)}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-[10px] tabular-nums text-muted-foreground">
+            <span>{`${(frac * 100).toFixed(0)}% of target`}</span>
+            <span>{`Target ${formatValue(target, widget.config.format)}`}</span>
+          </div>
+        </div>
+      ) : raw === undefined && widget.provenance?.empty_message ? (
+        <p className="text-[10px] leading-snug text-muted-foreground">{widget.provenance.empty_message}</p>
+      ) : valueKey ? (
+        <p className="text-[11px] text-muted-foreground truncate">{humanize(valueKey)}</p>
+      ) : null}
+    </Card>
+  );
+}
+
+// ---- Ranked Bar (top-N) -----------------------------------------------------
+
+/** Top-N horizontal bar chart: sorted descending, category labels on the left,
+ *  value labels at the bar ends. The "who's driving it" tile. Caps to top N. */
+export function RankedBar({ widget }: Props) {
+  const labelKey = (widget.config.x as string | undefined) || widget.config.label;
+  const valueKey = widget.config.value || firstY(widget);
+  const cfgTopN = (widget.config as { top_n?: number }).top_n;
+  const topN = typeof cfgTopN === "number" && cfgTopN > 0 ? Math.floor(cfgTopN) : 10;
+
+  if (!widget.data?.length || !labelKey || !valueKey) {
+    return (
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance}>
+        <EmptyState
+          reason={widget.provenance?.empty_reason}
+          message={widget.provenance?.empty_message ?? widget.provenance?.answer}
+        />
+      </WidgetFrame>
+    );
+  }
+
+  const rows = [...widget.data]
+    .sort((a, b) => num(b[valueKey!]) - num(a[valueKey!]))
+    .slice(0, topN);
+  const maxVal = Math.max(1, ...rows.map((r) => num(r[valueKey!])));
+
+  return (
+    <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
+      <div className="flex h-full flex-col justify-center gap-1.5 px-2">
+        {rows.map((r, i) => {
+          const v = num(r[valueKey!]);
+          const pct = (v / maxVal) * 100;
+          return (
+            <div key={i} className="flex items-center gap-2.5">
+              <span className="w-24 shrink-0 truncate text-[11px] text-muted-foreground" title={str(r[labelKey!])}>
+                {str(r[labelKey!])}
+              </span>
+              <div className="relative h-5 flex-1 overflow-hidden rounded bg-muted/40">
+                <div
+                  className="h-full rounded"
+                  style={{ width: `${Math.max(pct, 2)}%`, background: colorAt(0) }}
+                />
+              </div>
+              <span className="w-16 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">
+                {formatValue(v, widget.config.format)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </WidgetFrame>
+  );
+}
+
+// ---- Delta KPI --------------------------------------------------------------
+
+/** A first-class period-delta KPI: large value + a business-polarity DeltaBadge +
+ *  a Sparkline of the underlying series. The delta/series come from a sibling
+ *  trend bound at recommendation time (config.spark / config.delta). */
+export function DeltaKpi({ widget }: Props) {
+  const valueKey = widget.config.value || firstY(widget);
+  const deltaKey = (widget.config as { delta?: string }).delta;
+  const sparkKey = (widget.config as { spark?: string }).spark;
+  const row = widget.data?.[0];
+  const raw = valueKey && row ? row[valueKey] : undefined;
+  const explicitDelta = deltaKey && row && isNumeric(row[deltaKey]) ? num(row[deltaKey]) : undefined;
+
+  // Derive a sparkline series from a named column across all rows (a sibling
+  // trend); else fall back to a single-row delta only.
+  const series =
+    sparkKey
+      ? (widget.data || []).map((r) => num(r[sparkKey])).filter((n) => Number.isFinite(n))
+      : [];
+  const validSeries = series.length >= 2 ? series : undefined;
+  const trendPct = validSeries
+    ? ((validSeries[validSeries.length - 1] - validSeries[0]) / (Math.abs(validSeries[0]) || 1)) * 100
+    : undefined;
+
+  return (
+    <Card className="relative flex h-full flex-col gap-1.5 overflow-hidden p-4 pl-5">
+      <span className="absolute left-0 top-0 h-full w-[3px] bg-chart-1" aria-hidden />
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground leading-tight truncate">
+          {widget.title}
+        </p>
+        <div className="flex items-center gap-1 shrink-0">
+          <WarningChips provenance={widget.provenance} />
+          {explicitDelta !== undefined ? (
+            <DeltaBadge value={explicitDelta} format={widget.config.format} />
+          ) : trendPct !== undefined && Number.isFinite(trendPct) ? (
+            <DeltaBadge value={trendPct} format="percent" />
+          ) : null}
+        </div>
+      </div>
+      <p className="text-[26px] font-bold leading-none tracking-tight tabular-nums text-foreground">
+        {raw === undefined ? "—" : formatValue(raw, widget.config.format)}
+      </p>
+      {raw === undefined && widget.provenance?.empty_message ? (
+        <p className="text-[11px] leading-snug text-muted-foreground">{widget.provenance.empty_message}</p>
+      ) : validSeries ? (
+        <Sparkline values={validSeries} gid={widget.widget_id} />
+      ) : valueKey ? (
+        <p className="text-[11px] text-muted-foreground truncate">{humanize(valueKey)}</p>
+      ) : null}
+    </Card>
+  );
+}
+
+// ---- Bullet -----------------------------------------------------------------
+
+/** Bullet chart: an actual-value bar over a graduated qualitative band, with a
+ *  target marker. Fail-closed: with no bound target it degrades to a plain KPI
+ *  value (no marker, no fabricated band scale). */
+export function Bullet({ widget }: Props) {
+  const valueKey = widget.config.value || firstY(widget);
+  const row = widget.data?.[0];
+  const raw = valueKey && row ? row[valueKey] : undefined;
+  const value = raw !== undefined && isNumeric(raw) ? num(raw) : undefined;
+  const target = resolveTarget(widget, row);
+
+  if (value === undefined || target === undefined || target <= 0) {
+    return (
+      <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
+        <PlainValueBody
+          raw={raw}
+          format={widget.config.format}
+          caption={valueKey ? humanize(valueKey) : undefined}
+          provenance={widget.provenance}
+        />
+      </WidgetFrame>
+    );
+  }
+
+  // Scale the track to the larger of value/target so both always fit; bands are
+  // derived from the target (66% / 100% of target), not from a hardcoded scale.
+  const scale = Math.max(value, target) * 1.1;
+  const pct = (n: number) => `${Math.max(0, Math.min(100, (n / scale) * 100))}%`;
+
+  return (
+    <WidgetFrame title={widget.title} rationale={widget.rationale} provenance={widget.provenance} insight={widget.config.insight}>
+      <div className="flex h-full flex-col justify-center gap-3 px-3">
+        <div className="flex items-baseline justify-between">
+          <span className="text-2xl font-bold leading-none tracking-tight tabular-nums text-foreground">
+            {formatValue(value, widget.config.format)}
+          </span>
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {`Target ${formatValue(target, widget.config.format)}`}
+          </span>
+        </div>
+        <div className="relative h-6 w-full overflow-hidden rounded">
+          {/* qualitative bands (light → mid), graduated off the target */}
+          <div className="absolute inset-0" style={{ background: "color-mix(in oklab, var(--chart-5) 70%, transparent)" }} />
+          <div className="absolute inset-y-0 left-0" style={{ width: pct(target), background: "color-mix(in oklab, var(--chart-4) 70%, transparent)" }} />
+          <div className="absolute inset-y-0 left-0" style={{ width: pct(target * 0.66), background: "color-mix(in oklab, var(--chart-3) 60%, transparent)" }} />
+          {/* the actual-value measure bar */}
+          <div className="absolute inset-y-[35%] left-0 rounded-sm bg-chart-1" style={{ width: pct(value) }} />
+          {/* the target marker */}
+          <div className="absolute inset-y-0 w-[2px] bg-foreground" style={{ left: pct(target) }} />
+        </div>
+      </div>
+    </WidgetFrame>
   );
 }
 

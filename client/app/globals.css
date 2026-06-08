@@ -1112,6 +1112,76 @@ textarea::placeholder { color: var(--fg-subtle); }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   DASHBOARD BOARD — dense collage tiles, segmented tabs, questions dropdown
+   Used by DashboardRenderer / dashboards/[id] page. Tokens only (no hex).
+═══════════════════════════════════════════════════════════════════════════ */
+
+/* Subtle hover-lift on every collage tile — the BI-board "pick me up" feel.
+   The tile wraps a Card; we lift the wrapper and let the Card's own shadow read. */
+.collage-tile {
+  transition: transform 0.18s ease, filter 0.18s ease;
+}
+.collage-tile:hover {
+  transform: translateY(-2px);
+  filter: drop-shadow(0 6px 16px color-mix(in oklab, var(--fg) 10%, transparent));
+  z-index: 2;
+}
+
+/* Segmented control (Board | Summary) — a single hairline-bordered track with a
+   raised active pill. Crisp active state, calm inactive. */
+.seg-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.seg-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--fg-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.14s, background 0.14s, box-shadow 0.14s;
+  white-space: nowrap;
+}
+.seg-tab:hover { color: var(--fg); }
+.seg-tab[data-active="true"] {
+  color: var(--fg);
+  background: var(--bg);
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--fg) 12%, transparent),
+              inset 0 0 0 1px var(--border);
+}
+
+/* Questions dropdown — reuses the kebab-menu language from the dashboards list:
+   click-outside overlay + rounded popover panel on tokens. */
+.dash-pop {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--popover);
+  box-shadow: 0 10px 30px color-mix(in oklab, var(--fg) 14%, transparent);
+}
+.dash-pop-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  transition: background 0.12s;
+}
+.dash-pop-item:hover { background: var(--surface-raised); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
    DARK MODE
    html.dark flips the 8 CSS variables → every remap above automatically
    resolves to dark values. Only add rules here for EXCEPTIONS.

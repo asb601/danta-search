@@ -14,6 +14,11 @@ import {
   PieChart,
   Heatmap,
   Funnel,
+  GaugeRing,
+  ProgressKpi,
+  RankedBar,
+  DeltaKpi,
+  Bullet,
 } from "./components";
 
 type WidgetComponent = ComponentType<{ widget: DashboardWidget }>;
@@ -28,6 +33,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetComponent> = {
   pie_chart: PieChart,
   heatmap: Heatmap,
   funnel: Funnel,
+  gauge_ring: GaugeRing,
+  progress_kpi: ProgressKpi,
+  ranked_bar: RankedBar,
+  delta_kpi: DeltaKpi,
+  bullet: Bullet,
 };
 
 export function resolveWidgetComponent(type: WidgetType): WidgetComponent {
