@@ -1279,8 +1279,15 @@ async def _build_agent_context(
     # raises — any failure degrades to today's behaviour.
     _feasibility = None
     _advisory_block = ""
+    _as_of = None
     try:
-        from app.services.erp.feasibility_gate import evaluate_feasibility  # noqa: PLC0415
+        from app.services.erp.feasibility_gate import evaluate_feasibility, resolve_as_of_date  # noqa: PLC0415
+
+        # Data-driven reference 'now' for relative-time resolution: the dataset's
+        # latest coverage date (capped at the wall clock). None when no file is
+        # dated → callers fall back to the wall clock. Computed over the FULL
+        # catalog so a partial shortlist can't shift the anchor.
+        _as_of = resolve_as_of_date(full_catalog)
 
         # Scope the temporal check to the query's PRIMARY-SUBJECT files (resolver
         # pins + top retrieval hits), not the whole shortlist. This stops an
@@ -1303,6 +1310,7 @@ async def _build_agent_context(
             query=query,
             constraints=getattr(intent_plan, "constraints", None),
             catalog=_subject_catalog,
+            today=_as_of,
         )
         if _feasibility.advisory_notes:
             _advisory_block = "--- FEASIBILITY ADVISORIES ---\n" + "\n".join(
@@ -1335,6 +1343,7 @@ async def _build_agent_context(
                     _advisory_block,
                 ])),
                 file_identities=file_identity_map,
+                as_of_date=_as_of,
             ),
         ),
     )

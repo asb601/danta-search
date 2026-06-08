@@ -25,6 +25,8 @@ from app.services.execution_guards import (
     ExecutionGuard,
     ExecutionGuardError,
     check_joins_approved,
+    check_fanout_risk,
+    distinct_projection_note,
 )
 from app.services.file_identity import FileIdentityMap
 from app.services.logical_sql import (
@@ -328,6 +330,42 @@ def build_sql_tools(
                 except Exception as _je:
                     pipeline_logger.warning("sme_join_enforce_error", error=str(_je)[:200])
 
+                # ── Fan-out guard (always on, structural) ──────────────────────
+                # Summing additive measures from BOTH sides of a join on a
+                # non-unique key inflates totals via cartesian fan-out (the I11
+                # $86M→$2.5B class). Block and instruct the LLM to pre-aggregate
+                # each table to the join grain before joining. Checked on LOGICAL
+                # SQL. Fail-OPEN: any error here falls through to execution.
+                try:
+                    _fanout = check_fanout_risk(canonical.logical_sql)
+                    if not _fanout.ok:
+                        _ft = _fanout.offending_tables or ("?", "?")
+                        pipeline_logger.info(
+                            "fanout_guard_reject",
+                            offending_tables=list(_ft),
+                            sql_preview=canonical.logical_sql[:200],
+                        )
+                        metrics.inc("fanout_guard_rejected")
+                        _attempt.update({
+                            "status": "fanout_risk",
+                            "error": f"fanout_risk: {_ft[0]} ⋈ {_ft[1]}",
+                        })
+                        return json.dumps({
+                            "error": "fanout_risk",
+                            "detail": (
+                                f"Summing additive measures from BOTH {_ft[0]} and "
+                                f"{_ft[1]} across their join inflates the totals — each "
+                                "matching row is multiplied by the other table's matching "
+                                "rows. Pre-aggregate EACH table to the join key in its own "
+                                f"CTE first, e.g. WITH a AS (SELECT <key>, SUM(<measure>) "
+                                f"FROM {_ft[0]} GROUP BY <key>), b AS (SELECT <key>, "
+                                f"SUM(<measure>) FROM {_ft[1]} GROUP BY <key>) SELECT ... "
+                                "FROM a JOIN b USING(<key>)."
+                            ),
+                        })
+                except Exception as _fe:
+                    pipeline_logger.warning("fanout_guard_error", error=str(_fe)[:200])
+
                 sql = canonical.executable_sql
             except SQLCanonicalizationError as ve:
                 error_msg = str(ve)
@@ -559,6 +597,15 @@ def build_sql_tools(
                 f"Results truncated: showing {len(rows)} of {total} total rows. "
                 "Add a LIMIT, WHERE, or GROUP BY to get complete results."
             )
+        # Distinct-vs-row clarification: a multi-column SELECT DISTINCT's row count
+        # is distinct TUPLES, not distinct entities (the I02 '2,422 vendors' trap).
+        try:
+            _logical = getattr(canonical, "logical_sql", None) if canonical is not None else None
+            _dnote = distinct_projection_note(_logical) if _logical else None
+            if _dnote:
+                resp["distinct_semantics"] = _dnote
+        except Exception:
+            pass
         # 0-row diagnostic: when an aggregation/filter returns nothing, point the
         # model back at its OWN filters on the SAME tables before it abandons them
         # for a different (often wrong-domain) table. The most common cause is an

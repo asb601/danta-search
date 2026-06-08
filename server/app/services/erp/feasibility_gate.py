@@ -140,6 +140,15 @@ def parse_requested_window(constraints: dict | None, today: date | None = None) 
         return (date(today.year, 1, 1), today)
     if token == "last_year":
         return (date(today.year - 1, 1, 1), date(today.year - 1, 12, 31))
+    if token == "this_quarter":
+        q_start_month = ((today.month - 1) // 3) * 3 + 1
+        return (date(today.year, q_start_month, 1), today)
+    if token == "last_quarter":
+        cur_q_start_month = ((today.month - 1) // 3) * 3 + 1
+        cur_q_start = date(today.year, cur_q_start_month, 1)
+        last_q_end = _shift_days(cur_q_start, -1)
+        last_q_start_month = ((last_q_end.month - 1) // 3) * 3 + 1
+        return (date(last_q_end.year, last_q_start_month, 1), last_q_end)
 
     return None
 
@@ -205,6 +214,23 @@ def _overlaps(a: tuple[date, date], b: tuple[date, date]) -> bool:
 def _label(entry: dict) -> str:
     name = entry.get("display_name") or entry.get("blob_path") or entry.get("file_id") or "file"
     return str(name).rsplit("/", 1)[-1]
+
+
+def resolve_as_of_date(catalog: list[dict] | None, today: date | None = None) -> date | None:
+    """The reference 'now' for relative-time resolution = the data's latest
+    coverage date, capped at the wall clock. Data-driven (reads precomputed
+    date_range_* metadata), sentinel-safe. Returns None when no file carries
+    usable date coverage.
+
+    Anchoring relative windows ('this year', 'last month', 'YTD') to this date —
+    rather than date.today() — prevents a correct parser from resolving a period
+    the data does not cover (e.g. data ending 2025-05 queried under a 2026 clock).
+    """
+    today = today or _today()
+    ends = [w[1] for e in (catalog or []) if (w := _file_window(e))]
+    if not ends:
+        return None
+    return min(max(ends), today)
 
 
 # ── The gate ──────────────────────────────────────────────────────────────────

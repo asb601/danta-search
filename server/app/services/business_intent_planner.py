@@ -109,6 +109,15 @@ def _extract_constraints(query: str) -> dict:
     elif m_months:
         constraints["date_range"] = f"last_{m_months.group(1)}_months"
 
+    elif re.search(r"\bthis\s+quarter\b|\bcurrent\s+quarter\b", query, re.I):
+        constraints["date_range"] = "this_quarter"
+
+    elif re.search(r"\blast\s+quarter\b|\bprevious\s+quarter\b", query, re.I):
+        constraints["date_range"] = "last_quarter"
+
+    elif re.search(r"\bytd\b|\byear[\s-]to[\s-]date\b", query, re.I):
+        constraints["date_range"] = "this_year"
+
     elif re.search(r"\blast\s+month\b", query, re.I):
         constraints["date_range"] = "last_month"
 

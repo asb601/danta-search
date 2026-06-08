@@ -19,4 +19,7 @@ class AgentState(TypedDict):
     is_first_turn: bool  # Kept for backward state-shape compat; escalation is now error-driven (always False)
 
 
-MAX_TOOL_CALLS = 8
+# Ceiling on ACTUAL tool calls per query (see next_tool_call_count). Sized to
+# clear legitimate queries (observed <= 6 calls) with headroom while cutting
+# runaway thrash (the I17 24-call spin) before it spins.
+MAX_TOOL_CALLS = 14

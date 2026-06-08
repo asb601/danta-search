@@ -159,10 +159,19 @@ def build_agent_node(all_tools: list, org_ai: dict | None = None):
         n_calls = len(getattr(response, "tool_calls", None) or [])
         return {
             "messages": [response],
-            "tool_call_count": count + (1 if n_calls else 0),
+            "tool_call_count": next_tool_call_count(count, n_calls),
         }
 
     return agent_node
+
+
+def next_tool_call_count(count: int, n_calls: int) -> int:
+    """Advance the tool-call budget by the number of ACTUAL tool calls emitted
+    this iteration, not 1-per-iteration. Under per-iteration counting a single
+    iteration emitting N parallel tool calls advanced the budget by 1, so
+    MAX_TOOL_CALLS=K permitted K*fan-out calls (the I17 24-call thrash). Counting
+    real calls makes the budget a true ceiling on tool fan-out."""
+    return count + max(0, n_calls)
 
 
 def _had_zero_row_sql(messages: list) -> bool:

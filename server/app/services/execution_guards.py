@@ -654,6 +654,139 @@ def check_joins_approved(
     return report
 
 
+@dataclass
+class FanoutReport:
+    """Result of the fan-out (cartesian-aggregation) check. Never raised.
+
+    ok                 — False when additive aggregates (SUM/AVG) draw from >= 2
+                         distinct base tables within a single joined SELECT scope,
+                         i.e. each side fans the other and additive totals inflate.
+    parse_ok           — False when sqlglot could not parse (fail-open: ok stays True).
+    offending_tables   — the two distinct summed tables (display names) when not ok.
+    summed_table_count — distinct summed base tables in the worst scope (telemetry).
+    """
+    ok: bool = True
+    parse_ok: bool = True
+    offending_tables: tuple[str, str] | None = None
+    summed_table_count: int = 0
+
+
+def check_fanout_risk(logical_sql: str) -> FanoutReport:
+    """Flag additive aggregation across a fan-out join.
+
+    The proven failure (I11): SUM(p.AMOUNT_LIMIT), SUM(i.INVOICE_AMOUNT) over
+    PO ⋈ invoices on a non-unique VENDOR_ID → $86M reported as $2.5B (38x29 rows).
+
+    Operates on LOGICAL SQL (logical table names intact, so partitions of one
+    logical table share a name and never look like a cross-table join). Pure /
+    structural — no cardinality lookup, no I/O. High precision: fires ONLY on
+    the anti-pattern (SUM/AVG of measures from >= 2 distinct base tables joined in
+    one scope). Single-sided aggregates (aggregating the many-side of a header/
+    line join), pre-aggregated CTE joins, and self-joins of one logical table all
+    pass. Never raises — declines (ok=True) on anything it cannot parse.
+    """
+    report = FanoutReport()
+    if not logical_sql or not _SQLGLOT_IMPORT_OK:
+        report.parse_ok = _SQLGLOT_IMPORT_OK
+        return report
+    try:
+        tree = sqlglot.parse_one(
+            logical_sql,
+            dialect="duckdb",
+            error_level=sqlglot.errors.ErrorLevel.RAISE,
+        )
+    except Exception:
+        report.parse_ok = False
+        return report
+
+    cte_names = {
+        (getattr(cte, "alias_or_name", "") or "").strip().strip('`"[]').lower()
+        for cte in tree.find_all(_sg_exp.CTE)
+    }
+
+    def _key(value: str) -> str:
+        return (value or "").strip().strip('`"[]').lower()
+
+    def _is_real_table(node) -> bool:
+        name = node.name
+        return bool(name) and _key(name) not in cte_names
+
+    # Inspect each SELECT scope independently: the fan-out must occur where the
+    # join and the aggregates live in the SAME scope (so a CTE that pre-aggregates
+    # one table, then is joined in an outer scope, is correctly NOT flagged).
+    for select in tree.find_all(_sg_exp.Select):
+        joins = select.args.get("joins") or []
+        if not joins:
+            continue
+        from_node = select.args.get("from") or select.args.get("from_")
+        alias_to_table: dict[str, str] = {}
+        tables = list(from_node.find_all(_sg_exp.Table)) if from_node is not None else []
+        for join in joins:
+            tables.extend(join.find_all(_sg_exp.Table))
+        for tbl in tables:
+            if not _is_real_table(tbl):
+                continue
+            disp = tbl.name
+            alias_to_table[_key(tbl.alias_or_name)] = disp
+            alias_to_table[_key(tbl.name)] = disp
+
+        # Only a genuine cross-table join can fan out — a self-join / partition
+        # join of one logical table resolves to a single base name.
+        if len(set(alias_to_table.values())) < 2:
+            continue
+
+        summed: dict[str, bool] = {}
+        for agg in select.find_all(_sg_exp.Sum, _sg_exp.Avg):
+            for col in agg.find_all(_sg_exp.Column):
+                qual = _key(col.table)
+                if qual and qual in alias_to_table:
+                    summed[alias_to_table[qual]] = True
+
+        if len(summed) >= 2:
+            names = sorted(summed)
+            report.ok = False
+            report.summed_table_count = len(names)
+            report.offending_tables = (names[0], names[1])
+            return report
+
+    return report
+
+
+def distinct_projection_note(logical_sql: str) -> str | None:
+    """Return a clarifying note when a result's row count could be misread as a
+    distinct-entity count, else None.
+
+    Fires on a MULTI-COLUMN SELECT DISTINCT: its row count is the number of
+    distinct TUPLES, not the distinct values of any single column — the I02 trap
+    ('2,422 distinct vendors' from distinct (name, id) pairs when one id maps to
+    many dirty names; true distinct vendors = 200). Single-column DISTINCT and
+    COUNT(DISTINCT …) are already correct and return None. Pure/structural; never
+    raises (declines on anything it cannot parse)."""
+    if not logical_sql or not _SQLGLOT_IMPORT_OK:
+        return None
+    try:
+        tree = sqlglot.parse_one(
+            logical_sql,
+            dialect="duckdb",
+            error_level=sqlglot.errors.ErrorLevel.RAISE,
+        )
+    except Exception:
+        return None
+    select = tree if isinstance(tree, _sg_exp.Select) else tree.find(_sg_exp.Select)
+    if select is None or not select.args.get("distinct"):
+        return None
+    projected = [e for e in select.expressions if not isinstance(e, _sg_exp.Star)]
+    if len(projected) < 2:
+        return None
+    return (
+        "total_rows is the number of distinct ROWS (unique combinations across the "
+        "selected columns), NOT the number of distinct values of any single column. "
+        "If the user asked 'how many distinct <entity>', answer with "
+        "COUNT(DISTINCT <that column>) — reporting this row count as the entity count "
+        "overstates it when one column repeats across the combinations."
+    )
+
+
 def _display_name(canonical_id: str, file_identities) -> str:
     """Best-effort human-readable table name for an error message."""
     by_id = getattr(file_identities, "by_id", {}) or {}

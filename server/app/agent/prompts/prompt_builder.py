@@ -52,15 +52,24 @@ SQL dialect: the executor is DuckDB. Write DuckDB-valid SQL. Use date_diff('day'
 already exists as a column (e.g. an aging/days/DSO column), use that column directly
 rather than recomputing it from current_date.
 
-Today's date: {today_iso} ({today_human}).
-Resolve every relative time expression in the user's question against THIS date,
-not against your training cutoff. Examples (assuming today is {today_iso}):
-  - "last month"     → the full previous calendar month ({last_month_start} to {last_month_end})
-  - "this month"     → {this_month_start} to {today_iso}
-  - "YTD" / "this year" → {year_start} to {today_iso}
-  - "last year"      → {last_year_start} to {last_year_end}
-  - "last 30 days"   → {last_30_start} to {today_iso}
+Reference date for relative time: {today_iso} ({today_human}) — the most recent
+date this dataset covers. Resolve every relative time expression in the user's
+question against THIS date (not the wall clock, not your training cutoff, and NOT
+SQL current_date, which may be later than the data). Examples:
+  - "last month"        → the full previous calendar month ({last_month_start} to {last_month_end})
+  - "this month" / MTD  → {this_month_start} to {today_iso}
+  - "YTD" / "this year"  → {year_start} to {today_iso}
+  - "last year"         → {last_year_start} to {last_year_end}
+  - "last 30 days"      → {last_30_start} to {today_iso}
+For relative-time filters use these explicit dates, not current_date.
 Never invent a date range from a year you remember from training data.
+
+COUNTING & DISTINCTNESS: "how many / number of / distinct <entity>" means
+COUNT(DISTINCT <entity key>). A tool result's total_rows is a ROW count — the
+same entity can repeat across rows (e.g. one VENDOR_ID with several names) — so
+never report total_rows as the count of distinct entities. To count entities,
+COUNT(DISTINCT <id column>); a multi-column SELECT DISTINCT counts distinct row
+combinations, not distinct entities.
 
 Dataset scope: current authorized catalog.
 {shortlist_header}
@@ -367,8 +376,14 @@ def build_system_prompt(
     top_blob_paths: set[str] | None = None,
     workflow_topology_note: str = "",
     file_identities: FileIdentityMap | None = None,
+    as_of_date: date | None = None,
 ) -> str:
-    """Assemble the full system prompt for the agent."""
+    """Assemble the full system prompt for the agent.
+
+    as_of_date — the data-driven reference 'now' for relative-time resolution
+    (the dataset's latest coverage date). Falls back to the wall clock only when
+    the catalog carries no date coverage. See resolve_as_of_date().
+    """
     parquet_note = build_parquet_note(
         catalog, parquet_paths_all, parquet_blob_path, container_name,
         top_blob_paths=top_blob_paths,
@@ -394,7 +409,7 @@ def build_system_prompt(
     else:
         shortlist_header = f"All {full_count} ingested files are shown below."
 
-    today = date.today()
+    today = as_of_date or date.today()
     # Last calendar month bounds
     first_of_this_month = today.replace(day=1)
     last_month_end = first_of_this_month - timedelta(days=1)
