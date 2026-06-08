@@ -81,6 +81,10 @@ export interface WidgetConfig {
   spark?: string;
   // ranked_bar — top-N cap (default 10 in the renderer when absent).
   top_n?: number;
+  // Delta-coloring polarity for headline/delta tiles: "inverse" => a rising value
+  // is BAD (cost/aging/DSO/returns/overdue); "positive" => a rise is good.
+  // Proposed by the planner; the DeltaBadge fails safe to neutral when absent.
+  polarity?: "positive" | "inverse";
   // P4 — deterministic one-line analyst caption (absent when uncomputable).
   insight?: string;
   [key: string]: unknown;

@@ -134,6 +134,30 @@ def _format_for_role(name: str, shape: DatasetShape, role: str | None = None) ->
     return "currency" if _looks_money(name) else "number"
 
 
+# Delta polarity is a SEMANTIC property of the metric, not of the sign of the
+# number: an inverse metric (cost, DSO, aging, returns, outstanding/overdue
+# balance) RISING is bad (red/down-framing); a growth metric rising is good. The
+# direction is proposed by the planner LLM (which designs the metric) and carried
+# as `planned.polarity`; the deterministic layer only VALIDATES + carries it. No
+# hardcoded business-term list — fail-safe to 'positive' (growth framing) so we
+# never fabricate an inverse claim from a missing/garbage hint.
+_VALID_POLARITIES = ("positive", "inverse")
+
+
+def _resolve_polarity(planned: dict | None, *, role: str | None = None) -> str:
+    """Resolve the delta-coloring polarity for a measure.
+
+    Driven by the planner-emitted `planned.polarity` (the LLM proposes the metric
+    semantics). `role` is reserved for a future ingestion-time direction signal and
+    is currently advisory only. Fail-safe to 'positive' — an inverse claim is never
+    fabricated from an absent or invalid hint.
+    """
+    hint = str((planned or {}).get("polarity") or "").strip().lower()
+    if hint in _VALID_POLARITIES:
+        return hint
+    return "positive"
+
+
 def _norm(value) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
@@ -211,12 +235,15 @@ def _bind_config(
     measure: str | None = None,
     dim: str | None = None,
     measure_role: str | None = None,
+    polarity: str = "positive",
 ) -> dict:
     """Bind dataset columns to the component's config schema.
 
     `measure`/`dim` are the planner-RECONCILED bindings (P1); when None we fall
     back to positional first-column (today's behavior). `measure_role` drives the
-    data-driven number format.
+    data-driven number format. `polarity` ('positive'|'inverse') is carried onto
+    delta-bearing tiles so the frontend DeltaBadge colors an inverse metric's rise
+    as bad (it is sign-only without this hint).
     """
     ct = comp.component_type
     measure = measure if measure is not None else (shape.measures[0] if shape.measures else None)
@@ -225,10 +252,13 @@ def _bind_config(
     fmt = _format_for_role(measure or "", shape, measure_role)
 
     if ct in (ComponentType.KPI_CARD, ComponentType.METRIC_TILE):
+        # KPI/metric tiles render a delta (explicit or trend-derived); carry the
+        # polarity so the DeltaBadge frames an inverse metric's rise as bad.
         return {
             "value": measure,
             "label": comp.name if not measure else measure,
             "format": fmt,
+            "polarity": polarity,
         }
     if ct in (ComponentType.LINE_CHART, ComponentType.AREA_CHART):
         x = temporal or dim
@@ -261,7 +291,7 @@ def _bind_config(
     # Fail-closed: when the result carries no distinct target measure, the `target`
     # key is OMITTED and the renderer degrades to a plain value. Never invent one.
     if ct in (ComponentType.GAUGE_RING, ComponentType.PROGRESS_KPI, ComponentType.BULLET):
-        cfg = {"value": measure, "label": measure or comp.name, "format": fmt}
+        cfg = {"value": measure, "label": measure or comp.name, "format": fmt, "polarity": polarity}
         target = _second_measure(shape, exclude=measure)
         if target is not None:
             cfg["target"] = target
@@ -270,7 +300,7 @@ def _bind_config(
     # Delta KPI — value measure + the same measure as the sparkline series; bind a
     # `delta` column only if a distinct second measure exists (never fabricated).
     if ct == ComponentType.DELTA_KPI:
-        cfg = {"value": measure, "label": measure or comp.name, "format": fmt}
+        cfg = {"value": measure, "label": measure or comp.name, "format": fmt, "polarity": polarity}
         if measure is not None:
             cfg["spark"] = measure
         delta = _second_measure(shape, exclude=measure)
@@ -365,6 +395,7 @@ def recommend(
     planned = (intent.spec or {}).get("planned") if intent.spec else None
     measure, measure_role = _resolve_measure(planned, shape, role_map, intent, warnings)
     dim = _resolve_dimension(planned, shape)
+    polarity = _resolve_polarity(planned, role=measure_role)
 
     # STEP 1 — explicit user request wins if it can bind the dataset.
     if intent.requested_viz:
@@ -377,7 +408,8 @@ def recommend(
                     component_type=comp.component_type.value,
                     title=intent.title,
                     dataset=dataset,
-                    config=_bind_config(comp, shape, measure=measure, dim=dim, measure_role=measure_role),
+                    config=_bind_config(comp, shape, measure=measure, dim=dim,
+                                        measure_role=measure_role, polarity=polarity),
                     score=99.0,
                     rationale=f"Used the explicitly requested {comp.name}.",
                     provenance=provenance,
@@ -409,7 +441,8 @@ def recommend(
         component_type=best.component_type.value,
         title=intent.title,
         dataset=dataset,
-        config=_bind_config(best, shape, measure=measure, dim=dim, measure_role=measure_role),
+        config=_bind_config(best, shape, measure=measure, dim=dim,
+                            measure_role=measure_role, polarity=polarity),
         score=round(best_score, 3),
         rationale=rationale,
         provenance=provenance,

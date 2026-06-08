@@ -184,7 +184,7 @@ function ValueRow({ widget }: { widget: DashboardWidget }) {
       </div>
       {delta !== undefined && (
         <div className="pb-1">
-          <DeltaBadge value={delta} format={widget.config.format} />
+          <DeltaBadge value={delta} format={widget.config.format} polarity={widget.config.polarity} />
         </div>
       )}
       {target !== undefined && (

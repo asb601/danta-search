@@ -39,10 +39,12 @@ from app.services.dashboard.query_engine import (
     decompose_prompt,
 )
 
-# Component-type values that recommend()/run_widget understand.
+# Component-type values that recommend()/run_widget understand. `ranked_bar` is
+# the top-N "driver view" (who's driving a measure) — a first-class viz the brain
+# may request and the densifier may emit for a high-cardinality entity dimension.
 _VALID_VIZ = {
     "kpi_card", "metric_tile", "table", "line_chart", "bar_chart",
-    "pie_chart", "area_chart", "heatmap", "funnel",
+    "pie_chart", "area_chart", "heatmap", "funnel", "ranked_bar",
 }
 
 # question_type → default visualization when the planner omits one.
@@ -60,6 +62,7 @@ _DEFAULT_VIZ = {
 _SHARE_MAX_CARD = 8     # pie
 _BREAKDOWN_MAX_CARD = 50  # bar
 _MATRIX_MAX_CARD = 40   # heatmap second axis
+_RANK_MAX_CARD = 1000   # ranked_bar (top-N driver view; mirrors its catalog rule)
 
 
 @dataclass
@@ -73,6 +76,11 @@ class WidgetSpec:
     dimension2: str | None = None
     comparison: str | None = None
     viz: str | None = None
+    # Metric DIRECTION proposed by the planner LLM: 'inverse' when a rising value
+    # is BAD (cost, aging, DSO, returns, outstanding/overdue balance), else
+    # 'positive' (growth). Carried into the widget config so the DeltaBadge frames
+    # the delta correctly. Fail-safe to 'positive' downstream — never fabricated.
+    polarity: str | None = None
     # The brain's DETAILED analytical instruction for the SQL agent (preferred
     # over the deterministic template) and the one-line chart rationale.
     query: str | None = None
@@ -162,7 +170,9 @@ async def _design_board(prompt: str, grounding_text: str, window: tuple[str, str
         "trends and breakdowns that make them meaningful.\n"
         "3) Pick the RIGHT chart for each insight, the way an analyst would for a "
         "meeting: KPI/metric tile for one headline number; line or area for a "
-        "trend over time; bar to rank a measure across categories; pie ONLY for a "
+        "trend over time; bar to compare a measure across a HANDFUL of categories; "
+        "ranked_bar (top-N driver view) to rank a measure across MANY entities "
+        "(vendors, customers, products) — 'who is driving it'; pie ONLY for a "
         "few-category share; heatmap for two dimensions; a table for detail/top-N.\n"
         "4) For EACH widget, WRITE A PRECISE ANALYTICAL INSTRUCTION ('query') for a "
         "downstream SQL agent. Be explicit: which measure to AGGREGATE (SUM/AVG/"
@@ -173,9 +183,16 @@ async def _design_board(prompt: str, grounding_text: str, window: tuple[str, str
         "MUST say: group by the dimension, sum the measure, return the dimension and "
         "the total, top-N descending. A KPI MUST say: return the single aggregated "
         "number.\n"
-        "5) Be DATA-ADAPTIVE and lead with a NARRATIVE: 1-2 headline KPIs, then a "
-        "trend, then 1-2 breakdowns, an optional share/matrix, then one detail "
-        "table. If the data only supports 3 strong widgets, return 3 — never pad.\n\n"
+        "5) Be DATA-ADAPTIVE and lead with a NARRATIVE built like a PowerBI page: a "
+        "KPI RIBBON of 3-4 headline numbers, then a trend over time, then 2-3 "
+        "breakdowns (a ranked top-N, a category bar, a few-category share/donut), "
+        "plus an optional matrix. Aim for at least 5 VISUAL widgets when the data "
+        "supports them, but NEVER pad with fabricated or duplicate widgets — if the "
+        "data only supports 3 strong widgets, return 3 (honest beats dense).\n"
+        "6) For EACH measure, set 'polarity': 'inverse' when a RISING value is BAD "
+        "(cost, spend, aging, days-outstanding/DSO, returns, overdue/outstanding "
+        "balance, defects, churn) and 'positive' otherwise (revenue, profit, volume, "
+        "on-time rate). This colors the period delta; when unsure, use 'positive'.\n\n"
         "GROUNDING (the catalog is authoritative):\n"
         "- Use ONLY tables, columns and observed values shown. Never invent.\n"
         "- 'measure' MUST be a measure column; 'dimension' MUST be a shown "
@@ -203,7 +220,8 @@ Return JSON (max {max_widgets} widgets), ordered as a narrative (KPIs first, det
     "dimension":"dimension/temporal column (or null for kpi/detail)",
     "dimension2":"second dimension for a matrix (or null)",
     "comparison":"e.g. 'vs previous period' (or null)",
-    "viz":"kpi_card|metric_tile|line_chart|area_chart|bar_chart|pie_chart|heatmap|funnel|table",
+    "polarity":"inverse if a RISING value is bad (cost/aging/DSO/returns/overdue), else positive",
+    "viz":"kpi_card|metric_tile|line_chart|area_chart|bar_chart|ranked_bar|pie_chart|heatmap|funnel|table",
     "query":"a PRECISE analytical instruction for the SQL agent: which measure to aggregate (SUM/AVG/COUNT), how to group, how to order, how many rows, and the exact output columns",
     "chart_rationale":"one line: why this chart suits an executive audience"}}
  ]}}"""
@@ -259,6 +277,9 @@ def _coerce_specs(raw_widgets: list[dict], max_widgets: int) -> list[WidgetSpec]
         viz = _clean("viz")
         if viz and viz not in _VALID_VIZ:
             viz = None
+        polarity = (_clean("polarity") or "").lower() or None
+        if polarity not in ("inverse", "positive"):
+            polarity = None  # fail-safe: unknown direction -> default downstream
         specs.append(WidgetSpec(
             title=title,
             question_type=qt,
@@ -268,6 +289,7 @@ def _coerce_specs(raw_widgets: list[dict], max_widgets: int) -> list[WidgetSpec]
             dimension2=_clean("dimension2"),
             comparison=_clean("comparison"),
             viz=viz,
+            polarity=polarity,
             query=_clean("query"),
             chart_rationale=_clean("chart_rationale"),
         ))
@@ -305,6 +327,27 @@ def _pick_dimension(table, max_card: int, exclude: set[str] | None = None) -> st
     if best:
         return best[1]
     return fallback
+
+
+def _highest_card_dimension(
+    table, max_card: int, *, min_card: int, exclude: set[str] | None = None
+) -> str | None:
+    """Highest-cardinality categorical dimension in [min_card, max_card] — the
+    'who's driving it' ENTITY dimension (many vendors/customers/products). Returns
+    None when no dimension in that band exists (so the caller falls back to the
+    plain lowest-card pick). Used by the densifier to seat a top-N driver view."""
+    exclude = exclude or set()
+    best: tuple[int, str] | None = None
+    for name in getattr(table, "dimensions", []) or []:
+        if name in exclude:
+            continue
+        card = _card(table, name)
+        if card is None:
+            continue
+        if min_card <= card <= max_card:
+            if best is None or card > best[0]:
+                best = (card, name)
+    return best[1] if best else None
 
 
 def _find_table_for(catalog, measure: str | None):
@@ -397,6 +440,184 @@ def feasibility_filter(specs: list[WidgetSpec], catalog: list) -> tuple[list[Wid
 
 
 # --------------------------------------------------------------------------
+# S3.5 — DENSE COMPOSITION (deterministic, NO agent / NO SQL / NO LLM)
+#
+# A generated board must read like a PowerBI collage: a KPI ribbon of headline
+# numbers, a trend, and a few breakdowns — at least ~5 VISUAL (non-table) widgets
+# WHEN the data can honestly support them. The LLM still PROPOSES the metrics; this
+# is a STRUCTURAL shaper that, from the SAME catalog columns the planner already
+# resolved, fills out the composition shape the board is missing. It never
+# fabricates a column and never pads thin data (honest > padded): a table with one
+# measure / no temporal column yields fewer widgets, and that is correct.
+# --------------------------------------------------------------------------
+
+# Composition targets (STRUCTURAL shape, not dataset-fitted literals): aim for a
+# headline ribbon plus a handful of breakdowns so the board is dense but not noisy.
+_MIN_BOARD_VISUALS = 5      # the PowerBI-density floor (only when data supports it)
+_MAX_RIBBON_KPIS = 4        # KPI ribbon width
+_MAX_BREAKDOWNS = 3         # category breakdowns beyond the headline trend
+
+# Structural cardinality boundary for the breakdown shaper (NOT dataset-fitted):
+# a dimension with MORE distinct values than this reads as a "who's driving it"
+# ENTITY dimension (many vendors/customers/products) — a full bar would be
+# cluttered, so it becomes a top-N RANKED driver view. At/under it a plain bar is
+# readable. Below the share ceiling (_SHARE_MAX_CARD) a part-of-whole donut reads
+# best. These mirror the catalog visualization_rules (bar caps at 50, ranked_bar
+# allows up to 1000), so the densifier and the recommender agree on the shape.
+_RANK_MIN_CARD = _SHARE_MAX_CARD + 1   # above the share ceiling = an entity dim
+
+
+def _polarity_map(specs: list[WidgetSpec]) -> dict[str, str]:
+    """Build a measure -> LLM-authored polarity map from the feasible specs.
+
+    The board-design LLM proposes per-measure direction ('inverse' when a rising
+    value is bad). The densifier injects KPI/trend/breakdown widgets on those same
+    measures, so it must CARRY that authored polarity (an inverse measure's rise
+    must color red). Only specs that actually declared a polarity contribute — a
+    measure the LLM never tagged is left ABSENT so the densifier keeps it None
+    (honest: no Python inference of business direction). On a measure the LLM
+    tagged inconsistently we keep the first 'inverse' seen (an inverse claim is the
+    riskier/safer-to-preserve framing once the analyst asserted it)."""
+    out: dict[str, str] = {}
+    for s in specs:
+        if not s.measure or not s.polarity:
+            continue
+        prior = out.get(s.measure)
+        if prior is None or (prior != "inverse" and s.polarity == "inverse"):
+            out[s.measure] = s.polarity
+    return out
+
+
+def _lattice_key(s: WidgetSpec) -> tuple:
+    return (s.question_type, s.table, s.measure, s.dimension, s.dimension2)
+
+
+def _measures(table) -> list[str]:
+    return list(getattr(table, "measures", []) or [])
+
+
+def _primary_table(specs: list[WidgetSpec], catalog: list):
+    """The table the dense composition is built on: the one the most VISUAL seed
+    specs reference, else the most measure-rich table in the catalog."""
+    by_name = {t.table_name: t for t in catalog}
+    counts: dict[str, int] = {}
+    for s in specs:
+        if s.question_type != "detail" and s.table in by_name:
+            counts[s.table] = counts.get(s.table, 0) + 1
+    if counts:
+        best = max(counts, key=lambda k: counts[k])
+        return by_name[best]
+    return max(catalog, key=lambda t: len(_measures(t)), default=None)
+
+
+def ensure_composition(
+    specs: list[WidgetSpec], catalog: list, *, max_widgets: int
+) -> list[WidgetSpec]:
+    """Shape a feasible spec set into a dense PowerBI-style composition.
+
+    Adds — ONLY from real catalog columns and ONLY when absent — a KPI ribbon, a
+    trend (if a temporal column exists), and category breakdowns, until the board
+    has >= _MIN_BOARD_VISUALS visual widgets OR the data is exhausted (whichever
+    comes first). Existing specs are preserved in order and never duplicated. Never
+    raises; on any structural gap it simply returns what it has.
+    """
+    specs = list(specs or [])
+    catalog = catalog or []
+    cap = max(1, int(max_widgets or MAX_WIDGETS))
+    table = _primary_table(specs, catalog)
+    if table is None:
+        return specs[:cap]
+
+    # The LLM authored the metric semantics (per-measure polarity). Carry that map
+    # onto every densifier widget it injects so an inverse measure's KPI/trend/
+    # delta colors correctly. A measure the LLM never tagged is ABSENT from the map
+    # and stays None (no Python inference of business direction).
+    polarity_by_measure = _polarity_map(specs)
+
+    seen: set[tuple] = {_lattice_key(s) for s in specs}
+
+    def _visual_count() -> int:
+        return sum(1 for s in specs if s.question_type != "detail")
+
+    def _try_add(s: WidgetSpec) -> bool:
+        if len(specs) >= cap:
+            return False
+        key = _lattice_key(s)
+        if key in seen:
+            return False
+        # Carry the LLM-authored polarity for this measure (None when unseen).
+        if s.measure and s.polarity is None:
+            s.polarity = polarity_by_measure.get(s.measure)
+        seen.add(key)
+        specs.append(s)
+        return True
+
+    tname = table.table_name
+    measures = _measures(table)
+    headline = measures[0] if measures else None
+    temporal = list(getattr(table, "temporal", []) or [])
+
+    # 1) KPI RIBBON — one headline KPI per measure (capped), each a real measure.
+    for m in measures[:_MAX_RIBBON_KPIS]:
+        if _visual_count() >= _MIN_BOARD_VISUALS and len(specs) >= 3:
+            break
+        _try_add(WidgetSpec(
+            title=f"Total {m}", question_type="kpi", table=tname,
+            measure=m, viz="kpi_card",
+        ))
+
+    # 2) TREND — one time series on the headline measure (only if a date exists).
+    if headline and temporal and not any(s.question_type == "trend" for s in specs):
+        _try_add(WidgetSpec(
+            title=f"{headline} over time", question_type="trend", table=tname,
+            measure=headline, dimension=temporal[0], viz="line_chart",
+        ))
+
+    # 3) BREAKDOWNS — break the headline measure across categorical dimensions,
+    #    routed STRUCTURALLY by cardinality (mirrors the catalog rules, no fitted
+    #    literals):
+    #      card <= _SHARE_MAX_CARD  → part-of-whole share/donut (first such dim)
+    #      card >= _RANK_MIN_CARD   → the "who's driving it" ENTITY dim → ranked_bar
+    #                                  (top-N driver view; a full bar would clutter)
+    #      mid                      → a plain category bar
+    #    A high-cardinality entity dim is sought FIRST so the driver view is on the
+    #    board; the recommender's scoring (bar caps at 50 card, ranked_bar at 1000)
+    #    agrees with this shape end-to-end.
+    if headline:
+        used_dims: set[str] = {s.dimension for s in specs if s.dimension}
+        added = 0
+        share_used = any(s.question_type == "share" for s in specs)
+        while added < _MAX_BREAKDOWNS and _visual_count() < _MIN_BOARD_VISUALS:
+            # Prefer the entity ("who") dim — the highest-cardinality categorical
+            # within the ranked ceiling — so the driver view is represented; else
+            # fall back to the lowest-cardinality readable bar dim.
+            dim = _highest_card_dimension(
+                table, _RANK_MAX_CARD, min_card=_RANK_MIN_CARD, exclude=used_dims
+            ) or _pick_dimension(table, _BREAKDOWN_MAX_CARD, exclude=used_dims)
+            if not dim:
+                break
+            used_dims.add(dim)
+            card = _card(table, dim)
+            if card is not None and card >= _RANK_MIN_CARD:
+                # Many distinct entities → top-N ranked driver view.
+                qt, viz = "breakdown", "ranked_bar"
+            elif card is not None and card <= _SHARE_MAX_CARD and not share_used:
+                # A very-low-cardinality dimension reads best as a share/donut.
+                qt, viz = "share", "pie_chart"
+                share_used = True
+            else:
+                qt, viz = "breakdown", "bar_chart"
+            if not _try_add(WidgetSpec(
+                title=f"{headline} by {dim}", question_type=qt, table=tname,
+                measure=headline, dimension=dim, viz=viz,
+            )):
+                break
+            added += 1
+
+    return specs[:cap]
+
+
+# --------------------------------------------------------------------------
 # S4 — specs → WidgetIntent (the existing run_widget contract)
 # --------------------------------------------------------------------------
 
@@ -463,6 +684,7 @@ def specs_to_intents(specs: list[WidgetSpec], catalog: list) -> list[WidgetInten
             "dimension2": s.dimension2,
             "comparison": s.comparison,
             "viz": s.viz,
+            "polarity": s.polarity,
             "chart_rationale": s.chart_rationale,
             "nl_query": nl,
         }
@@ -525,7 +747,11 @@ async def plan_widgets(
 
     if specs:
         kept, reasons = feasibility_filter(specs, catalog)
-        intents = specs_to_intents(kept[:max_widgets], catalog)
+        # S3.5: shape the feasible set into a dense PowerBI-style collage (KPI
+        # ribbon + trend + breakdowns) using ONLY real catalog columns. Honest:
+        # thin data stays sparse; this never fabricates or pads.
+        dense = ensure_composition(kept, catalog, max_widgets=max_widgets)
+        intents = specs_to_intents(dense[:max_widgets], catalog)
         if intents:
             # Only surface drop reasons when SOME widgets survived — a partial
             # plan. They describe THIS plan's discarded widgets, so they are

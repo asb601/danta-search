@@ -150,21 +150,33 @@ export function EmptyState({ message, reason }: { message?: string; reason?: "em
   );
 }
 
-/** A +/- delta pill, colored by sign via the success/danger tokens. */
+/**
+ * A +/- delta pill. The arrow + sign carry the NUMERIC direction; the color
+ * carries the BUSINESS meaning via `polarity`:
+ *   - "positive" (growth metric): a rise is GOOD  → success token.
+ *   - "inverse"  (cost/aging/DSO/returns/overdue): a rise is BAD → danger token.
+ * Polarity is resolved by the planner (the LLM proposes the metric semantics) and
+ * carried in widget.config.polarity; it fails safe to "positive". Without a
+ * polarity hint the badge stays neutral gray (today's behavior).
+ */
 export function DeltaBadge({
   value,
   format,
+  polarity,
 }: {
   value: number;
   format?: "currency" | "percent" | "number" | "auto";
+  polarity?: "positive" | "inverse";
 }) {
-  const positive = value >= 0;
-  const Icon = positive ? TrendingUp : TrendingDown;
-  // Monochrome: neutral gray badge; direction is carried by the arrow + sign.
+  const rising = value >= 0;
+  const Icon = rising ? TrendingUp : TrendingDown;
+  // Good when a growth metric rises OR an inverse metric falls.
+  const good = polarity === "inverse" ? !rising : rising;
+  const variant: BadgeVariant = polarity ? (good ? "success" : "danger") : "muted";
   return (
-    <Badge variant="muted">
+    <Badge variant={variant}>
       <Icon className="h-3 w-3" />
-      {positive ? "+" : "−"}
+      {rising ? "+" : "−"}
       {formatValue(Math.abs(value), format)}
     </Badge>
   );

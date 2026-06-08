@@ -10,7 +10,7 @@
 
 import { DashboardConfig, DashboardWidget } from "./types";
 import { resolveWidgetComponent } from "./registry";
-import { KpiCard, CatalogTable } from "./components";
+import { KpiCard } from "./components";
 
 function plannedMeasure(w: DashboardWidget): string | undefined {
   const p = (w.provenance?.spec as { planned?: { measure?: string } } | undefined)?.planned;
@@ -194,14 +194,16 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
         </div>
       )}
 
-      {/* ── Detail tables: full width, bottom ── */}
-      {tables.length > 0 && (
-        <div className="space-y-3">
-          {tables.map((w) => (
-            <div key={w.widget_id} className="collage-tile h-[440px] min-w-0">
-              <CatalogTable widget={w} />
-            </div>
-          ))}
+      {/* ── Tables are NOT board widgets. The Board is a pure visual collage
+            (KPIs + charts); all tabular data lives in the Summary tab. If a
+            board has ONLY tabular results, point the user there instead of
+            rendering a table on the board. ── */}
+      {kpis.length === 0 && charts.length === 0 && tables.length > 0 && (
+        <div className="rounded-xl border border-dashed border-border/60 bg-muted/10 px-4 py-6 text-center">
+          <p className="text-sm font-medium text-foreground">These results are tabular</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Open the <span className="font-medium text-foreground">Summary</span> tab to view the data.
+          </p>
         </div>
       )}
     </div>

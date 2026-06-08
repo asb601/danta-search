@@ -6,7 +6,6 @@
 // so the catalog tracks the active theme.
 
 import { useState, useRef, useEffect } from "react";
-import { TrendingUp, TrendingDown } from "lucide-react";
 import { DashboardWidget, WidgetConfig, WidgetRow } from "./types";
 import { WidgetFrame, EmptyState, DeltaBadge, WarningChips, statusVariant } from "./WidgetFrame";
 import { Card } from "@/components/ui/card";
@@ -113,12 +112,9 @@ export function KpiCard({ widget, spark }: Props & { spark?: number[] }) {
         <div className="flex items-center gap-1 shrink-0">
           <WarningChips provenance={widget.provenance} />
           {explicitDelta !== undefined ? (
-            <DeltaBadge value={explicitDelta} format={widget.config.format} />
+            <DeltaBadge value={explicitDelta} format={widget.config.format} polarity={widget.config.polarity} />
           ) : trendPct !== undefined && Number.isFinite(trendPct) ? (
-            <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-muted-foreground">
-              {trendPct >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
-              {Math.abs(trendPct).toFixed(0)}%
-            </span>
+            <DeltaBadge value={trendPct} format="percent" polarity={widget.config.polarity} />
           ) : null}
         </div>
       </div>
@@ -156,7 +152,7 @@ export function MetricTile({ widget }: Props) {
         </p>
         <div className="flex items-center gap-1 shrink-0">
           <WarningChips provenance={widget.provenance} />
-          {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} />}
+          {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} polarity={widget.config.polarity} />}
         </div>
       </div>
       {raw === undefined && widget.provenance?.empty_message && (
@@ -765,7 +761,7 @@ export function ProgressKpi({ widget }: Props) {
         </p>
         <div className="flex items-center gap-1 shrink-0">
           <WarningChips provenance={widget.provenance} />
-          {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} />}
+          {delta !== undefined && <DeltaBadge value={delta} format={widget.config.format} polarity={widget.config.polarity} />}
         </div>
       </div>
       <p className="text-[28px] font-bold leading-none tracking-tight tabular-nums text-foreground">
@@ -881,9 +877,9 @@ export function DeltaKpi({ widget }: Props) {
         <div className="flex items-center gap-1 shrink-0">
           <WarningChips provenance={widget.provenance} />
           {explicitDelta !== undefined ? (
-            <DeltaBadge value={explicitDelta} format={widget.config.format} />
+            <DeltaBadge value={explicitDelta} format={widget.config.format} polarity={widget.config.polarity} />
           ) : trendPct !== undefined && Number.isFinite(trendPct) ? (
-            <DeltaBadge value={trendPct} format="percent" />
+            <DeltaBadge value={trendPct} format="percent" polarity={widget.config.polarity} />
           ) : null}
         </div>
       </div>

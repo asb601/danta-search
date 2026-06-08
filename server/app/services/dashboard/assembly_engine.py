@@ -21,18 +21,31 @@ from app.services.dashboard.recommendation_engine import ResolvedWidget
 MASONRY_COLS = 4
 
 # Render order by component type (lower sorts first). Defines the narrative the
-# dense packer flows through: KPIs → trends → comparisons → distributions → detail.
+# dense packer flows through: KPI ribbon → trends → comparisons/rankings →
+# distributions → matrices → detail (tables, which are Summary-only). Every
+# visual type the catalog can emit appears here so the ribbon-then-collage
+# ordering is total; the table sorts last and is tagged Summary-only below.
 _TYPE_ORDER = {
     "kpi_card": 0,
     "metric_tile": 1,
-    "line_chart": 2,
-    "area_chart": 3,
-    "bar_chart": 4,
-    "pie_chart": 5,
-    "funnel": 6,
-    "heatmap": 7,
-    "table": 8,
+    "delta_kpi": 2,
+    "gauge_ring": 3,
+    "progress_kpi": 4,
+    "bullet": 5,
+    "line_chart": 6,
+    "area_chart": 7,
+    "bar_chart": 8,
+    "ranked_bar": 9,
+    "pie_chart": 10,
+    "funnel": 11,
+    "heatmap": 12,
+    "table": 99,
 }
+
+# Component types that are TABULAR detail — never rendered on the board collage.
+# They are carried into the config tagged summary_only=True so they surface only
+# in the Summary tab; the board frees their grid slots for visual widgets.
+_SUMMARY_ONLY_TYPES = {"table"}
 
 
 def _shape(widget: ResolvedWidget) -> tuple[int, int]:
@@ -98,8 +111,12 @@ def assemble(
         widgets,
         key=lambda w: (_TYPE_ORDER.get(w.component_type, 99), -w.score),
     )
-    # The single highest-scoring widget is the board's hero (gets a larger tile).
-    hero_id = max(ordered, key=lambda w: w.score).widget_id if ordered else None
+    # The board's hero (larger tile) is the highest-scoring VISUAL widget — a
+    # Summary-only table never anchors the board. Fall back to any widget so a
+    # table-only board still produces a valid (if Summary-bound) hero_id.
+    _board = [w for w in ordered if w.component_type not in _SUMMARY_ONLY_TYPES]
+    _pool = _board or ordered
+    hero_id = max(_pool, key=lambda w: w.score).widget_id if _pool else None
 
     widget_payloads = []
     for w in ordered:
@@ -109,6 +126,10 @@ def assemble(
                 "component_id": w.component_id,
                 "type": w.component_type,
                 "title": w.title,
+                # Tabular detail is Summary-only — the board collage renders only
+                # visuals. The flag is explicit (the renderer also filters type
+                # "table", but the tag frees the slot and documents intent).
+                "summary_only": w.component_type in _SUMMARY_ONLY_TYPES,
                 "grid": _size_widget(w, is_hero=(w.widget_id == hero_id)),
                 "config": w.config,
                 "data": w.dataset,
