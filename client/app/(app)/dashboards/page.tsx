@@ -174,7 +174,7 @@ function DashboardCard({ d, onOpen, onPin, onRename, onDuplicate, onDelete }: {
       className="dash-card"
     >
       {/* Animated bar chart preview */}
-      <button onClick={onOpen} className="block w-full h-28 bg-[#f9f9f9] border-b border-[#e5e5e5] px-5 py-4">
+      <button onClick={onOpen} className="block w-full h-28 bg-[#f9f9f9] border-b border-[#e5e5e5] px-5 py-4 rounded-t-[var(--radius-xl)] overflow-hidden">
         <div className="flex items-end gap-1 h-full">
           {BAR_HEIGHTS.map((h, i) => (
             <motion.div

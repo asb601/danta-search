@@ -441,7 +441,10 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
-    overflow: hidden;
+    /* overflow stays visible so the card's row-actions dropdown (pin/rename/
+       duplicate/delete) is not clipped to the card bounds; the chart preview
+       clips its own top corners (rounded-t + overflow-hidden on the preview). */
+    overflow: visible;
     cursor: pointer;
     box-shadow: var(--shadow-xs);
     transition: border-color 0.18s, box-shadow 0.22s, transform 0.22s;

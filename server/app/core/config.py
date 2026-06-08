@@ -177,6 +177,21 @@ class Settings(BaseSettings):
     # ubiquity_ceiling / min_join_overlap / min_join_cardinality.
     RELATION_PROMOTION_ENABLED: bool = False
 
+    # RESOLVER_PIN_VALUE_GUARD_ENABLED — value-corroboration GATE on the entity
+    # resolver's HARD pin. Today a candidate is hard-pinned at confidence >=
+    # resolver_pin_threshold on NAME/ROLE-LABEL token overlap with ZERO value
+    # check, so a similarly-named-but-wrong table (OE_SO_HOLDS_ALL over
+    # OE_ORDER_HEADERS_ALL; OTA_VENDOR_SUPPLIES for a vendor query) gets pinned
+    # and can displace the correct table — which also silently kills the P1 joins
+    # (both join endpoints must be in the shortlist). When True, a would-be pin is
+    # promoted ONLY if the entity's key role is carried by a genuine key on that
+    # table per column_key_registry (cardinality >= SemanticPolicy.min_join_
+    # cardinality AND key_kind in {pk,fk}); uncorroborated pins are left as normal
+    # shortlist candidates, and 2+ equally-corroborated clones abstain (no name
+    # heuristic). NOT a re-scorer — confidence scoring is untouched. Default False
+    # so the tree is byte-identical when off; fail-open (any error → legacy pin).
+    RESOLVER_PIN_VALUE_GUARD_ENABLED: bool = False
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 

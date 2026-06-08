@@ -57,6 +57,25 @@ class EntityCandidate:
     file_id: str
     confidence: float   # [0.0, 1.0], rounded to 2 d.p.
     reason: str         # primary signal label (see _REASON_* constants)
+    # Value-corroboration verdict for the HARD-pin gate. Set only when the pin
+    # value-guard is active (RESOLVER_PIN_VALUE_GUARD_ENABLED). None = not
+    # evaluated (legacy path). True = the entity's key role is carried by a
+    # genuine key on this table per column_key_registry. Never affects confidence.
+    corroborated: bool | None = None
+
+
+@dataclass(frozen=True)
+class RegistryKeyEvidence:
+    """One column_key_registry row reduced to the fields the pin guard reads.
+
+    The registry only ever stores genuine key columns (key_kind in {pk, fk});
+    low-cardinality enums and non-key columns are not inserted. `semantic_role`
+    is the same "custom:<kind>:<label>" string the resolver already parses.
+    """
+    column_name: str
+    semantic_role: str | None
+    key_kind: str
+    cardinality: int
 
 
 @dataclass
@@ -339,6 +358,139 @@ def _score_entry(
     return min(score, _SCORE_CAP), reason
 
 
+# ── Value-corroboration gate on the HARD pin ─────────────────────────────────────
+# This is NOT a re-scorer. Confidence scoring above is untouched. This gate only
+# decides whether a would-be HARD pin (confidence >= resolver_pin_threshold) has
+# real VALUE evidence behind its name/role-label match. A pin without a genuine
+# key carrying the entity's role is a NAME-only guess and must not displace the
+# correct (already-retrieved) table — nor silently break a P1 join whose other
+# endpoint sits in the shortlist.
+
+_REAL_KEY_KINDS = frozenset({"pk", "fk"})
+
+
+def apply_pin_value_guard(
+    entity_tokens: tuple[str, ...],
+    registry_rows: list[RegistryKeyEvidence],
+    min_join_cardinality: int,
+) -> bool:
+    """Is this entity's match on this table CORROBORATED BY VALUE EVIDENCE?
+
+    True iff some column_key_registry row for the table is a genuine key —
+        cardinality >= min_join_cardinality  AND  key_kind in {pk, fk}
+    — whose semantic-role LABEL overlaps the entity (i.e. the entity's key role
+    is actually carried by a real key on this table). No name heuristic: the
+    overlap is the same role-label token overlap the resolver already uses.
+
+    A low-cardinality enum, a non-key column, a key for a DIFFERENT entity, or
+    a table absent from the registry → False (uncorroborated).
+    """
+    if not entity_tokens:
+        return False
+    for row in registry_rows:
+        if row.key_kind not in _REAL_KEY_KINDS:
+            continue
+        if row.cardinality < min_join_cardinality:
+            continue
+        parsed = _parse_role(row.semantic_role)
+        if not parsed:
+            continue
+        _kind, label = parsed
+        if _overlap(entity_tokens, label) >= _MIN_OVERLAP:
+            return True
+    return False
+
+
+def select_pinnable_blobs(
+    resolution: dict[str, list[EntityCandidate]],
+    pin_threshold: float,
+    guard_enabled: bool,
+) -> set[str]:
+    """Decide which resolver candidates may be HARD-pinned into the shortlist.
+
+    GATE on the existing pin promotion (no new scorer):
+
+      guard OFF  → legacy: union of every candidate with confidence >= threshold.
+      guard ON   → for each entity, among its candidates at/above the threshold,
+                   keep only the value-CORROBORATED ones. If exactly one survives,
+                   pin it. If 2+ survive (equally corroborated clones), ABSTAIN —
+                   pin none for that entity (honest clone behavior, no name tie-break).
+                   Uncorroborated would-be pins are dropped (they remain normal
+                   shortlist candidates and compete on retrieval rank).
+    """
+    pinned: set[str] = set()
+    for candidates in resolution.values():
+        at_threshold = [c for c in candidates if c.confidence >= pin_threshold]
+        if not guard_enabled:
+            pinned.update(c.table for c in at_threshold)
+            continue
+        corroborated = [c for c in at_threshold if c.corroborated]
+        if len(corroborated) == 1:
+            pinned.add(corroborated[0].table)
+        # len 0 → no value evidence → abstain; len 2+ → equal clones → abstain.
+    return pinned
+
+
+async def _annotate_pin_corroboration(
+    result: dict[str, list[EntityCandidate]],
+    db: AsyncSession,
+) -> None:
+    """Annotate each candidate's `corroborated` from column_key_registry.
+
+    Flag-gated (RESOLVER_PIN_VALUE_GUARD_ENABLED) and FAIL-OPEN: any error leaves
+    every `corroborated` as None, so select_pinnable_blobs (called with the same
+    flag) falls back to legacy confidence-only pinning. ONE batch query, mirroring
+    the role batch-fetch in resolve_entities — no per-candidate round-trips.
+    """
+    try:
+        from app.core.config import get_settings  # noqa: PLC0415
+        if not get_settings().RESOLVER_PIN_VALUE_GUARD_ENABLED:
+            return
+    except Exception:
+        return
+
+    candidate_file_ids = {
+        c.file_id for cands in result.values() for c in cands if c.file_id
+    }
+    if not candidate_file_ids:
+        return
+
+    try:
+        from app.models.column_key_registry import ColumnKeyRegistry  # noqa: PLC0415
+        from app.services.semantic_policy import get_semantic_policy  # noqa: PLC0415
+
+        min_card = get_semantic_policy().min_join_cardinality
+        rows = (await db.execute(
+            select(
+                ColumnKeyRegistry.file_id,
+                ColumnKeyRegistry.column_name,
+                ColumnKeyRegistry.semantic_role,
+                ColumnKeyRegistry.key_kind,
+                ColumnKeyRegistry.cardinality,
+            ).where(ColumnKeyRegistry.file_id.in_(candidate_file_ids))
+        )).all()
+    except Exception as exc:
+        # Non-fatal: leave corroborated=None → guard fails open to legacy pinning.
+        chat_logger.warning("entity_resolver_registry_fetch_error", error=str(exc)[:200])
+        return
+
+    evidence_map: dict[str, list[RegistryKeyEvidence]] = {}
+    for row in rows:
+        evidence_map.setdefault(row.file_id, []).append(RegistryKeyEvidence(
+            column_name=row.column_name,
+            semantic_role=row.semantic_role,
+            key_kind=row.key_kind,
+            cardinality=row.cardinality,
+        ))
+
+    for entity, cands in result.items():
+        entity_tokens = _tokens(entity)
+        for c in cands:
+            c.corroborated = apply_pin_value_guard(
+                entity_tokens, evidence_map.get(c.file_id, []), min_card
+            )
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 async def resolve_entities(
@@ -436,6 +588,14 @@ async def resolve_entities(
             if len(deduped) >= top_k:
                 break
         result[entity] = deduped
+
+    # ── Step 2.5: Value-corroboration for the HARD pin (flag-gated, fail-open) ─
+    # Mirrors the role batch-fetch above: ONE batch SELECT of column_key_registry
+    # for the candidate files, then a pure per-(entity, candidate) verdict. This
+    # only annotates `corroborated`; it never reorders or rescoring candidates.
+    # The graph pin gate (select_pinnable_blobs) reads this flag to decide whether
+    # a would-be pin has real value evidence. Off → byte-identical legacy.
+    await _annotate_pin_corroboration(result, db)
 
     # ── Step 3: Log summary ──────────────────────────────────────────────────
     chat_logger.info(

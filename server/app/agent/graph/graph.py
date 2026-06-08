@@ -27,7 +27,11 @@ from app.agent.catalog_hydration import hydrate_files, merge_hydrated
 from app.agent.graph.graph_builder import build_graph
 from app.agent.llm import get_llm_mini
 from app.services.business_intent_planner import BusinessIntentPlan, build_business_intent_plan
-from app.services.entity_resolver import EntityCandidate, resolve_entities
+from app.services.entity_resolver import (
+    EntityCandidate,
+    resolve_entities,
+    select_pinnable_blobs,
+)
 from app.services.sql_context_builder import build_sql_context
 from app.services.execution_strategy import plan_execution_strategy
 from app.agent.prompts.prompt_builder import build_system_prompt
@@ -490,12 +494,18 @@ async def _build_agent_context(
 
     # Hard pins (≥ pin_threshold=0.85): directly injected into the catalog
     # shortlist after retrieval so retrieval ranking cannot prune them.
-    resolver_pinned_blobs: set[str] = {
-        c.table
-        for candidates in entity_resolution.values()
-        for c in candidates
-        if c.confidence >= _RESOLVER_PIN_THRESHOLD
-    }
+    # The pin is gated by VALUE corroboration (RESOLVER_PIN_VALUE_GUARD_ENABLED):
+    # a would-be pin is promoted only when the entity's key role is carried by a
+    # genuine key on that table per column_key_registry; equally-corroborated
+    # clones abstain. Guard OFF → byte-identical legacy (confidence-only union).
+    try:
+        from app.core.config import get_settings as _gs_pin_guard  # noqa: PLC0415
+        _pin_guard_on = _gs_pin_guard().RESOLVER_PIN_VALUE_GUARD_ENABLED
+    except Exception:
+        _pin_guard_on = False
+    resolver_pinned_blobs: set[str] = select_pinnable_blobs(
+        entity_resolution, _RESOLVER_PIN_THRESHOLD, guard_enabled=_pin_guard_on
+    )
     resolver_pinned_file_ids: list[str] = [
         e["file_id"]
         for e in full_catalog
