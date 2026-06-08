@@ -66,7 +66,7 @@ function provenanceParts(w: DashboardWidget): { label: string; value: string }[]
   return out;
 }
 
-export function SummaryView({ config }: { config: DashboardConfig | null | undefined }) {
+export function SummaryView({ config, title }: { config: DashboardConfig | null | undefined; title?: string }) {
   const widgets = config?.widgets ?? [];
 
   if (!widgets.length) {
@@ -90,7 +90,7 @@ export function SummaryView({ config }: { config: DashboardConfig | null | undef
               Tie-out summary
             </p>
             <h2 className="mt-0.5 truncate text-lg font-bold tracking-tight text-foreground">
-              {config?.title || "Dashboard summary"}
+              {title || config?.title || "Dashboard summary"}
             </h2>
           </div>
           <Badge variant="muted" className="shrink-0">

@@ -428,7 +428,13 @@ def feasibility_filter(specs: list[WidgetSpec], catalog: list) -> tuple[list[Wid
     seen: set[tuple] = set()
     uniq: list[WidgetSpec] = []
     for s in kept:
-        key = (s.question_type, s.table, s.measure, s.dimension, s.dimension2)
+        # A metric's identity is its TITLE: "Total Revenue" (SUM) and "Average
+        # Revenue" (AVG) share table+measure+dims but are DIFFERENT KPIs. WidgetSpec
+        # has no aggregation field, so without the title these collapse and real
+        # KPIs get wrongly dropped as duplicates. Only an EXACT repeat (same title
+        # + lattice) is a true duplicate.
+        key = (s.question_type, s.table, s.measure, s.dimension, s.dimension2,
+               (s.title or "").strip().lower())
         if key in seen:
             dropped.append((s, "duplicate of another widget"))
             continue
@@ -756,7 +762,11 @@ async def plan_widgets(
             # Only surface drop reasons when SOME widgets survived — a partial
             # plan. They describe THIS plan's discarded widgets, so they are
             # coherent with the rendered tiles.
-            warnings.extend(reasons)
+            # Internal dedup bookkeeping ("duplicate of another widget") is not a
+            # user-facing caveat — in the Analyst Notes panel it reads like an
+            # error. Surface only genuine data-limitation reasons (no table / no
+            # measure); the rest stay in telemetry below.
+            warnings.extend(r for r in reasons if "duplicate" not in r.lower())
             chat_logger.info(
                 "dashboard_board_planned",
                 catalog_size=catalog_size,

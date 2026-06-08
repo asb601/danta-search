@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.services.dashboard.board_planner import WidgetSpec, ensure_composition
+from app.services.dashboard.board_planner import WidgetSpec, ensure_composition, feasibility_filter
 from app.services.dashboard.query_engine import WidgetIntent, profile_dataset
 from app.services.dashboard.recommendation_engine import _resolve_polarity, recommend
 from app.services.dashboard import assembly_engine
@@ -65,6 +65,35 @@ def _thin_table():
         row_count=12,
         columns=[_col("headcount", "measure"), _col("team", "dimension", card=3)],
     )
+
+
+# ==========================================================================
+# 0. Dedup must not collapse DISTINCT KPIs (Total vs Average, count vs distinct)
+# ==========================================================================
+
+def test_distinct_kpis_same_measure_survive_dedup():
+    # Total vs Average share measure=revenue; two count-style KPIs share orders.
+    # They are DIFFERENT metrics (different titles) and must all survive — not be
+    # dropped as "duplicate of another widget".
+    specs = [
+        WidgetSpec(title="Total Revenue", question_type="kpi", table="sales", measure="revenue"),
+        WidgetSpec(title="Average Revenue", question_type="kpi", table="sales", measure="revenue"),
+        WidgetSpec(title="Number of Orders", question_type="kpi", table="sales", measure="orders"),
+        WidgetSpec(title="Distinct Categories", question_type="kpi", table="sales", measure="orders"),
+    ]
+    kept, reasons = feasibility_filter(specs, [_rich_table()])
+    assert len(kept) == 4, [k.title for k in kept]
+    assert not any("duplicate" in r.lower() for r in reasons)
+
+
+def test_true_duplicate_is_still_deduped():
+    # An EXACT repeat (same title + measure) is a real duplicate and must collapse.
+    specs = [
+        WidgetSpec(title="Total Revenue", question_type="kpi", table="sales", measure="revenue"),
+        WidgetSpec(title="Total Revenue", question_type="kpi", table="sales", measure="revenue"),
+    ]
+    kept, _ = feasibility_filter(specs, [_rich_table()])
+    assert len(kept) == 1
 
 
 # ==========================================================================

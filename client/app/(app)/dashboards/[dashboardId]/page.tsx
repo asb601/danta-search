@@ -137,6 +137,9 @@ export default function DashboardDetailPage({
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ title: t }),
                   });
+                  // Update local state so the live title (header + Summary cover)
+                  // reflects the rename immediately, without a reload.
+                  setDashboard((d) => (d ? { ...d, title: t } : d));
                 }
               }}
               className="bg-transparent text-base font-semibold text-foreground focus:outline-none min-w-0 flex-1"
@@ -231,7 +234,7 @@ export default function DashboardDetailPage({
                 <DashboardRenderer config={config} />
               </>
             ) : (
-              <SummaryView config={config} />
+              <SummaryView config={config} title={dashboard.title} />
             )}
           </div>
         </div>
