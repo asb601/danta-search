@@ -78,3 +78,39 @@ class PdfSettings:
 @lru_cache(maxsize=1)
 def get_pdf_settings() -> PdfSettings:
     return PdfSettings()
+
+
+def azure_openai_credentials() -> tuple[str, str, str]:
+    """Resolve ``(endpoint, api_key, api_version)`` for Azure OpenAI.
+
+    pdf_chat reuses the SAME Azure OpenAI credentials the rest of the platform
+    already has — there are no pdf-specific key/endpoint values to set. The
+    resolution order makes that work no matter how the deployment supplies them
+    (first non-empty wins, per field):
+
+      1. process env, canonical names  (``AZURE_OPENAI_ENDPOINT`` / ``_KEY``)
+      2. process env, ``.env`` alias names (``AZURE_OPENAI_API_BASE`` / ``_API_KEY``)
+      3. the main app ``Settings``, which load ``server/.env`` via
+         pydantic-settings — so values living ONLY in ``.env`` (never exported
+         into ``os.environ``) are still found.
+
+    This mirrors ``app/core/openai_client.py``'s
+    ``endpoint = AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_API_BASE`` coalescing, so
+    pdf_chat and the CSV pipeline always resolve to the same Azure resource.
+    """
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT") or os.getenv("AZURE_OPENAI_API_BASE") or ""
+    api_key = os.getenv("AZURE_OPENAI_KEY") or os.getenv("AZURE_OPENAI_API_KEY") or ""
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION") or ""
+
+    if not (endpoint and api_key and api_version):
+        try:  # app Settings read server/.env directly — no os.environ export needed
+            from app.core.config import get_settings
+
+            s = get_settings()
+            endpoint = endpoint or s.AZURE_OPENAI_ENDPOINT or s.AZURE_OPENAI_API_BASE or ""
+            api_key = api_key or s.AZURE_OPENAI_KEY or s.AZURE_OPENAI_API_KEY or ""
+            api_version = api_version or s.AZURE_OPENAI_API_VERSION or ""
+        except Exception:  # pragma: no cover - standalone import with no app/infra
+            pass
+
+    return endpoint, api_key, api_version or "2024-02-01"

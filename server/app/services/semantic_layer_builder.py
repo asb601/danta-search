@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -158,6 +158,60 @@ async def _key_kind(file_id: str, column_name: str | None, db: AsyncSession) -> 
     return row.key_kind if row else None
 
 
+async def _key_cardinality(file_id: str, column_name: str | None, db: AsyncSession) -> int:
+    """Distinct-value cardinality of a join column from ColumnKeyRegistry.
+
+    Returns 0 when no registry row exists so a missing-stat column can never be
+    mistaken for a real key (the cardinality floor will reject it).
+    """
+    if not column_name:
+        return 0
+    row = (
+        await db.execute(
+            select(ColumnKeyRegistry.cardinality).where(
+                ColumnKeyRegistry.file_id == file_id,
+                ColumnKeyRegistry.column_name == column_name,
+            )
+        )
+    ).scalar_one_or_none()
+    return int(row) if row is not None else 0
+
+
+async def _build_ubiquity_map(container_id: str, db: AsyncSession) -> dict[str, float]:
+    """Per-container column ubiquity: fraction of files that carry each column.
+
+    Computed ONCE per build (one aggregate query) and reused for every edge. A
+    column present in ~all files (created_by, last_updated_by) approaches 1.0 and
+    is treated as an audit/system column, not a business key. Purely
+    distributional — no column-name list. Fail-safe: empty map on any error so
+    the caller falls back to current (non-promoting) behavior.
+    """
+    try:
+        total_files = (
+            await db.execute(
+                select(func.count(func.distinct(ColumnKeyRegistry.file_id))).where(
+                    ColumnKeyRegistry.container_id == container_id
+                )
+            )
+        ).scalar_one_or_none() or 0
+        if not total_files:
+            return {}
+        rows = (
+            await db.execute(
+                select(
+                    ColumnKeyRegistry.column_name,
+                    func.count(func.distinct(ColumnKeyRegistry.file_id)),
+                )
+                .where(ColumnKeyRegistry.container_id == container_id)
+                .group_by(ColumnKeyRegistry.column_name)
+            )
+        ).all()
+        return {name: (count / total_files) for name, count in rows}
+    except Exception as exc:  # fail-safe: never break the build over a stats query
+        ingest_logger.warning("semantic_layer_ubiquity_failed", container_id=container_id, error=str(exc))
+        return {}
+
+
 def _relationship_type(kind_a: str | None, kind_b: str | None) -> str:
     if kind_a == "pk" and kind_b == "fk":
         return "one_to_many"
@@ -241,27 +295,179 @@ def _join_rule(
     }
 
 
+def _normalize_key_name(column: str | None) -> str | None:
+    """Canonicalize a column name for same-business-key identity comparison.
+
+    upper/strip only — two columns are "the same business key" iff their names
+    match after this normalization (CUSTOMER_ID == ' customer_id '). Returns None
+    when no name is available so the identity guard can never fire on absent
+    evidence. Deliberately NOT a synonym/alias table: this is a pure identity
+    check, not a name list.
+    """
+    if not column:
+        return None
+    normalized = column.strip().upper()
+    return normalized or None
+
+
+def _is_same_business_key(left_column: str | None, right_column: str | None) -> bool:
+    left = _normalize_key_name(left_column)
+    right = _normalize_key_name(right_column)
+    return bool(left) and left == right
+
+
+def classify_join_approval(
+    *,
+    role: str | None,
+    relationship_type: str,
+    value_overlap: float,
+    confidence: float,
+    cardinality_left: int,
+    cardinality_right: int,
+    ubiquity: float,
+    has_companion: bool,
+    policy,
+    promotion_enabled: bool,
+    left_column: str | None = None,
+    right_column: str | None = None,
+) -> tuple[str, str | None]:
+    """Pure, data-driven join-approval decision (no DB, no I/O).
+
+    Promotion is VALUE + IDENTITY driven and ROLE-INDEPENDENT. The primary gate
+    is the SAME-KEY IDENTITY GUARD: an edge is promotable ONLY when its two join
+    columns are the same business key (normalize(left)==normalize(right)). This
+    is the decisive fix — two independent small-integer id sequences that
+    coincidentally value-overlap (BANK_ACCOUNT_ID vs VENDOR_ID, PLAN_ID vs
+    COST_TYPE_ID) can no longer be approved no matter how strong their overlap.
+
+    Promote to `approved` IFF ALL hold (NO role check, NO confidence floor):
+      1. same business key:  normalize(left_column) == normalize(right_column)
+      2. value_overlap   >= policy.min_join_overlap     (value reconciliation)
+      3. min_cardinality >= policy.min_join_cardinality  (real key, not an enum)
+      4. ubiquity        <= policy.ubiquity_ceiling      (not an audit/system col)
+      5. NOT a template clone: an edge is a copied/templated column (not a
+         referential FK) when value_overlap >= policy.clone_overlap_floor AND
+         cardinality_left == cardinality_right (the two sides hold the IDENTICAL
+         generated value set). Real masters differ in cardinality between sides
+         (CUSTOMER_ID 312/300, VENDOR_ID 181/190), so this drops only clones.
+
+    BOTH raw cardinalities are threaded so the clone signature (left == right) is
+    decidable; min_cardinality (the legacy key-strength floor) stays derivable as
+    min(cardinality_left, cardinality_right).
+
+    `ubiquity` is the fraction of the container's files whose join column has this
+    name; an audit/system column (created_by, ...) approaches 1.0 while a business
+    key stays low. It is the decisive separator between a real master and an
+    equally-cardinal audit column, which cardinality alone cannot distinguish.
+    Same-name promotion bypasses the risky-single-column gate AND the confidence
+    floor ONLY for same-name value-validated keys; every other edge still flows
+    through the legacy gates below.
+
+    Returns (approval_status, risk_reason). approval_status is "approved" or
+    "candidate"; risk_reason is None only when approved.
+    """
+    same_business_key = _is_same_business_key(left_column, right_column)
+    # A key is only as strong as its weaker side. Derived here so the legacy
+    # cardinality floor is unchanged while the clone guard sees both raw sides.
+    min_cardinality = min(cardinality_left, cardinality_right)
+
+    # SAME-KEY IDENTITY PROMOTION (flag-gated, the relational fix). Evaluated
+    # BEFORE the risky-single-column gate so a same-name value-validated key
+    # (e.g. reference_key:customer on CUSTOMER_ID==CUSTOMER_ID) is promoted
+    # regardless of role and without the mis-calibrated confidence floor — but
+    # only when the value/identity evidence is unambiguous. Cross-name edges
+    # (same_business_key is False) fall straight through to the legacy gates.
+    if promotion_enabled and same_business_key:
+        # Audit/system column: broadly present across the container's files.
+        # Checked first because an audit column can share a master's cardinality
+        # AND its name on both sides — only ubiquity separates them.
+        if ubiquity > policy.ubiquity_ceiling:
+            return "candidate", "ubiquitous/audit column, not a business key"
+        # Degenerate cardinality: too few distinct values to be a real key.
+        if min_cardinality < policy.min_join_cardinality:
+            return "candidate", "cardinality too low to be a key"
+        # Weak value overlap: columns do not value-reconcile across tables.
+        if value_overlap < policy.min_join_overlap:
+            return "candidate", "insufficient value overlap"
+        # Template clone: a copied/templated column, not a referential FK. The
+        # verified clone signature is near-total overlap AND identical cardinality
+        # on both sides (the two columns hold the SAME generated value set). Real
+        # masters differ in cardinality between sides, so this rejects only the
+        # fabricated document-key joins between unrelated tables. Checked LAST in
+        # the promotion branch — after same-name + value/cardinality/ubiquity pass
+        # but before approving — so a real master same-name edge still approves.
+        if (
+            value_overlap >= policy.clone_overlap_floor
+            and cardinality_left == cardinality_right
+        ):
+            return "candidate", "templated/copied column, not a referential key"
+        # All gates hold → approved (role-independent, no confidence floor).
+        return "approved", None
+
+    # 1) A risky single-column reference role is never a safe join on its own
+    #    (cross-name or weak edges only reach here — same-name strong keys were
+    #    already promoted above).
+    if is_risky_single_column_join_role(role):
+        if has_companion:
+            return "candidate", "single-column reference key needs composite join approval before use"
+        return "candidate", f"{role} alone is not a safe business join key"
+
+    # When promotion is OFF, the decision tree is byte-identical to the legacy
+    # _approval_status: m2m is always a candidate, otherwise confidence+overlap.
+    # The audit/cardinality/overlap gates below are part of the flag-gated path.
+    if promotion_enabled:
+        # Cross-name edges still get the audit/cardinality/overlap rejection
+        # reasons so the risk_reason is informative; they are NEVER promoted
+        # (the same-key guard above is the only promotion path).
+        if ubiquity > policy.ubiquity_ceiling:
+            return "candidate", "ubiquitous/audit column, not a business key"
+        if min_cardinality < policy.min_join_cardinality:
+            return "candidate", "cardinality too low to be a key"
+        if value_overlap < policy.min_join_overlap:
+            return "candidate", "insufficient value overlap"
+
+    # 2) Existing behavior: many_to_many is unsafe unless promoted above; an
+    #    edge with a detected PK side is approved when confidence + overlap pass.
+    if relationship_type == "many_to_many":
+        if has_companion:
+            return "candidate", "many-to-many join needs composite grain approval before use"
+        return "candidate", "many-to-many join can duplicate rows unless a grain rule approves it"
+    if confidence >= policy.approved_join_confidence and value_overlap >= policy.approved_join_min_overlap:
+        return "approved", None
+    return "candidate", "needs stronger confidence or business approval"
+
+
 def _approval_status(
     rel: FileRelationship,
     relationship_type: str,
     companion_components: list[dict],
+    *,
+    cardinality_left: int,
+    cardinality_right: int,
+    ubiquity: float,
+    from_column: str | None,
+    to_column: str | None,
 ) -> tuple[str, str | None]:
     policy = get_semantic_policy()
     confidence = rel.confidence_score or 0.0
     overlap = rel.value_overlap_pct or 0.0
     role = rel.semantic_role
+    promotion_enabled = bool(get_settings().RELATION_PROMOTION_ENABLED)
 
-    if is_risky_single_column_join_role(role):
-        if companion_components:
-            return "candidate", "single-column reference key needs composite join approval before use"
-        return "candidate", f"{role} alone is not a safe business join key"
-    if relationship_type == "many_to_many":
-        if companion_components:
-            return "candidate", "many-to-many join needs composite grain approval before use"
-        return "candidate", "many-to-many join can duplicate rows unless a grain rule approves it"
-    if confidence >= policy.approved_join_confidence and overlap >= policy.approved_join_min_overlap:
-        return "approved", None
-    return "candidate", "needs stronger confidence or business approval"
+    return classify_join_approval(
+        role=role,
+        relationship_type=relationship_type,
+        value_overlap=overlap,
+        confidence=confidence,
+        cardinality_left=cardinality_left,
+        cardinality_right=cardinality_right,
+        ubiquity=ubiquity,
+        has_companion=bool(companion_components),
+        policy=policy,
+        promotion_enabled=promotion_enabled,
+        left_column=from_column,
+        right_column=to_column,
+    )
 
 
 async def upsert_semantic_relationships_for_file(file_id: str, db: AsyncSession) -> int:
@@ -274,6 +480,7 @@ async def upsert_semantic_relationships_for_file(file_id: str, db: AsyncSession)
     ).scalars().all()
 
     created_or_updated = 0
+    ubiquity_map: dict[str, float] | None = None  # built once per container, lazily
     for rel in relationships:
         meta_a = (
             await db.execute(select(FileMetadata).where(FileMetadata.file_id == rel.file_a_id))
@@ -283,6 +490,9 @@ async def upsert_semantic_relationships_for_file(file_id: str, db: AsyncSession)
         ).scalar_one_or_none()
         if not meta_a or not meta_b or not meta_a.container_id or meta_a.container_id != meta_b.container_id:
             continue
+
+        if ubiquity_map is None:
+            ubiquity_map = await _build_ubiquity_map(meta_a.container_id, db)
 
         entity_a = await upsert_semantic_entity(rel.file_a_id, db)
         entity_b = await upsert_semantic_entity(rel.file_b_id, db)
@@ -301,7 +511,43 @@ async def upsert_semantic_relationships_for_file(file_id: str, db: AsyncSession)
             to_column=to_column,
             primary_role=rel.semantic_role,
         )
-        approval_status, risk_reason = _approval_status(rel, relationship_type, companion_components)
+        # min cardinality across the join pair: a key is only as strong as its
+        # weaker side. ubiquity: an edge is audit/system if EITHER side column is
+        # broadly present, so take the max across the pair.
+        card_a = await _key_cardinality(rel.file_a_id, from_column, db)
+        card_b = await _key_cardinality(rel.file_b_id, to_column, db)
+        min_cardinality = min(card_a, card_b)
+        ubiquity = max(
+            ubiquity_map.get(from_column, 0.0),
+            ubiquity_map.get(to_column, 0.0),
+        )
+        approval_status, risk_reason = _approval_status(
+            rel,
+            relationship_type,
+            companion_components,
+            cardinality_left=card_a,
+            cardinality_right=card_b,
+            ubiquity=ubiquity,
+            from_column=from_column,
+            to_column=to_column,
+        )
+        # Behavior-change marker: a same-business-key promoted to an approved join
+        # over a many_to_many edge is exactly the relational fix — log it so
+        # reviewers can see the same-key identity gate firing (only emits when the
+        # flag is on and it fires). `same_business_key` is always True here.
+        if approval_status == "approved" and relationship_type == "many_to_many":
+            ingest_logger.info(
+                "semantic_layer_master_key_promoted",
+                container_id=meta_a.container_id,
+                from_column=from_column,
+                to_column=to_column,
+                same_business_key=_is_same_business_key(from_column, to_column),
+                role=rel.semantic_role,
+                value_overlap=rel.value_overlap_pct,
+                min_cardinality=min_cardinality,
+                ubiquity=round(ubiquity, 4),
+                confidence=rel.confidence_score,
+            )
 
         semantic_rel = (
             await db.execute(

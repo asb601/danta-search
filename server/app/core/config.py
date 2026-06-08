@@ -166,6 +166,17 @@ class Settings(BaseSettings):
     SME_AUDIT_ABS_COVERAGE: float = 0.6
     SME_AUDIT_MIN_FILES: int = 8
 
+    # RELATION_PROMOTION_ENABLED — relational fix: at semantic-layer build time,
+    # promote value-validated master keys (semantic entity_key + strong cross-table
+    # value overlap + real cardinality + LOW container ubiquity + confidence floor)
+    # to APPROVED joins EVEN WHEN no PK was detected (so the edge is many_to_many).
+    # Without this, no-PK datasets force EVERY edge to many_to_many and the blanket
+    # m2m rejection leaves approved_joins permanently empty → joins collapse to
+    # independent_analyses. Default False so the tree is byte-identical when off;
+    # all separators are data-driven (no column-name lists). See SemanticPolicy
+    # ubiquity_ceiling / min_join_overlap / min_join_cardinality.
+    RELATION_PROMOTION_ENABLED: bool = False
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 

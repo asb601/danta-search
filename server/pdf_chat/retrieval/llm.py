@@ -15,8 +15,8 @@ instruction prefix. Guarded import: constructs without infra; raises only on CAL
 from __future__ import annotations
 
 import hashlib
-import os
 
+from pdf_chat.config import azure_openai_credentials
 from pdf_chat.model_router import select_model, TaskClass
 from pdf_chat.observability.cost_tracker import get_cost_tracker
 
@@ -30,10 +30,11 @@ except ImportError:  # pragma: no cover - exercised only without infra
 
 
 def _build_client():  # pragma: no cover - requires infra + env
+    endpoint, api_key, api_version = azure_openai_credentials()
     return AzureOpenAI(
-        api_key=os.getenv("AZURE_OPENAI_KEY", ""),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
+        api_key=api_key,
+        api_version=api_version,
+        azure_endpoint=endpoint,
     )
 
 

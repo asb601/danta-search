@@ -12,9 +12,8 @@ SDK installed raises a clear ``RuntimeError`` at call time, never at import.
 from __future__ import annotations
 
 import asyncio
-import os
 
-from ..config import get_pdf_settings
+from ..config import azure_openai_credentials, get_pdf_settings
 
 try:
     from openai import AzureOpenAI  # type: ignore
@@ -26,10 +25,11 @@ except ImportError:  # pragma: no cover - exercised only without infra
 
 
 def _build_client():  # pragma: no cover - requires infra + env
+    endpoint, api_key, api_version = azure_openai_credentials()
     return AzureOpenAI(  # type: ignore[operator]
-        api_key=os.getenv("AZURE_OPENAI_KEY", ""),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
+        api_key=api_key,
+        api_version=api_version,
+        azure_endpoint=endpoint,
     )
 
 

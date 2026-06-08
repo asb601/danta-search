@@ -52,6 +52,22 @@ class SemanticPolicy:
     # on tiny enums — data-driven, never by column name.
     min_join_overlap: float = 0.50
     min_join_cardinality: int = 8
+    # Ubiquity ceiling for master-key promotion: a join column present in MORE
+    # than this fraction of a container's files is an audit/system column (e.g.
+    # created_by, last_updated_by appear in ~all tables) and is NEVER promoted to
+    # an approved join — even when its cardinality matches a real master. Ubiquity
+    # is the decisive separator between a business key and an equally-cardinal
+    # audit column. Data-derived (computed per container), never a name list.
+    ubiquity_ceiling: float = 0.60
+    # Clone-overlap floor for the templated/copied-column guard. A copied column
+    # (NOT a referential FK) has the verified signature value_overlap >= this AND
+    # cardinality_left == cardinality_right (the two sides hold the IDENTICAL
+    # generated value set). Such an edge is a template-clone document key joining
+    # unrelated tables (e.g. AP_BATCHES_ALL ⋈ AP_BANK_ACCOUNTS_ALL on PO_HEADER_ID)
+    # and is NEVER promoted, even on a same-name match. Real masters differ in
+    # cardinality between their two sides, so they clear this guard. Distributional,
+    # never a name list.
+    clone_overlap_floor: float = 0.999
     # Confidence = weighted blend of value overlap and (log-scaled) cardinality,
     # so a high-overlap high-cardinality key scores above the approval floor while
     # a high-overlap tiny-domain coincidence does not.
