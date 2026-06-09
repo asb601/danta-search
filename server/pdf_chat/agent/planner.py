@@ -1,10 +1,9 @@
 """Phase 3 planner/router — typed intent classification + bypass decision.
 
-Mirrors the main system's ``app/services/semantic_planner.py`` contract:
-a confidence-scored plan with a TYPED ``fallback_reason`` string and a typed
-``intent``. High-confidence simple queries (or any cached query) BYPASS the
-agentic tool loop entirely; everything else falls through to the loop with a
-logged, typed reason.
+Follows a typed-plan contract: a confidence-scored plan with a TYPED
+``fallback_reason`` string and a typed ``intent``. High-confidence simple
+queries (or any cached query) BYPASS the agentic tool loop entirely;
+everything else falls through to the loop with a logged, typed reason.
 
 Design rules (spec §3 invariants):
   * The planning model is chosen via ``model_router.select_model(task=
@@ -157,7 +156,7 @@ async def plan_query(
         )
         plan = _parse_plan(raw)
     except Exception as exc:
-        # Typed fallback mirroring semantic_planner's "planner_error:<E>" style.
+        # Typed fallback following the "planner_error:<E>" contract.
         result.fallback_reason = f"planner_error:{type(exc).__name__}"
         result.bypass = False
         log_gate_decision(

@@ -192,6 +192,14 @@ class Settings(BaseSettings):
     # so the tree is byte-identical when off; fail-open (any error → legacy pin).
     RESOLVER_PIN_VALUE_GUARD_ENABLED: bool = False
 
+    # RESOLVE_CONTRACT_ENABLED — v2 RESOLVE contract (app/services/resolve/): gate
+    # for the pure, deterministic per-question analytical CONTRACT + fallback
+    # condition (source/grain/measure/filter/join slots → confidence → drop-to-
+    # agent-fallback decision). DISTINCT from the GATE-B governed-join contract/
+    # package. Default False so the tree is byte-identical when off; the contract
+    # module is additive and not wired into graph.py until a caller opts in.
+    RESOLVE_CONTRACT_ENABLED: bool = False
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 

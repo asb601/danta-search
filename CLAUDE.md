@@ -10,7 +10,24 @@ This file gives Claude (and any AI assistant) the essential context needed to wo
 
 Users upload business datasets (CSV, XLSX, Parquet). The system ingests, cleans, converts to Parquet, embeds, and indexes them. Users then chat with the system in natural language. The system semantically plans, retrieves relevant files, executes deterministic analytical SQL via DataFusion, and synthesizes a grounded response.
 
-The core design principle: **intelligence lives in ingestion, not at query time.** The runtime only retrieves, plans, executes, and synthesizes — it never discovers schema or business meaning dynamically.
+The core design principle: **intelligence is partitioned by trust and cost, not by stage.**
+Ingestion computes only cheap, per-file, O(n) **evidence** that makes the corpus navigable —
+schema fingerprints, column roles, cardinality/null/unique stats, value fingerprints, and
+schema-twin cluster membership. It does **not** mint exhaustive cross-file **conclusions**
+(all-pairs value-overlap joins, eager "this is the master") — those are O(n²), untrustworthy
+(audit columns overlap across every table), and do not scale to millions of files.
+
+At query time a narrow, twin-aware retrieved **slice** (2–5 candidate tables, with every member
+of a schema-twin cluster kept together) is handed to the LLM **brain** (gpt-4o-mini, temp 0).
+The brain reasons over that clean slice to pick the canonical table, the grain, and the metric,
+then emits a typed `{entity, grain, measure, filter}` **contract**. The contract is
+**value-verified** against the stored evidence; arithmetic is always SQL/DataFusion — the brain
+never computes a number, never relabels a result, and never selects from the whole corpus. Every
+**verified** decision is **promoted to a cached, governed fact** (decide once, reuse
+deterministically), so the same question is never re-guessed. Genuine ties (e.g. two schema-twins
+with no distinguishing value evidence) trigger **abstain-and-confirm**, not a silent guess.
+The intelligence is the brain applied *where necessary* over the *right small slice* — not a giant
+precomputed knowledge base, and not the LLM drowning in the whole catalog.
 
 ---
 
@@ -130,7 +147,9 @@ Upload → Cleaning/Normalization → Column Standardization → Type Inference
 ### What NOT to use
 - Do not query CSV or XLSX directly in analytical execution paths
 - Do not use pandas for large-scale runtime analytics (use Polars + Arrow)
-- Do not perform runtime schema discovery — all schema intelligence is pre-computed at ingestion
+- Do not pre-compute exhaustive cross-file conclusions at ingestion (all-pairs value-overlap joins, eager master election) — they are O(n²), audit-column-noisy, and don't scale; store cheap per-file EVIDENCE and draw cross-file conclusions LAZILY at query time over the retrieved slice, value-verify them, then promote verified ones to cached facts (decide once, reuse deterministically)
+- Do not let the LLM compute numbers, relabel results, or select from the whole corpus — the brain reasons only over a narrow (2–5) retrieved candidate slice and emits a typed `{entity, grain, measure, filter}` contract; SQL/DataFusion does all arithmetic; abstain-and-confirm on genuine ties
+- Do not re-derive a governed semantic (metric, canonical master, grain) per query once it is verified and promoted — reuse the cached fact; per-query re-derivation breaks both cost (dashboards fan out many widgets) and governance (numbers must tie out across users)
 - Do not generate arbitrary LLM joins — joins must be relationship-validated and ontology-backed
 - Do not use pgvector for enterprise-scale retrieval — use OpenSearch
 
@@ -284,7 +303,6 @@ Do NOT build yet: Kubernetes, gRPC, GraphQL, fine-tuned LLM, Kafka.
 | `server/app/main.py` | App bootstrap, all lifespan migrations, router mounts |
 | `server/app/core/config.py` | All settings via pydantic-settings |
 | `server/app/agent/graph/graph.py` | LangGraph agent — central query execution path |
-| `server/app/services/semantic_planner.py` | Semantic planning layer |
 | `server/app/services/workflow_capability_resolver.py` | Workflow domain activation + semantic closure |
 | `server/app/services/dashboard/` | Dashboard generation engines (catalog, query, recommendation, assembly) |
 | `server/app/api/v1/dashboards.py` | Dashboard CRUD + the `/generate` route |

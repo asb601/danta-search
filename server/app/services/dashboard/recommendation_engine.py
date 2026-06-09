@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 from app.services.dashboard.component_catalog import (
     ComponentDefinition,
     ComponentType,
+    components_for_type,
     fallback_component,
     list_components,
 )
@@ -228,6 +229,61 @@ def _second_measure(shape: DatasetShape, *, exclude: str | None) -> str | None:
     return None
 
 
+# Component types that REQUIRE a real target to be honest (their whole point is
+# actual-vs-target). Sourced from the catalog's `requires_target` rule so adding a
+# new target-driven component is a registry change, not a code change here.
+_TARGET_REQUIRING_TYPES = {
+    c.component_type
+    for c in list_components()
+    if (c.visualization_rules or {}).get("requires_target")
+}
+
+
+def _structural_max(planned: dict | None) -> float | None:
+    """The intrinsic 0-100% ceiling for a ratio metric, from the planner's
+    `metric_max`. Accept ONLY an exact 100 — the genuine bound of a 0-100% ratio
+    (collection/fill rate). Anything else is not an honest target and yields None
+    (fail-closed). No name-based ratio detection — purely the planner's structural
+    declaration, validated here."""
+    if not planned:
+        return None
+    raw = planned.get("metric_max")
+    try:
+        return 100.0 if raw is not None and float(raw) == 100.0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_honest_target(
+    comp: ComponentDefinition, shape: DatasetShape, measure: str | None,
+    structural_max: float | None,
+) -> bool:
+    """A target-requiring component is honest ONLY when a real target exists: a
+    distinct second measure column OR a structural 0-100% ceiling. Non-target
+    components are always 'honest' (the guard does not apply)."""
+    if comp.component_type not in _TARGET_REQUIRING_TYPES:
+        return True
+    if _second_measure(shape, exclude=measure) is not None:
+        return True
+    return structural_max is not None
+
+
+def _downgrade_target_component(
+    comp: ComponentDefinition, shape: DatasetShape, measure: str | None,
+    structural_max: float | None,
+) -> ComponentDefinition:
+    """D.1 HONESTY GUARD — when a target-requiring component (gauge/progress/bullet)
+    has NO honest target, downgrade it to a plain KPI card. There are no target
+    columns in this data, so a gauge/progress/bullet would render a FABRICATED ring;
+    a KPI tile is the honest single-number rendering. The exception (an intrinsic
+    0-100% ratio with a structural max) is allowed through `_has_honest_target`.
+    Deterministic — enforced here, never left to the LLM."""
+    if _has_honest_target(comp, shape, measure, structural_max):
+        return comp
+    kpis = components_for_type(ComponentType.KPI_CARD)
+    return kpis[0] if kpis else comp
+
+
 def _bind_config(
     comp: ComponentDefinition,
     shape: DatasetShape,
@@ -236,6 +292,7 @@ def _bind_config(
     dim: str | None = None,
     measure_role: str | None = None,
     polarity: str = "positive",
+    structural_max: float | None = None,
 ) -> dict:
     """Bind dataset columns to the component's config schema.
 
@@ -243,7 +300,9 @@ def _bind_config(
     back to positional first-column (today's behavior). `measure_role` drives the
     data-driven number format. `polarity` ('positive'|'inverse') is carried onto
     delta-bearing tiles so the frontend DeltaBadge colors an inverse metric's rise
-    as bad (it is sign-only without this hint).
+    as bad (it is sign-only without this hint). `structural_max` is the intrinsic
+    0-100% ceiling for a ratio metric — the ONLY honest target a gauge/progress/
+    bullet may use without a real target column (D.1).
     """
     ct = comp.component_type
     measure = measure if measure is not None else (shape.measures[0] if shape.measures else None)
@@ -287,14 +346,22 @@ def _bind_config(
     if ct == ComponentType.FUNNEL:
         return {"stage": dim, "value": measure, "format": fmt}
 
-    # Target-driven KPIs — bind a target ONLY from a real second measure column.
-    # Fail-closed: when the result carries no distinct target measure, the `target`
-    # key is OMITTED and the renderer degrades to a plain value. Never invent one.
+    # Target-driven KPIs — bind a target ONLY from a real second measure column or
+    # an INTRINSIC 0-100% ceiling (structural_max). Fail-closed: with neither, the
+    # `target` key is OMITTED (the honesty guard downgrades the component upstream so
+    # this branch is reached only when an honest target exists). Never invent one.
     if ct in (ComponentType.GAUGE_RING, ComponentType.PROGRESS_KPI, ComponentType.BULLET):
         cfg = {"value": measure, "label": measure or comp.name, "format": fmt, "polarity": polarity}
         target = _second_measure(shape, exclude=measure)
         if target is not None:
             cfg["target"] = target
+        elif structural_max is not None:
+            # The intrinsic 0-100% ceiling is the honest target (the ring fills
+            # toward 100%); it is a structural constant, not a fabricated column.
+            # Emit it as `target_value` (the LITERAL key the renderer reads) — NOT
+            # `target` (which the renderer resolves as a result-COLUMN name, so a
+            # literal there silently degrades the gauge to a plain KPI).
+            cfg["target_value"] = structural_max
         return cfg
 
     # Delta KPI — value measure + the same measure as the sparkline series; bind a
@@ -396,12 +463,24 @@ def recommend(
     measure, measure_role = _resolve_measure(planned, shape, role_map, intent, warnings)
     dim = _resolve_dimension(planned, shape)
     polarity = _resolve_polarity(planned, role=measure_role)
+    structural_max = _structural_max(planned)
 
     # STEP 1 — explicit user request wins if it can bind the dataset.
     if intent.requested_viz:
         candidates = [c for c in list_components() if c.component_type.value == intent.requested_viz]
         for comp in candidates:
             if score_component(comp, shape, intent) > 0 or comp.component_type == ComponentType.TABLE:
+                # D.1 HONESTY GUARD: a target-requiring component with no honest
+                # target is downgraded to a KPI tile (no fabricated ring), EXCEPT an
+                # intrinsic 0-100% ratio (structural_max). Applies even to an
+                # EXPLICIT request — honesty is not user-overridable.
+                comp = _downgrade_target_component(comp, shape, measure, structural_max)
+                downgraded = comp.component_type.value != intent.requested_viz
+                rationale = (
+                    f"Downgraded the requested {intent.requested_viz} to {comp.name} — "
+                    f"no real target column exists to render it honestly."
+                    if downgraded else f"Used the explicitly requested {comp.name}."
+                )
                 return ResolvedWidget(
                     widget_id=uuid.uuid4().hex[:12],
                     component_id=comp.component_id,
@@ -409,9 +488,10 @@ def recommend(
                     title=intent.title,
                     dataset=dataset,
                     config=_bind_config(comp, shape, measure=measure, dim=dim,
-                                        measure_role=measure_role, polarity=polarity),
+                                        measure_role=measure_role, polarity=polarity,
+                                        structural_max=structural_max),
                     score=99.0,
-                    rationale=f"Used the explicitly requested {comp.name}.",
+                    rationale=rationale,
                     provenance=provenance,
                 )
 
@@ -429,11 +509,21 @@ def recommend(
         best_score = 0.5
         rationale = "Defaulted to a data table — no chart confidently matched the dataset shape."
     else:
-        rationale = (
-            f"Selected {best.name} for a '{shape.intent}' dataset "
-            f"({shape.row_count} rows, {len(shape.measures)} measure(s), "
-            f"{len(shape.dimensions) + len(shape.temporal)} dimension(s))."
-        )
+        # D.1 HONESTY GUARD: downgrade a scored-in target component with no honest
+        # target (a fabricated ring) to a plain KPI tile.
+        downgraded = _downgrade_target_component(best, shape, measure, structural_max)
+        if downgraded.component_type != best.component_type:
+            best = downgraded
+            rationale = (
+                f"Selected {best.name} — a gauge/progress tile was avoided because no "
+                f"real target column exists to render it honestly."
+            )
+        else:
+            rationale = (
+                f"Selected {best.name} for a '{shape.intent}' dataset "
+                f"({shape.row_count} rows, {len(shape.measures)} measure(s), "
+                f"{len(shape.dimensions) + len(shape.temporal)} dimension(s))."
+            )
 
     return ResolvedWidget(
         widget_id=uuid.uuid4().hex[:12],
@@ -442,7 +532,8 @@ def recommend(
         title=intent.title,
         dataset=dataset,
         config=_bind_config(best, shape, measure=measure, dim=dim,
-                            measure_role=measure_role, polarity=polarity),
+                            measure_role=measure_role, polarity=polarity,
+                            structural_max=structural_max),
         score=round(best_score, 3),
         rationale=rationale,
         provenance=provenance,

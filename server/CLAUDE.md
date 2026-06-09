@@ -137,7 +137,7 @@ server/
 │   │   ├── parquet_service.py    ← Parquet conversion + upload to Blob
 │   │   ├── data_preprocessor.py  ← CSV/XLSX cleaning, normalization
 │   │   ├── preprocessor/         ← Preprocessing sub-modules
-│   │   ├── semantic_planner.py   ← Semantic query planning (entity resolution, join selection)
+│   │   │  (semantic_planner.py removed — was dead code; planning currently lives in the LangGraph agent)
 │   │   ├── semantic_roles.py     ← Semantic role classification for columns/files
 │   │   ├── semantic_enrichment.py ← Enriches file metadata with semantic context
 │   │   ├── semantic_expansion.py ← Workflow domain expansion + continuity notes
@@ -517,7 +517,7 @@ Set `QUERY_ENGINE=datafusion` in `.env` to use DataFusion. No code changes neede
 
 ---
 
-## Semantic Planning Layer (services/semantic_planner.py)
+## Semantic Planning Layer (services/semantic_planner.py removed — was dead code; planning currently lives in the LangGraph agent)
 
 The semantic planner sits between retrieval and execution:
 

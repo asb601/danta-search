@@ -1601,6 +1601,72 @@ async def run_agent_query(
                      container=ctx["container_name"],
                      has_parquet=ctx["parquet_blob_path"] is not None)
 
+    # ── RESOLVE-contract fast path (flag-gated, default OFF → byte-identical) ───
+    # Deterministic question→BOUND-contract→canonical SQL bind. When it binds, we
+    # emit the contract SQL and execute it through the SAME logical→physical
+    # resolution + executor the agent's run_sql uses (canonicalize_logical_sql +
+    # the DuckDB/DataFusion router), then return the documented run_agent_query
+    # shape. The ENTIRE seam is wrapped so it can NEVER raise to the caller: on a
+    # non-bind OR any exception (incl. a logical table that does not resolve, or an
+    # executor error) we do nothing and fall through to graph.ainvoke below. All
+    # imports are inside the guard so module import is unchanged.
+    try:
+        from app.core.config import get_settings as _gs  # noqa: PLC0415
+        if _gs().RESOLVE_CONTRACT_ENABLED and container_id:
+            from app.services.resolve.binder import bind_contract_from_db  # noqa: PLC0415
+            from app.services.resolve.emitter import emit_sql  # noqa: PLC0415
+            _contract, _reason = await bind_contract_from_db(db, container_id, query)
+            if _contract is not None:
+                # Resolve the logical source table → physical SQL exactly as run_sql
+                # does, then execute through the same engine router. Reused, not
+                # reinvented — if the logical table cannot be resolved this RAISES
+                # and the outer except falls us through to the agent path.
+                from app.agent.tools.sql import _execute as _resolve_execute  # noqa: PLC0415
+                from app.services.logical_sql import canonicalize_logical_sql  # noqa: PLC0415
+                _emitted_sql = emit_sql(_contract)
+                _canon = canonicalize_logical_sql(
+                    _emitted_sql,
+                    ctx["file_identity_map"],
+                    allowed_file_ids=ctx["allowed_file_ids"],
+                )
+                _conn = initial_state["connection_string"]
+                _rows, _total = await asyncio.to_thread(
+                    _resolve_execute,
+                    _canon.executable_sql,
+                    _conn,
+                    ctx["container_name"],
+                    20,
+                )
+                _rows = _rows or []
+                _answer = (
+                    f"{_contract.entity}: {len(_rows)} row(s) for grain "
+                    f"{_contract.grain} from {_contract.source_table}."
+                    if _rows
+                    else f"{_contract.entity}: no matching records "
+                         f"({_contract.source_table})."
+                )
+                chat_logger.info(
+                    "resolve_contract_answer",
+                    metric=_contract.entity,
+                    source=_contract.source_table,
+                    row_count=len(_rows),
+                    total_rows=_total,
+                )
+                with _stores_lock:
+                    _request_stores.pop(req_id, None)
+                return {
+                    "answer": _answer,
+                    "data": _rows,
+                    "chart": None,
+                    "route": "resolve_contract",
+                    "row_count": len(_rows),
+                    "files_used": [_contract.source_table],
+                    "tool_calls": 0,
+                }
+    except Exception as _exc:  # noqa: BLE001 — never raise; fall through to agent
+        chat_logger.warning("resolve_contract_seam_error", error=str(_exc)[:200])
+        # fall through to the agent path — never raise
+
     try:
         final_state = await graph.ainvoke(initial_state)
     except Exception as exc:

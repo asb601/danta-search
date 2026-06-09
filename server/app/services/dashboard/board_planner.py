@@ -85,6 +85,12 @@ class WidgetSpec:
     # over the deterministic template) and the one-line chart rationale.
     query: str | None = None
     chart_rationale: str | None = None
+    # STRUCTURAL ceiling for an INTRINSIC 0-100% ratio metric (collection rate,
+    # fill rate). The planner sets metric_max=100 ONLY for a metric whose query
+    # produces a bounded 0-100 percentage. It is the ONLY honest target a gauge/
+    # progress/bullet may use without a real target column — every other
+    # target-requiring tile fails closed to a plain KPI (D.1). None otherwise.
+    metric_max: float | None = None
 
 
 # --------------------------------------------------------------------------
@@ -159,7 +165,10 @@ async def _design_board(prompt: str, grounding_text: str, window: tuple[str, str
         "You are an elite business-intelligence analyst at a top-tier global "
         "consulting firm. Fortune-500 executives rely on you to turn a single "
         "request into ONE board-ready dashboard they can present in a leadership "
-        "meeting. You do NOT answer questions — you DESIGN the dashboard.\n\n"
+        "meeting. You do NOT answer questions — you DESIGN the dashboard. A great "
+        "board is an ANALYST NARRATIVE, not a value dump: it tells the executive "
+        "WHAT moved, BY HOW MUCH vs last period, WHO is driving it, and what the "
+        "MIX looks like — using DERIVED business ratios, not just raw totals.\n\n"
         "HOW YOU THINK:\n"
         "1) Infer the business DOMAIN from the catalog and select ONLY the most "
         "relevant tables (catalogs). Ignore tables that do not serve the request.\n"
@@ -168,13 +177,25 @@ async def _design_board(prompt: str, grounding_text: str, window: tuple[str, str
         "'Q2 analysis' becomes a deliberate set of executive widgets; a dense "
         "request with several measures becomes one widget per measure plus the "
         "trends and breakdowns that make them meaningful.\n"
-        "3) Pick the RIGHT chart for each insight, the way an analyst would for a "
+        "3) DERIVED METRICS (the differentiator) — a real analyst leads with RATIOS "
+        "and RATES computed over real columns, not bare sums. From columns PRESENT "
+        "in the catalog, derive metrics such as: a COLLECTION RATE (1 - SUM(remaining"
+        ")/SUM(original)); a PAYMENT RATIO (SUM(paid)/SUM(invoiced)); a FILL RATE "
+        "(SUM(shipped)/SUM(ordered)); a CANCELLATION RATE; a CONTRIBUTION/SHARE % "
+        "(a category's measure / the grand total, SUM() OVER()); growth (MoM/YoY % "
+        "via comparison); an AVERAGE such as AOV (SUM(total)/COUNT(DISTINCT order)). "
+        "Put the FORMULA in the 'query'. Set 'measure' to a REAL numerator column "
+        "from the catalog (it is the binding handle, not the formula). For an "
+        "INTRINSIC 0-100% ratio (collection rate, fill rate, payment ratio) set "
+        "'metric_max':100. NEVER derive a metric from a column that is not in the "
+        "catalog, and never invent the denominator.\n"
+        "4) Pick the RIGHT chart for each insight, the way an analyst would for a "
         "meeting: KPI/metric tile for one headline number; line or area for a "
         "trend over time; bar to compare a measure across a HANDFUL of categories; "
         "ranked_bar (top-N driver view) to rank a measure across MANY entities "
         "(vendors, customers, products) — 'who is driving it'; pie ONLY for a "
         "few-category share; heatmap for two dimensions; a table for detail/top-N.\n"
-        "4) For EACH widget, WRITE A PRECISE ANALYTICAL INSTRUCTION ('query') for a "
+        "5) For EACH widget, WRITE A PRECISE ANALYTICAL INSTRUCTION ('query') for a "
         "downstream SQL agent. Be explicit: which measure to AGGREGATE (SUM/AVG/"
         "COUNT), how to GROUP it, how to ORDER it, how many rows to return, and the "
         "exact output columns. NEVER write a vague one-liner — vague instructions "
@@ -182,17 +203,45 @@ async def _design_board(prompt: str, grounding_text: str, window: tuple[str, str
         "period column and the summed measure, ordered chronologically. A breakdown "
         "MUST say: group by the dimension, sum the measure, return the dimension and "
         "the total, top-N descending. A KPI MUST say: return the single aggregated "
-        "number.\n"
-        "5) Be DATA-ADAPTIVE and lead with a NARRATIVE built like a PowerBI page: a "
-        "KPI RIBBON of 3-4 headline numbers, then a trend over time, then 2-3 "
-        "breakdowns (a ranked top-N, a category bar, a few-category share/donut), "
-        "plus an optional matrix. Aim for at least 5 VISUAL widgets when the data "
-        "supports them, but NEVER pad with fabricated or duplicate widgets — if the "
-        "data only supports 3 strong widgets, return 3 (honest beats dense).\n"
-        "6) For EACH measure, set 'polarity': 'inverse' when a RISING value is BAD "
-        "(cost, spend, aging, days-outstanding/DSO, returns, overdue/outstanding "
-        "balance, defects, churn) and 'positive' otherwise (revenue, profit, volume, "
-        "on-time rate). This colors the period delta; when unsure, use 'positive'.\n\n"
+        "number. A DERIVED ratio MUST state the exact numerator/denominator formula.\n"
+        "6) THE ANALYST ARC — order the board as a narrative like a PowerBI page: "
+        "(a) 3-4 HEADLINE KPIs WITH a period delta (set 'comparison':'vs previous "
+        "period' and the right 'polarity'); (b) a TREND over time; (c) a RANKED "
+        "top-N DRIVER ('who's driving it'); (d) a COMPOSITION/breakdown (category bar "
+        "or few-category share); (e) at least ONE DERIVED-RATIO tile; (f) optionally "
+        "ONE cross-source view; (g) a detail TABLE last. Aim for >= 5 VISUAL widgets "
+        "when the data supports them, but NEVER pad with fabricated or duplicate "
+        "widgets — if the data only supports 3 strong widgets, return 3 (honest "
+        "beats dense).\n"
+        "7) For EACH measure, set 'polarity': 'inverse' when a RISING value is BAD "
+        "(cost, spend, aging, returns, overdue/outstanding balance, defects, churn) "
+        "and 'positive' otherwise (revenue, profit, volume, collection rate, fill "
+        "rate). This colors the period delta; when unsure, use 'positive'.\n"
+        "8) CROSS-SOURCE views — you MAY emit ONE widget that spans two tables ONLY "
+        "on a VALIDATED master key shown under KNOWN JOINS (e.g. CUSTOMER_ID to join "
+        "an orders table with a receivables table; VENDOR_ID to join purchasing with "
+        "payables). Emit it as a 'detail' table (or a grouped bar) whose 'query' "
+        "tells the agent to JOIN on that master key and return BOTH aggregated "
+        "measures side by side. The agent validates the join via the relationship "
+        "graph. If both columns live in ONE table (e.g. invoiced vs paid in the same "
+        "payables table) NO join is needed — derive the ratio in place. NEVER join on "
+        "a document key, an audit column, or a constant org id.\n\n"
+        "HONESTY RULES (these are HARD — a wrong-but-confident tile is worse than no "
+        "tile):\n"
+        "- NO FABRICATED TARGETS: there are NO target/budget/quota columns in this "
+        "data. Do NOT design gauge/progress/bullet 'vs target' tiles UNLESS the "
+        "metric is an intrinsic 0-100% ratio with 'metric_max':100. Otherwise use a "
+        "plain KPI tile.\n"
+        "- NO DATE-DIFFERENCE METRICS: do NOT design DSO, days-to-pay, on-time %, "
+        "lead time, cycle time, or any metric that subtracts two dates — the dates "
+        "in this data are independent random draws, so such metrics are meaningless. "
+        "Use the data's OWN date columns for trends; NEVER reference today/current_"
+        "date.\n"
+        "- NO VANITY TILES: do NOT headline a measure the catalog shows is all-zero "
+        "or a single constant value, and do NOT break a measure down by a constant "
+        "dimension (one distinct value). Prefer $ amounts over bare row counts.\n"
+        "- GRAIN: on a LINE/transaction table, count entities with COUNT(DISTINCT "
+        "entity_id) — never mix line-level rows with order/document counts.\n\n"
         "GROUNDING (the catalog is authoritative):\n"
         "- Use ONLY tables, columns and observed values shown. Never invent.\n"
         "- 'measure' MUST be a measure column; 'dimension' MUST be a shown "
@@ -210,19 +259,20 @@ SHARED TIME WINDOW (use for every time-based widget): {win_phrase}
 DASHBOARD REQUEST:
 \"\"\"{prompt}\"\"\"
 
-Return JSON (max {max_widgets} widgets), ordered as a narrative (KPIs first, detail table last):
+Return JSON (max {max_widgets} widgets), ordered as the analyst arc (headline KPIs with deltas first, a trend, a ranked driver, a composition, at least one derived-ratio tile, an optional cross-source view, detail table last):
 {{"domain":"inferred business domain",
  "widgets":[
   {{"title":"concise executive title",
     "question_type":"kpi|trend|breakdown|share|matrix|detail",
     "table":"table name from the catalog",
-    "measure":"measure column (or null for a detail table)",
+    "measure":"the REAL numerator/measure column (or null for a detail table); for a derived ratio this is the numerator column, the formula goes in query",
     "dimension":"dimension/temporal column (or null for kpi/detail)",
     "dimension2":"second dimension for a matrix (or null)",
-    "comparison":"e.g. 'vs previous period' (or null)",
-    "polarity":"inverse if a RISING value is bad (cost/aging/DSO/returns/overdue), else positive",
+    "comparison":"e.g. 'vs previous period' for a headline KPI delta (or null)",
+    "polarity":"inverse if a RISING value is bad (cost/aging/returns/overdue), else positive",
+    "metric_max":"100 ONLY for an intrinsic 0-100% ratio (collection/fill/payment rate); otherwise null",
     "viz":"kpi_card|metric_tile|line_chart|area_chart|bar_chart|ranked_bar|pie_chart|heatmap|funnel|table",
-    "query":"a PRECISE analytical instruction for the SQL agent: which measure to aggregate (SUM/AVG/COUNT), how to group, how to order, how many rows, and the exact output columns",
+    "query":"a PRECISE analytical instruction for the SQL agent: the exact aggregation/formula (for a derived ratio state numerator/denominator explicitly), how to group, how to order, how many rows, and the exact output columns. For a cross-source view name the master key to join on and both measures to return.",
     "chart_rationale":"one line: why this chart suits an executive audience"}}
  ]}}"""
 
@@ -280,6 +330,16 @@ def _coerce_specs(raw_widgets: list[dict], max_widgets: int) -> list[WidgetSpec]
         polarity = (_clean("polarity") or "").lower() or None
         if polarity not in ("inverse", "positive"):
             polarity = None  # fail-safe: unknown direction -> default downstream
+        # STRUCTURAL ratio ceiling — accept ONLY an exact 100 (the intrinsic
+        # 0-100% bound). Any other value is not a real target and is dropped so a
+        # gauge/progress/bullet cannot smuggle in a fabricated target (D.1).
+        metric_max = None
+        raw_max = w.get("metric_max")
+        try:
+            if raw_max is not None and float(raw_max) == 100.0:
+                metric_max = 100.0
+        except (TypeError, ValueError):
+            metric_max = None
         specs.append(WidgetSpec(
             title=title,
             question_type=qt,
@@ -292,6 +352,7 @@ def _coerce_specs(raw_widgets: list[dict], max_widgets: int) -> list[WidgetSpec]
             polarity=polarity,
             query=_clean("query"),
             chart_rationale=_clean("chart_rationale"),
+            metric_max=metric_max,
         ))
     return specs
 
@@ -309,19 +370,61 @@ def _card(table, name: str | None) -> int | None:
     return None
 
 
+def _column(table, name: str | None):
+    if not name:
+        return None
+    for c in getattr(table, "columns", []):
+        if c.name == name:
+            return c
+    return None
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _vanity_measure_reason(table, name: str | None) -> str | None:
+    """STRUCTURAL vanity check for a MEASURE column, from ingestion column_stats
+    (min/max). Returns a human reason when the measure is meaningless to headline:
+      - all-zero (min == max == 0)               → the SHIPPED_QUANTITY-all-0 class
+      - single constant (min == max, non-null)   → no spread; an aggregate is noise
+    Fail-OPEN: when min/max are absent (None) the guard cannot PROVE vanity and
+    returns None (keep the widget) — never drop on missing evidence. No dataset-
+    fitted literals; purely the column's own profiled spread."""
+    col = _column(table, name)
+    if col is None:
+        return None
+    lo, hi = getattr(col, "min_value", None), getattr(col, "max_value", None)
+    if not (_is_number(lo) and _is_number(hi)):
+        return None  # no numeric spread evidence → cannot prove vanity
+    if lo == 0 and hi == 0:
+        return f"the '{name}' column is all zero"
+    if lo == hi:
+        return f"the '{name}' column is a single constant value"
+    return None
+
+
 def _pick_dimension(table, max_card: int, exclude: set[str] | None = None) -> str | None:
-    """Lowest-cardinality categorical dimension within `max_card`, else any dim."""
+    """Lowest-cardinality categorical dimension within `max_card`, else any dim.
+
+    Skips SINGLE-CONSTANT dimensions (cardinality == 1, e.g. ORG_ID = 204): a
+    breakdown across one value is a one-bar non-chart (D.3 vanity guard). A dim
+    with NO cardinality info still serves as the fallback (fail-open on missing
+    evidence)."""
     exclude = exclude or set()
     best: tuple[int, str] | None = None
     fallback: str | None = None
     for name in getattr(table, "dimensions", []) or []:
         if name in exclude:
             continue
-        fallback = fallback or name
         card = _card(table, name)
+        # A KNOWN-constant dimension is never a usable breakdown axis.
+        if card == 1:
+            continue
+        fallback = fallback or name
         if card is None:
             continue
-        if card <= max_card and card >= 1:
+        if card <= max_card and card >= 2:
             if best is None or card < best[0]:
                 best = (card, name)
     if best:
@@ -388,6 +491,16 @@ def feasibility_filter(specs: list[WidgetSpec], catalog: list) -> tuple[list[Wid
                     dropped.append((s, f"no measure available in '{t.table_name}'"))
                     continue
 
+            # --- VANITY GUARD (D.3): drop a tile on an all-zero / single-constant
+            # measure (e.g. the SHIPPED_QUANTITY-all-0 tile). Structural — driven by
+            # the column's own profiled min/max, no fitted literals; fails OPEN when
+            # stats are absent. A re-pick to a healthy measure could change the
+            # metric the LLM intended, so we DROP (honest) rather than substitute.
+            vanity = _vanity_measure_reason(t, s.measure)
+            if vanity:
+                dropped.append((s, vanity))
+                continue
+
         # --- trend needs a temporal column -----------------------------------
         if s.question_type == "trend" and not temporal:
             picked = _pick_dimension(t, _BREAKDOWN_MAX_CARD)
@@ -403,6 +516,18 @@ def feasibility_filter(specs: list[WidgetSpec], catalog: list) -> tuple[list[Wid
                 picked = _pick_dimension(t, cap)
                 if picked:
                     s.dimension = picked
+                else:
+                    s.question_type, s.viz, s.dimension = "kpi", "kpi_card", None
+
+            # --- VANITY GUARD (D.3): a breakdown by a SINGLE-CONSTANT dimension
+            # (cardinality == 1, e.g. ORG_ID = 204) is a one-bar non-chart. Re-pick
+            # a non-constant readable dimension; if none exists, degrade to a plain
+            # KPI on the measure rather than render a meaningless one-category chart.
+            if s.question_type in ("breakdown", "share", "matrix") and _card(t, s.dimension) == 1:
+                cap = _SHARE_MAX_CARD if s.question_type == "share" else _BREAKDOWN_MAX_CARD
+                alt = _pick_dimension(t, cap, exclude={s.dimension or ""})
+                if alt and _card(t, alt) != 1:
+                    s.dimension = alt
                 else:
                     s.question_type, s.viz, s.dimension = "kpi", "kpi_card", None
 
@@ -692,6 +817,9 @@ def specs_to_intents(specs: list[WidgetSpec], catalog: list) -> list[WidgetInten
             "viz": s.viz,
             "polarity": s.polarity,
             "chart_rationale": s.chart_rationale,
+            # STRUCTURAL ratio ceiling (100) for an intrinsic 0-100% metric; the
+            # recommender uses it as the ONLY honest gauge target (D.1).
+            "metric_max": s.metric_max,
             "nl_query": nl,
         }
 

@@ -94,6 +94,21 @@ class SemanticPolicy:
     planner_vague_single_file_penalty: float = 0.10
 
     min_overlap_fingerprint_count: int = 2
+    # Max fan-out a verified 1:N join may exhibit. fanout_estimate is 1 /
+    # unique_rate[pk_side]; a true PK is ~1.0 (one row per key), so a small margin
+    # above 1.0 still admits real keys with minor sample duplication while
+    # rejecting many-to-many noise. Value-derived per pair, never a name list.
+    # Env-overridable as GCHAT_SEMANTIC_MAX_JOIN_FANOUT.
+    max_join_fanout: float = 1.5
+    # RESOLVE-contract scoring knobs (v2 query lane). The caller injects these
+    # into the Contract / needs_fallback so no tuned constant lives in scoring
+    # code. unverified_twin_penalty: confidence multiplier when a twin cluster
+    # has no verified master. resolve_contract_tau: confidence cutoff below which
+    # the runtime drops to the agent fallback. Value-/policy-driven, not name
+    # lists. Env-overridable as GCHAT_SEMANTIC_UNVERIFIED_TWIN_PENALTY /
+    # GCHAT_SEMANTIC_RESOLVE_CONTRACT_TAU.
+    unverified_twin_penalty: float = 0.5
+    resolve_contract_tau: float = 0.75
     relation_direct_limit: int = 20
     relation_max_hops: int = 4
     relation_max_paths: int = 8
