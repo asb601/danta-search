@@ -43,7 +43,10 @@ from app.models.file_metadata import FileMetadata
 from app.models.folder import Folder
 
 # Caps on per-file lean fields to keep each catalog record small.
-_MAX_DESCRIPTION_CHARS = 600
+# 1100 (was 600): the deep 2-4 sentence ingestion descriptions carry scope clauses
+# (what the table IS vs ISN'T) that the query-side brain needs to disambiguate
+# look-alike ERP twins; 600 cut them mid-clause. Still small per record.
+_MAX_DESCRIPTION_CHARS = 1100
 _MAX_LIST_ITEMS = 12
 _MAX_COLUMN_NAMES = 80
 

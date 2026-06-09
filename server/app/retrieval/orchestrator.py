@@ -44,6 +44,7 @@ from __future__ import annotations
 import contextvars
 from datetime import date
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import chat_logger
@@ -197,6 +198,29 @@ def _prune_and_dedup(
     return pruned
 
 
+async def _container_as_of(db: AsyncSession, container_id: str | None) -> date | None:
+    """Robust data 'now' for a container — the high-percentile coverage end across
+    its files, capped at the wall clock. Reuses ``data_as_of`` (the same anchor
+    the prompt uses) so retrieval and the agent agree on what 'this year' means.
+    Returns None (→ wall-clock fallback) when the container is unknown or no file
+    carries a non-sentinel end-date. Never raises."""
+    if not container_id:
+        return None
+    from app.services.erp.feasibility_gate import data_as_of  # noqa: PLC0415
+    try:
+        ends = (
+            await db.execute(
+                select(FileMetadata.date_range_end).where(
+                    FileMetadata.container_id == container_id,
+                    FileMetadata.date_range_end.isnot(None),
+                )
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001 — anchoring is best-effort; degrade to wall clock
+        return None
+    return data_as_of(list(ends))
+
+
 async def retrieve_with_scores(
     query: str,
     user_id: str,
@@ -236,9 +260,16 @@ async def retrieve_with_scores(
             allowed_domains = list(user_row.allowed_domains)
 
     # ── Stage 1: temporal parsing ─────────────────────────────────────────────
+    # Anchor relative-time ("this year", "last month", "YTD") to the data's
+    # effective latest coverage, NOT the wall clock. A stale dataset (ending
+    # 2025-05 under a 2026 clock) would otherwise resolve "this year" to an empty
+    # 2026 window, and the date-overlap filter below would exclude every
+    # in-coverage table (the exact bug that surfaced AP/GL tables for a "cash
+    # received" question). None → parse_temporal falls back to the wall clock.
+    as_of = await _container_as_of(db, container_id)
     date_from: date | None
     date_to: date | None
-    date_from, date_to = parse_temporal(query)
+    date_from, date_to = parse_temporal(query, today=as_of)
 
     # ── Production path: OpenSearch metadata retrieval ───────────────────────
     # OpenSearch handles BM25 + fuzzy + vector over per-container indices. Use

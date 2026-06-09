@@ -216,21 +216,48 @@ def _label(entry: dict) -> str:
     return str(name).rsplit("/", 1)[-1]
 
 
+# The relative-time anchor is the HIGH-PERCENTILE coverage end, not the raw max.
+# A handful of future-dated tables (forecasts, schedules, quote expirations) must
+# not drag the dataset's effective "now" past where the transactional data ends —
+# the raw max is dominated by a single 2036 forecast row. 90 = "the point by which
+# the bulk of coverage has ended". Data-driven (computed from the observed date
+# distribution), not a per-dataset constant.
+_AS_OF_PERCENTILE = 90
+
+
+def _percentile_date(dates: list[date], percentile: int) -> date | None:
+    """Nearest-rank percentile of a date list (no interpolation). Pure."""
+    if not dates:
+        return None
+    ordered = sorted(dates)
+    k = max(0, min(len(ordered) - 1, int(round((percentile / 100.0) * (len(ordered) - 1)))))
+    return ordered[k]
+
+
+def data_as_of(ends: list[date] | None, today: date | None = None) -> date | None:
+    """Robust data 'now' from coverage end-dates: the high-percentile end (where
+    the BULK of the data ends), capped at the wall clock. Sentinel-safe. This is
+    the SINGLE source of truth shared by the prompt anchor and the retrieval
+    temporal filter, so the two never disagree. Returns None when no usable
+    (non-sentinel) end-date exists → callers fall back to the wall clock."""
+    today = today or _today()
+    clean = [d for d in (ends or []) if d and d.year < _SENTINEL_YEAR]
+    anchor = _percentile_date(clean, _AS_OF_PERCENTILE)
+    return min(anchor, today) if anchor else None
+
+
 def resolve_as_of_date(catalog: list[dict] | None, today: date | None = None) -> date | None:
-    """The reference 'now' for relative-time resolution = the data's latest
-    coverage date, capped at the wall clock. Data-driven (reads precomputed
-    date_range_* metadata), sentinel-safe. Returns None when no file carries
-    usable date coverage.
+    """The reference 'now' for relative-time resolution = the data's effective
+    latest coverage (high-percentile end), capped at the wall clock. Data-driven
+    (reads precomputed date_range_* metadata), sentinel-safe, outlier-robust.
+    Returns None when no file carries usable date coverage.
 
     Anchoring relative windows ('this year', 'last month', 'YTD') to this date —
     rather than date.today() — prevents a correct parser from resolving a period
     the data does not cover (e.g. data ending 2025-05 queried under a 2026 clock).
     """
-    today = today or _today()
     ends = [w[1] for e in (catalog or []) if (w := _file_window(e))]
-    if not ends:
-        return None
-    return min(max(ends), today)
+    return data_as_of(ends, today)
 
 
 # ── The gate ──────────────────────────────────────────────────────────────────

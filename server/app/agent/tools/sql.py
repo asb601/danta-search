@@ -48,9 +48,23 @@ except ImportError:  # pragma: no cover
     _SQLGLOT_AVAILABLE = False
 
 
-def _execute(sql: str, connection_string: str, container_name: str, max_rows: int) -> tuple:
-    """Route to DataFusion or DuckDB based on QUERY_ENGINE config flag."""
-    if get_settings().QUERY_ENGINE == "datafusion":
+def _execute(
+    sql: str,
+    connection_string: str,
+    container_name: str,
+    max_rows: int,
+    engine: str | None = None,
+) -> tuple:
+    """Route to DataFusion or DuckDB.
+
+    Defaults to the QUERY_ENGINE config flag. Callers may force an engine: the
+    LLM's free-form run_sql forces DuckDB because DataFusion is identifier-CASE-
+    SENSITIVE (a bare `AMOUNT_APPLIED` resolves to lowercase and fails on the
+    uppercase parquet schema), whereas DuckDB is case-insensitive and tolerates
+    the model's natural SQL. The deterministic seam emits fully-quoted SQL and
+    keeps the fast default engine."""
+    eng = engine or get_settings().QUERY_ENGINE
+    if eng == "datafusion":
         return _datafusion_execute(sql, connection_string, max_rows=max_rows, container_name=container_name)
     return _duckdb_execute(sql, connection_string, max_rows=max_rows)
 
@@ -474,7 +488,12 @@ def build_sql_tools(
         for _repair_attempt in range(_MAX_REPAIR + 1):
             try:
                 final_rows, final_total = _execute(
-                    current_sql, connection_string, container_name, max_rows=20
+                    current_sql, connection_string, container_name, max_rows=20,
+                    # Force DuckDB for the LLM's free-form SQL: case-insensitive
+                    # identifiers, so the model's natural `AMOUNT_APPLIED` works
+                    # against the uppercase parquet schema (DataFusion would fail
+                    # it). The deterministic seam keeps the configured engine.
+                    engine="duckdb",
                 )
                 last_exc = None
                 break

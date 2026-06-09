@@ -154,14 +154,21 @@ async def generate_file_description(
         if context_block:
             context_block = "\n" + context_block.strip()
 
-        prompt = f"""You are a data catalog expert analyzing a file named "{filename}".
-Your output will be used to match natural language business questions to the correct file.
-Be SPECIFIC and DISCRIMINATIVE — your description must distinguish this file from other similar files.{context_block}
+        prompt = f"""You are a senior ERP data architect cataloging a table named "{filename}".
+Using your knowledge of enterprise systems (Oracle E-Business Suite, SAP, PeopleSoft, and
+similar) TOGETHER WITH the columns and sample rows below, explain what THIS table really is
+and what it is the AUTHORITATIVE source for. Datasets routinely contain many tables with
+near-identical columns, so a generic summary is useless — your output is used to pick the
+RIGHT table for a business question, so it must capture this table's distinct ROLE.
+
+Lead from the table NAME: recognize the ERP object it refers to and recall its role in that
+system's data model; then confirm or adjust against the actual columns and sample rows (the
+data may be custom or differ from the standard table).{context_block}
 
 Return ONLY this JSON with no preamble no markdown:
 {{
-    "summary": "2 sentences: (1) what specific business questions this file can support, naming the exact columns that make it useful (e.g. 'AMOUNT_VALUE tracks balance', 'STATUS_CODE filters active records'); (2) what this file contains that similar-sounding files do not have. Avoid claiming this is the only, best, or primary source unless that is explicitly present in metadata.",
-    "good_for": ["3-6 exact natural language business question phrases this file can support. Use the actual business domain terms, column names, and metrics specific to this file — do NOT use generic placeholder terms. Make each phrase discriminative: it should clearly distinguish this file from other similar-sounding files in the catalog without claiming exclusivity."],
+    "summary": "2-4 sentences. State (a) what business object or EVENT this table records and its ROLE in the ERP data model — the master / system-of-record, a transaction sub-ledger, a derived or subset view, a setup / reference lookup, an interface / staging load, or a snapshot / history; (b) what ONE ROW represents; (c) the business questions this table is the AUTHORITATIVE source for, naming the columns that make it so. Be ERP-literate and concrete — name the real object (e.g. 'the complete sub-ledger of customer AR transactions', 'cash receipts applied to invoices', 'the collections view of overdue receivables'). If the name encodes a slice (DELINQUENCIES, HISTORY, INTERFACE, INTERIM, SETUP, _B / _TL / _V), say so. If this IS the broad system-of-record for its entity, say so plainly ('the authoritative ledger of …') — that is the depth that lets a generic question resolve to this table instead of to a narrower look-alike. Never write 'supports questions related to…' or generic filler.",
+    "good_for": ["3-6 specific business questions THIS table is the AUTHORITATIVE source for, using its real columns / metrics and its ERP role. Make each one discriminative — it should point to this table over a similarly-named or similarly-structured sibling (e.g. the full ledger vs an overdue subset vs a cash-receipts table)."],
   "key_metrics": ["numeric columns used for aggregation and SUM/AVG calculations"],
   "key_dimensions": ["categorical, status, and ID columns used for filtering and grouping — include their important values where relevant, e.g. STATUS: OP=open CL=closed"],
   "date_range_start": "YYYY-MM-DD or null",

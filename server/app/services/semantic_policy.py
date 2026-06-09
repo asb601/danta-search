@@ -109,6 +109,16 @@ class SemanticPolicy:
     # GCHAT_SEMANTIC_RESOLVE_CONTRACT_TAU.
     unverified_twin_penalty: float = 0.5
     resolve_contract_tau: float = 0.75
+    # RESOLVE-brain knobs (v2 query lane, app/services/resolve/brain.py). Injected
+    # so no tuned constant lives baked in brain.py. brain_search_top_k: how many
+    # candidates the brain's slice search retrieves. brain_search_min_score: score
+    # floor below which a candidate is dropped from the slice. brain_max_slice: the
+    # narrow twin-aware slice size the brain reasons over (replaces the baked
+    # _MAX_SLICE literal). Env-overridable as GCHAT_SEMANTIC_BRAIN_SEARCH_TOP_K /
+    # GCHAT_SEMANTIC_BRAIN_SEARCH_MIN_SCORE / GCHAT_SEMANTIC_BRAIN_MAX_SLICE.
+    brain_search_top_k: int = 9
+    brain_search_min_score: float = 0.0
+    brain_max_slice: int = 5
     relation_direct_limit: int = 20
     relation_max_hops: int = 4
     relation_max_paths: int = 8

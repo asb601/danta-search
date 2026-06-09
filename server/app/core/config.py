@@ -204,6 +204,16 @@ class Settings(BaseSettings):
     # agent path, so enabling it is safe by construction.
     RESOLVE_CONTRACT_ENABLED: bool = True
 
+    # BRAIN_RESOLVE_ENABLED — v2 RESOLVE brain (app/services/resolve/brain.py): gate
+    # for the query-time, evidence-grounded contract proposer. The brain reads only
+    # per-file evidence for a narrow retrieved slice and emits a typed contract that
+    # is value-verified before SQL is rendered; on abstain/unverifiable it returns
+    # None and the caller falls through to the agent. Defaulted OFF — nothing changes
+    # on any live path until this is enabled. BRAIN_RESOLVE_SHADOW runs the brain
+    # alongside the live path for observation without taking over the answer.
+    BRAIN_RESOLVE_ENABLED: bool = False
+    BRAIN_RESOLVE_SHADOW: bool = False
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 

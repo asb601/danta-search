@@ -569,7 +569,13 @@ async def _build_agent_context(
         try:
             retrieved_with_scores = await retrieve_with_scores(
                 query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K,
-                container_id=container_id,
+                # Use the RESOLVED container (caller's, or the browsed container
+                # when an admin passes none). Passing the raw None here disabled
+                # the OpenSearch path (weaker PG fallback surfaced wrong tables)
+                # AND blanked the relative-time anchor (→ wall-clock 2026, which
+                # date-excluded every in-coverage table). Same dropped-container
+                # root cause as the RESOLVE seam.
+                container_id=resolved_container_id,
                 anchor_file_ids=resolver_seed_file_ids or None,
             )
         except Exception as exc:
@@ -1700,6 +1706,23 @@ async def run_agent_query(
                      container=ctx["container_name"],
                      has_parquet=ctx["parquet_blob_path"] is not None)
 
+    # Brain-resolve seam: flag-gated (BRAIN_RESOLVE_ENABLED, default False), so
+    # with the flag off this block never runs and the path is byte-identical.
+    # getattr() keeps it safe even before the flag is added in config. SHADOW mode
+    # (BRAIN_RESOLVE_SHADOW) computes the answer, logs it, and falls through.
+    from app.core.config import get_settings as _gs_brain  # noqa: PLC0415
+    if getattr(_gs_brain(), "BRAIN_RESOLVE_ENABLED", False):
+        try:
+            from app.services.resolve.coordinator import brain_answer  # noqa: PLC0415
+            _brain = await brain_answer(query, db, container_id, ctx, initial_state, req_id)
+        except Exception:  # noqa: BLE001 — never let the seam break the main path
+            _brain = None
+        if _brain is not None and not getattr(_gs_brain(), "BRAIN_RESOLVE_SHADOW", False):
+            return _brain
+        if _brain is not None:
+            chat_logger.info("brain_resolve_shadow", route=_brain.get("route"),
+                             row_count=_brain.get("row_count"))
+
     # RESOLVE-contract fast path: a bound deterministic answer, or None → fall
     # through to the agent loop below. Shared with run_agent_query_stream.
     _resolved = await _resolve_contract_payload(query, db, container_id, ctx, initial_state, req_id)
@@ -1887,6 +1910,25 @@ async def run_agent_query_stream(
     initial_state = ctx["initial_state"]
     store = ctx["store"]
     trace: OrchestrationTrace = ctx["trace"]
+
+    # Brain-resolve seam: flag-gated (BRAIN_RESOLVE_ENABLED, default False), so
+    # with the flag off this block never runs and the stream is byte-identical.
+    # getattr() keeps it safe even before the flag is added in config. SHADOW mode
+    # (BRAIN_RESOLVE_SHADOW) computes the answer, logs it, and falls through.
+    from app.core.config import get_settings as _gs_brain  # noqa: PLC0415
+    if getattr(_gs_brain(), "BRAIN_RESOLVE_ENABLED", False):
+        try:
+            from app.services.resolve.coordinator import brain_answer  # noqa: PLC0415
+            _brain = await brain_answer(query, db, container_id, ctx, initial_state, req_id)
+        except Exception:  # noqa: BLE001 — never let the seam break the main path
+            _brain = None
+        if _brain is not None and not getattr(_gs_brain(), "BRAIN_RESOLVE_SHADOW", False):
+            yield {"type": "token", "content": _brain["answer"]}
+            yield {"type": "done", "payload": _brain}
+            return
+        if _brain is not None:
+            chat_logger.info("brain_resolve_shadow", route=_brain.get("route"),
+                             row_count=_brain.get("row_count"))
 
     # RESOLVE-contract fast path: on a bound deterministic answer, stream it (a
     # token + a "done" payload) and stop; otherwise fall through to the agent loop.
