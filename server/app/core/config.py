@@ -238,7 +238,7 @@ class Settings(BaseSettings):
     # None and the caller falls through to the agent. Defaulted OFF — nothing changes
     # on any live path until this is enabled. BRAIN_RESOLVE_SHADOW runs the brain
     # alongside the live path for observation without taking over the answer.
-    BRAIN_RESOLVE_ENABLED: bool = False
+    BRAIN_RESOLVE_ENABLED: bool = True
     BRAIN_RESOLVE_SHADOW: bool = False
 
     # CORS
