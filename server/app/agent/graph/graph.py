@@ -1558,12 +1558,19 @@ async def _resolve_contract_payload(query, db, container_id, ctx, initial_state,
     """
     try:
         from app.core.config import get_settings  # noqa: PLC0415
-        if not (get_settings().RESOLVE_CONTRACT_ENABLED and container_id):
+        _flag = get_settings().RESOLVE_CONTRACT_ENABLED
+        # Unconditional diagnostic: shows in every trace whether the gate even
+        # opened, so a non-firing seam is never silent again (flag off vs no bind).
+        chat_logger.info(
+            "resolve_contract_entry", flag=bool(_flag), has_container=bool(container_id)
+        )
+        if not (_flag and container_id):
             return None
         from app.services.resolve.binder import bind_contract_from_db  # noqa: PLC0415
         from app.services.resolve.emitter import emit_sql  # noqa: PLC0415
         contract, _reason = await bind_contract_from_db(db, container_id, query)
         if contract is None:
+            chat_logger.info("resolve_contract_nobind", reason=_reason)
             return None
         from app.agent.tools.sql import _execute as _resolve_execute  # noqa: PLC0415
         from app.services.logical_sql import canonicalize_logical_sql  # noqa: PLC0415

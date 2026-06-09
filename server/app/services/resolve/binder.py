@@ -178,6 +178,32 @@ def _display_cols_for_grain(grain_col: str) -> tuple[str, ...]:
     return ()
 
 
+async def _resolve_container_id(db: AsyncSession, raw: str | None) -> str | None:
+    """Resolve a container identifier to the canonical ``ContainerConfig.id``.
+
+    The chat scope passes whatever the caller has — which may be the container's
+    display ``name`` or its blob ``container_name`` (e.g. ``test-container01``),
+    while ``semantic_entities.container_id`` is the ``ContainerConfig.id`` UUID.
+    Match on any of the three and return the canonical id; if nothing matches,
+    return the input unchanged so behaviour degrades to the old direct lookup.
+    """
+    if not raw:
+        return raw
+    from app.models.container import ContainerConfig  # noqa: PLC0415
+    resolved = (
+        await db.execute(
+            select(ContainerConfig.id)
+            .where(
+                (ContainerConfig.id == raw)
+                | (ContainerConfig.name == raw)
+                | (ContainerConfig.container_name == raw)
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return resolved or raw
+
+
 async def bind_contract_from_db(
     db: AsyncSession,
     container_id: str,
@@ -195,6 +221,11 @@ async def bind_contract_from_db(
     (``"no_verified_canonical_master"``).
     """
     q_lower = (question or "").lower()
+
+    # Step 0 — resolve the container identifier (UUID | display name | blob
+    # container_name) to the canonical ContainerConfig.id that
+    # semantic_entities.container_id uses. The chat scope may pass the NAME.
+    container_id = await _resolve_container_id(db, container_id)
 
     # Step 1 — load every entity in the container that carries metrics. We keep
     # the carrying entity's canonical-master flag with each governed metric, so
