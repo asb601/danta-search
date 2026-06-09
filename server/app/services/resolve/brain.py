@@ -45,7 +45,8 @@ _AGGS: frozenset[str] = frozenset({"SUM", "COUNT", "AVG", "MAX", "MIN", "COUNT_D
 _OPS: frozenset[str] = frozenset({"=", "!=", "<>", ">", ">=", "<", "<=", "LIKE", "ILIKE"})
 _BUCKETS: frozenset[str] = frozenset({"month", "quarter", "year"})
 _SAMPLE_ROWS = 3          # real rows per candidate — enough to read the data, cheap to send
-_MAX_SLICE = 5            # narrow twin-aware slice; the brain reasons over a few, not 18
+_MAX_SLICE = 9            # match the per-entity search top_k: the brain must SEE every
+                         # genuine hit (the right table can rank 6th), not a truncated 5
 
 
 def _quote(name: str) -> str:
