@@ -1546,6 +1546,76 @@ def _apply_governance_mode(answer: str, governance: dict | None) -> str:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
+async def _resolve_contract_payload(query, db, container_id, ctx, initial_state, req_id):
+    """RESOLVE-contract fast path, shared by both query entry points.
+
+    Deterministic question → governed-metric → BOUND contract → canonical SQL →
+    execute (through the SAME logical→physical resolution + engine router the
+    agent's run_sql uses). Returns a run_agent_query-shaped payload dict when it
+    binds and executes; returns None when it does not bind OR on ANY error, so the
+    caller falls through to the agent loop. NEVER raises. Gated by
+    RESOLVE_CONTRACT_ENABLED; with the flag off it returns None immediately.
+    """
+    try:
+        from app.core.config import get_settings  # noqa: PLC0415
+        if not (get_settings().RESOLVE_CONTRACT_ENABLED and container_id):
+            return None
+        from app.services.resolve.binder import bind_contract_from_db  # noqa: PLC0415
+        from app.services.resolve.emitter import emit_sql  # noqa: PLC0415
+        contract, _reason = await bind_contract_from_db(db, container_id, query)
+        if contract is None:
+            return None
+        from app.agent.tools.sql import _execute as _resolve_execute  # noqa: PLC0415
+        from app.services.logical_sql import canonicalize_logical_sql  # noqa: PLC0415
+        canon = canonicalize_logical_sql(
+            emit_sql(contract),
+            ctx["file_identity_map"],
+            allowed_file_ids=ctx["allowed_file_ids"],
+        )
+        rows, total = await asyncio.to_thread(
+            _resolve_execute,
+            canon.executable_sql,
+            initial_state["connection_string"],
+            ctx["container_name"],
+            20,
+        )
+        rows = rows or []
+        total = total if total is not None else len(rows)
+        answer = (
+            f"{total} {contract.grain} record(s) with {contract.entity} over the "
+            f"threshold, from {contract.source_table}"
+            + (f" (showing top {len(rows)})." if total > len(rows) else ".")
+            if rows
+            else f"No {contract.entity} records found ({contract.source_table})."
+        )
+        with _stores_lock:
+            _request_stores.pop(req_id, None)
+        trace = ctx["trace"]
+        trace.set_execution_outcome(rows=len(rows), total=total, duration_ms=0.0)
+        trace.emit()
+        chat_logger.info(
+            "resolve_contract_answer",
+            metric=contract.entity,
+            source=contract.source_table,
+            row_count=len(rows),
+            total_rows=total,
+        )
+        return {
+            "answer": answer,
+            "data": rows,
+            "chart": None,
+            "route": "resolve_contract",
+            "row_count": total,
+            "files_used": [contract.source_table],
+            "tool_calls": 0,
+            "retrieved_files": ctx["catalog_len"],
+            "total_files": ctx["total_files"],
+        }
+    except Exception as exc:  # noqa: BLE001 — never raise; caller falls through to agent
+        chat_logger.warning("resolve_contract_seam_error", error=str(exc)[:200])
+        return None
+
+
 async def run_agent_query(
     query: str,
     db: AsyncSession,
@@ -1601,72 +1671,11 @@ async def run_agent_query(
                      container=ctx["container_name"],
                      has_parquet=ctx["parquet_blob_path"] is not None)
 
-    # ── RESOLVE-contract fast path (flag-gated, default OFF → byte-identical) ───
-    # Deterministic question→BOUND-contract→canonical SQL bind. When it binds, we
-    # emit the contract SQL and execute it through the SAME logical→physical
-    # resolution + executor the agent's run_sql uses (canonicalize_logical_sql +
-    # the DuckDB/DataFusion router), then return the documented run_agent_query
-    # shape. The ENTIRE seam is wrapped so it can NEVER raise to the caller: on a
-    # non-bind OR any exception (incl. a logical table that does not resolve, or an
-    # executor error) we do nothing and fall through to graph.ainvoke below. All
-    # imports are inside the guard so module import is unchanged.
-    try:
-        from app.core.config import get_settings as _gs  # noqa: PLC0415
-        if _gs().RESOLVE_CONTRACT_ENABLED and container_id:
-            from app.services.resolve.binder import bind_contract_from_db  # noqa: PLC0415
-            from app.services.resolve.emitter import emit_sql  # noqa: PLC0415
-            _contract, _reason = await bind_contract_from_db(db, container_id, query)
-            if _contract is not None:
-                # Resolve the logical source table → physical SQL exactly as run_sql
-                # does, then execute through the same engine router. Reused, not
-                # reinvented — if the logical table cannot be resolved this RAISES
-                # and the outer except falls us through to the agent path.
-                from app.agent.tools.sql import _execute as _resolve_execute  # noqa: PLC0415
-                from app.services.logical_sql import canonicalize_logical_sql  # noqa: PLC0415
-                _emitted_sql = emit_sql(_contract)
-                _canon = canonicalize_logical_sql(
-                    _emitted_sql,
-                    ctx["file_identity_map"],
-                    allowed_file_ids=ctx["allowed_file_ids"],
-                )
-                _conn = initial_state["connection_string"]
-                _rows, _total = await asyncio.to_thread(
-                    _resolve_execute,
-                    _canon.executable_sql,
-                    _conn,
-                    ctx["container_name"],
-                    20,
-                )
-                _rows = _rows or []
-                _total = _total if _total is not None else len(_rows)
-                _answer = (
-                    f"{_total} {_contract.grain} record(s) with {_contract.entity} "
-                    f"over the threshold, from {_contract.source_table}"
-                    + (f" (showing top {len(_rows)})." if _total > len(_rows) else ".")
-                    if _rows
-                    else f"No {_contract.entity} records found ({_contract.source_table})."
-                )
-                chat_logger.info(
-                    "resolve_contract_answer",
-                    metric=_contract.entity,
-                    source=_contract.source_table,
-                    row_count=len(_rows),
-                    total_rows=_total,
-                )
-                with _stores_lock:
-                    _request_stores.pop(req_id, None)
-                return {
-                    "answer": _answer,
-                    "data": _rows,
-                    "chart": None,
-                    "route": "resolve_contract",
-                    "row_count": _total,
-                    "files_used": [_contract.source_table],
-                    "tool_calls": 0,
-                }
-    except Exception as _exc:  # noqa: BLE001 — never raise; fall through to agent
-        chat_logger.warning("resolve_contract_seam_error", error=str(_exc)[:200])
-        # fall through to the agent path — never raise
+    # RESOLVE-contract fast path: a bound deterministic answer, or None → fall
+    # through to the agent loop below. Shared with run_agent_query_stream.
+    _resolved = await _resolve_contract_payload(query, db, container_id, ctx, initial_state, req_id)
+    if _resolved is not None:
+        return _resolved
 
     try:
         final_state = await graph.ainvoke(initial_state)
@@ -1850,72 +1859,14 @@ async def run_agent_query_stream(
     store = ctx["store"]
     trace: OrchestrationTrace = ctx["trace"]
 
-    # ── RESOLVE-contract fast path (streaming mirror of run_agent_query) ──────
-    # Same deterministic question→contract→canonical-SQL bind as the non-stream
-    # entry point, emitted as SSE (a token + a "done" payload) instead of a
-    # returned dict. Wrapped so it can NEVER raise: on non-bind OR any error we
-    # fall through to the agent loop below. Gated by RESOLVE_CONTRACT_ENABLED.
-    try:
-        from app.core.config import get_settings as _gs  # noqa: PLC0415
-        if _gs().RESOLVE_CONTRACT_ENABLED and container_id:
-            from app.services.resolve.binder import bind_contract_from_db  # noqa: PLC0415
-            from app.services.resolve.emitter import emit_sql  # noqa: PLC0415
-            _contract, _reason = await bind_contract_from_db(db, container_id, query)
-            if _contract is not None:
-                from app.agent.tools.sql import _execute as _resolve_execute  # noqa: PLC0415
-                from app.services.logical_sql import canonicalize_logical_sql  # noqa: PLC0415
-                _emitted_sql = emit_sql(_contract)
-                _canon = canonicalize_logical_sql(
-                    _emitted_sql,
-                    ctx["file_identity_map"],
-                    allowed_file_ids=ctx["allowed_file_ids"],
-                )
-                _rows, _total = await asyncio.to_thread(
-                    _resolve_execute,
-                    _canon.executable_sql,
-                    initial_state["connection_string"],
-                    ctx["container_name"],
-                    20,
-                )
-                _rows = _rows or []
-                _total = _total if _total is not None else len(_rows)
-                _answer = (
-                    f"{_total} {_contract.grain} record(s) with {_contract.entity} "
-                    f"over the threshold, from {_contract.source_table}"
-                    + (f" (showing top {len(_rows)})." if _total > len(_rows) else ".")
-                    if _rows
-                    else f"No {_contract.entity} records found ({_contract.source_table})."
-                )
-                with _stores_lock:
-                    _request_stores.pop(req_id, None)
-                trace.set_execution_outcome(rows=len(_rows), total=_total, duration_ms=0.0)
-                trace.emit()
-                chat_logger.info(
-                    "resolve_contract_answer",
-                    metric=_contract.entity,
-                    source=_contract.source_table,
-                    row_count=len(_rows),
-                    total_rows=_total,
-                )
-                yield {"type": "token", "content": _answer}
-                yield {
-                    "type": "done",
-                    "payload": {
-                        "answer": _answer,
-                        "data": _rows,
-                        "chart": None,
-                        "route": "resolve_contract",
-                        "row_count": _total,
-                        "files_used": [_contract.source_table],
-                        "tool_calls": 0,
-                        "retrieved_files": ctx["catalog_len"],
-                        "total_files": ctx["total_files"],
-                    },
-                }
-                return
-    except Exception as _exc:  # noqa: BLE001 — never raise; fall through to agent
-        chat_logger.warning("resolve_contract_seam_error", error=str(_exc)[:200])
-        # fall through to the agent path — never raise
+    # RESOLVE-contract fast path: on a bound deterministic answer, stream it (a
+    # token + a "done" payload) and stop; otherwise fall through to the agent loop.
+    # Same shared helper as run_agent_query.
+    _resolved = await _resolve_contract_payload(query, db, container_id, ctx, initial_state, req_id)
+    if _resolved is not None:
+        yield {"type": "token", "content": _resolved["answer"]}
+        yield {"type": "done", "payload": _resolved}
+        return
 
     # ── GATE A short-circuit ─────────────────────────────────────────────────
     # When the BA feasibility gate (enforced mode) proves the question cannot be

@@ -57,9 +57,12 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
 
-    # Query engine — "duckdb" (default, safe) | "datafusion" (new, concurrent)
-    # Switch to "datafusion" once shadow testing confirms correctness.
-    QUERY_ENGINE: str = "duckdb"
+    # Query engine for ALL analytical execution at query time (agent run_sql AND
+    # the RESOLVE-contract fast path both route through tools/sql.py::_execute on
+    # this flag). Defaulted in code (NOT .env — prod env differs) to DataFusion:
+    # Arrow-native, concurrent, one SessionContext per request. "duckdb" remains
+    # available as a fallback engine.
+    QUERY_ENGINE: str = "datafusion"
 
     # SQL validator AST mode — runtime override for the sqlglot structural validator.
     # "primary"  — AST is authoritative; regex runs as shadow (default, production).

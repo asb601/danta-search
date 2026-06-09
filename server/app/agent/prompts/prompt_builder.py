@@ -47,10 +47,7 @@ shown below in FROM/JOIN clauses; the runtime resolves them to authorized files.
 Each logical table already spans all of its time periods — query the table name
 once; do NOT union per-month tables or assume a period is "missing" from one file.
 
-SQL dialect: the executor is DuckDB. Write DuckDB-valid SQL. Use date_diff('day', a, b)
-(not DATEDIFF), string_agg(x, ',') (not GROUP_CONCAT), and current_date. When a value
-already exists as a column (e.g. an aging/days/DSO column), use that column directly
-rather than recomputing it from current_date.
+{sql_dialect_note}
 
 Reference date for relative time: {today_iso} ({today_human}) — the most recent
 date this dataset covers. Resolve every relative time expression in the user's
@@ -183,6 +180,33 @@ Do not ask the user \"would you like me to search\u2026\" \u2014 just go search.
 
 Max {max_calls} tool calls total.
 """
+
+
+def _sql_dialect_note() -> str:
+    """SQL-dialect guidance matching the ACTIVE execution engine (QUERY_ENGINE).
+
+    The agent must write SQL for whatever engine tools/sql.py::_execute runs, so
+    this is derived from config rather than hardcoded — keeping the prompt and the
+    executor in sync. The RESOLVE fast path emits its own engine-agnostic SQL and
+    does not depend on this note.
+    """
+    from app.core.config import get_settings  # noqa: PLC0415
+
+    if get_settings().QUERY_ENGINE == "datafusion":
+        return (
+            "SQL dialect: the executor is Apache DataFusion (Arrow-native, ANSI SQL). "
+            "Write standard ANSI SQL. Use current_date for today; date_part(...)/"
+            "extract(...)/date_trunc(...) for date handling; CAST(... AS ...) for "
+            "conversions. When a value already exists as a column (e.g. an aging/"
+            "days/DSO column), use it directly rather than recomputing from current_date."
+        )
+    return (
+        "SQL dialect: the executor is DuckDB. Write DuckDB-valid SQL. Use "
+        "date_diff('day', a, b) (not DATEDIFF), string_agg(x, ',') (not GROUP_CONCAT), "
+        "and current_date. When a value already exists as a column (e.g. an aging/"
+        "days/DSO column), use that column directly rather than recomputing it from "
+        "current_date."
+    )
 
 
 _DESC_MAX_CHARS = 200  # max characters shown per file description in the prompt
@@ -448,6 +472,7 @@ def build_system_prompt(
         last_year_start=last_year_start.isoformat(),
         last_year_end=last_year_end.isoformat(),
         last_30_start=last_30_start.isoformat(),
+        sql_dialect_note=_sql_dialect_note(),
     )
 
     # SME join enforcement: when joins are rejected at execution, the prompt must
