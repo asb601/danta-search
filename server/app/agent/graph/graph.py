@@ -1408,6 +1408,11 @@ async def _build_agent_context(
         "catalog_len": len(catalog),
         "total_files": len(full_catalog),
         "container_name": container_name,
+        # The container the request actually resolved to: the caller's
+        # container_id, or (when that is None — e.g. a platform admin with no
+        # org) the container of the shortlisted files. The RESOLVE seam binds
+        # governed metrics against this, so it must survive an empty caller arg.
+        "resolved_container_id": resolved_container_id,
         "parquet_blob_path": parquet_blob_path,
         "file_identity_map": file_identity_map,
         "allowed_file_ids": allowed_file_ids,
@@ -1559,16 +1564,26 @@ async def _resolve_contract_payload(query, db, container_id, ctx, initial_state,
     try:
         from app.core.config import get_settings  # noqa: PLC0415
         _flag = get_settings().RESOLVE_CONTRACT_ENABLED
+        # The streaming/admin UI path can arrive with container_id=None (a
+        # platform admin with no org → resolve_chat_scope returns no primary
+        # container, yet retrieval still scopes to the admin's files). Bind
+        # against the container the request actually retrieved over — the SAME
+        # resolved_container_id the rest of the context already trusts.
+        effective_container_id = container_id or ctx.get("resolved_container_id")
         # Unconditional diagnostic: shows in every trace whether the gate even
-        # opened, so a non-firing seam is never silent again (flag off vs no bind).
+        # opened, so a non-firing seam is never silent again (flag off vs no
+        # bind vs no container). from_ctx=True means the ctx fallback supplied it.
         chat_logger.info(
-            "resolve_contract_entry", flag=bool(_flag), has_container=bool(container_id)
+            "resolve_contract_entry",
+            flag=bool(_flag),
+            has_container=bool(effective_container_id),
+            from_ctx=bool(not container_id and ctx.get("resolved_container_id")),
         )
-        if not (_flag and container_id):
+        if not (_flag and effective_container_id):
             return None
         from app.services.resolve.binder import bind_contract_from_db  # noqa: PLC0415
         from app.services.resolve.emitter import emit_sql  # noqa: PLC0415
-        contract, _reason = await bind_contract_from_db(db, container_id, query)
+        contract, _reason = await bind_contract_from_db(db, effective_container_id, query)
         if contract is None:
             chat_logger.info("resolve_contract_nobind", reason=_reason)
             return None
@@ -1588,13 +1603,20 @@ async def _resolve_contract_payload(query, db, container_id, ctx, initial_state,
         )
         rows = rows or []
         total = total if total is not None else len(rows)
-        answer = (
-            f"{total} {contract.grain} record(s) with {contract.entity} over the "
-            f"threshold, from {contract.source_table}"
-            + (f" (showing top {len(rows)})." if total > len(rows) else ".")
-            if rows
-            else f"No {contract.entity} records found ({contract.source_table})."
-        )
+        # Business-readable prose. The words are DERIVED from the contract, not
+        # hardcoded: the grain key (CUSTOMER_ID → "customers") and the metric name
+        # (open_receivables → "open receivables"). Only the sentence is built here;
+        # data / route / row_count / source are unchanged and shown by the UI.
+        _noun = str(contract.grain).replace("_ID", "").replace("_", " ").strip().lower()
+        _noun = f"{_noun}s" if _noun else "record"
+        _label = str(contract.entity).replace("_", " ").strip().lower()
+        _thr = ((contract.facts or {}).get("having") or {}).get("value")
+        _thr_txt = f" over {_thr:,}" if isinstance(_thr, (int, float)) else ""
+        if rows:
+            _shown = f" (showing the top {len(rows)})" if total > len(rows) else ""
+            answer = f"{total:,} {_noun} have {_label}{_thr_txt}{_shown}."
+        else:
+            answer = f"No {_noun} have {_label}{_thr_txt}."
         with _stores_lock:
             _request_stores.pop(req_id, None)
         trace = ctx["trace"]
