@@ -1,6 +1,33 @@
 from pathlib import Path
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from functools import lru_cache
+
+
+class _BoolsFromDefaultsOnly(PydanticBaseSettingsSource):
+    """Wrap an env-based settings source so it NEVER supplies bool-typed fields.
+
+    Boolean feature flags therefore come from config.py defaults ONLY — a stray
+    OS env var or a SERVER_ENV/.env entry can no longer silently flip a flag
+    (the RESOLVE_CONTRACT_ENABLED footgun). Non-bool settings (DATABASE_URL,
+    AZURE_*, REDIS_URL, …) still load from env exactly as before. To change a
+    boolean you edit its default in config.py — config is the single source of
+    truth for flags.
+    """
+
+    def __init__(self, inner: PydanticBaseSettingsSource):
+        super().__init__(inner.settings_cls)
+        self._inner = inner
+        self._bool_fields = {
+            name
+            for name, field in inner.settings_cls.model_fields.items()
+            if field.annotation is bool
+        }
+
+    def get_field_value(self, field, field_name):  # abstract; unused on the __call__ path
+        return None, field_name, False
+
+    def __call__(self) -> dict:
+        return {k: v for k, v in self._inner().items() if k not in self._bool_fields}
 
 
 _INGESTION_POLICY_PROXY_NAMES = frozenset({
@@ -239,6 +266,20 @@ class Settings(BaseSettings):
     OPENSEARCH_REPLICAS: int = 0
 
     model_config = {"env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"), "extra": "ignore"}
+
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):
+        """Booleans come from config.py defaults only — env / .env / SERVER_ENV
+        can NOT override a boolean flag. All non-bool settings keep their normal
+        env precedence (explicit init args still win, e.g. in tests)."""
+        return (
+            init_settings,
+            _BoolsFromDefaultsOnly(env_settings),
+            _BoolsFromDefaultsOnly(dotenv_settings),
+            file_secret_settings,
+        )
 
     def chat_deployment(self) -> str:
         """Resolve the deployment for the primary/standard/high chat lane.
