@@ -196,9 +196,10 @@ class Settings(BaseSettings):
     # for the pure, deterministic per-question analytical CONTRACT + fallback
     # condition (source/grain/measure/filter/join slots → confidence → drop-to-
     # agent-fallback decision). DISTINCT from the GATE-B governed-join contract/
-    # package. Default False so the tree is byte-identical when off; the contract
-    # module is additive and not wired into graph.py until a caller opts in.
-    RESOLVE_CONTRACT_ENABLED: bool = False
+    # package. Defaulted ON in config (not .env — prod env differs); when the
+    # binder cannot produce a verified contract it deterministically drops to the
+    # agent path, so enabling it is safe by construction.
+    RESOLVE_CONTRACT_ENABLED: bool = True
 
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"

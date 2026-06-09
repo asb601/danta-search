@@ -55,6 +55,37 @@ logger = structlog.get_logger("resolve.binder")
 # deliberately excluded — they are not governed business definitions.
 _GOVERNED_METRIC_KEYS: tuple[str, ...] = ("name", "synonyms", "measure", "grain")
 
+
+def _sql_value(value: object) -> str:
+    """Render a filter value as a safe SQL literal (numeric as-is, else quoted)."""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _build_filter_preds(filt: object) -> tuple[str, ...]:
+    """Build QUOTED SQL filter predicates from a governed-metric filter.
+
+    Accepts a structured filter — a dict ``{"column", "op", "value"}`` or a list
+    of them — and quotes each column so it matches the uppercase parquet schema.
+    A legacy raw-string predicate is passed through unchanged (the author is then
+    responsible for quoting). ``None``/empty → no predicates.
+    """
+    if not filt:
+        return ()
+    items = filt if isinstance(filt, list) else [filt]
+    preds: list[str] = []
+    for f in items:
+        if isinstance(f, dict) and f.get("column"):
+            col = str(f["column"])
+            op = str(f.get("op", "=")).strip() or "="
+            preds.append(f'"{col}" {op} {_sql_value(f.get("value"))}')
+        elif isinstance(f, str) and f.strip():
+            preds.append(f.strip())
+    return tuple(preds)
+
 # Threshold parsing patterns. These are NUMBER-SHAPE patterns only — they carry
 # NO business meaning (no column names, no domain terms). They recognise the
 # common ways a question expresses a numeric floor: "over $500,000",
@@ -229,12 +260,13 @@ async def bind_contract_from_db(
         )
         return None, "no_verified_canonical_master"
 
-    # Step 4 — build the resolved-metric dict the resolver expects.
+    # Step 4 — build the resolved-metric dict the resolver expects. Column
+    # identifiers are QUOTED so they match the case-sensitive, uppercase parquet
+    # schema; the executor lowercases bare identifiers and they would not resolve.
     default_agg = metric.get("default_aggregation") or "SUM"
     measure = metric.get("measure")
-    measure_expr = f"{default_agg}({measure})"
-    filter_value = metric.get("filter")
-    filter_preds = (filter_value,) if filter_value else ()
+    measure_expr = f'{default_agg}("{measure}")'
+    filter_preds = _build_filter_preds(metric.get("filter"))
     resolved_metric = {
         "name": metric.get("name"),
         "measure_expr": measure_expr,

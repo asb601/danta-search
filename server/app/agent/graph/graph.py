@@ -1638,12 +1638,13 @@ async def run_agent_query(
                     20,
                 )
                 _rows = _rows or []
+                _total = _total if _total is not None else len(_rows)
                 _answer = (
-                    f"{_contract.entity}: {len(_rows)} row(s) for grain "
-                    f"{_contract.grain} from {_contract.source_table}."
+                    f"{_total} {_contract.grain} record(s) with {_contract.entity} "
+                    f"over the threshold, from {_contract.source_table}"
+                    + (f" (showing top {len(_rows)})." if _total > len(_rows) else ".")
                     if _rows
-                    else f"{_contract.entity}: no matching records "
-                         f"({_contract.source_table})."
+                    else f"No {_contract.entity} records found ({_contract.source_table})."
                 )
                 chat_logger.info(
                     "resolve_contract_answer",
@@ -1659,7 +1660,7 @@ async def run_agent_query(
                     "data": _rows,
                     "chart": None,
                     "route": "resolve_contract",
-                    "row_count": len(_rows),
+                    "row_count": _total,
                     "files_used": [_contract.source_table],
                     "tool_calls": 0,
                 }
