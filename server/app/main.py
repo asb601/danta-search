@@ -352,11 +352,13 @@ app.include_router(onboarding_router, prefix="/api")
 # collision with the app's org onboarding_router above. Both routers derive the
 # principal from pdf_chat.api.routes._resolve_current_user; binding it once to
 # the app's get_current_user authenticates BOTH (onboarding reuses the same seam).
-from pdf_chat.api.routes import pdf_router, _resolve_current_user as _pdf_resolve_user
+from pdf_chat.api.routes import pdf_router, _resolve_current_user as _pdf_resolve_user, _get_db as _pdf_get_db
 from pdf_chat.api.onboarding import onboarding_router as pdf_onboarding_router
 from app.dependencies import get_current_user as _app_get_current_user
+from app.core.database import get_db as _app_get_db
 
 app.dependency_overrides[_pdf_resolve_user] = _app_get_current_user
+app.dependency_overrides[_pdf_get_db] = _app_get_db
 app.include_router(pdf_router)            # already prefixed with /api/pdf
 app.include_router(pdf_onboarding_router) # already prefixed with /api/pdf/onboarding
 

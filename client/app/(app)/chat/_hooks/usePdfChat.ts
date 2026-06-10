@@ -33,7 +33,7 @@ export interface UploadProgress {
  * are EPHEMERAL (held only here, never written to the conversation sidebar — the
  * /api/pdf/chat endpoint is stateless and has no conversation_id).
  */
-export function usePdfChat({ mode }: { mode: ChatMode }) {
+export function usePdfChat({ mode, containerId }: { mode: ChatMode; containerId: string | null }) {
   const { user } = useAuth();
 
   // ── Composer input + ephemeral thread ──────────────────────────────────────
@@ -241,6 +241,17 @@ export function usePdfChat({ mode }: { mode: ChatMode }) {
   // ── Upload a PDF, then poll status until terminal, then refresh the picker ──
   const uploadPdf = useCallback(
     async (file: File) => {
+      if (!containerId) {
+        setUpload({
+          upload_id: "",
+          filename: file.name,
+          status: "failed",
+          done: true,
+          error: "Select a data container before uploading a PDF.",
+        });
+        return;
+      }
+
       // Reset any previous poll loop.
       if (pollAbort.current) pollAbort.current.cancelled = true;
       const token = { cancelled: false };
@@ -256,8 +267,8 @@ export function usePdfChat({ mode }: { mode: ChatMode }) {
       try {
         const fd = new FormData();
         fd.append("file", file);
+        fd.append("container_id", containerId);
         // Do NOT set Content-Type — the browser sets the multipart boundary.
-        // Do NOT append tenant_id — /upload derives it from the JWT (optional Form).
         const res = await apiFetch("/api/pdf/upload", {
           method: "POST",
           body: fd,
@@ -333,7 +344,7 @@ export function usePdfChat({ mode }: { mode: ChatMode }) {
         });
       }
     },
-    [loadDocuments],
+    [containerId, loadDocuments],
   );
 
   const clearUpload = useCallback(() => {

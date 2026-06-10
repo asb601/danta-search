@@ -71,8 +71,8 @@ class PdfSettings:
     image_entropy_vlm_threshold: float = _env_float("PDF_IMAGE_ENTROPY_THRESHOLD", 0.85)
     needs_review_confidence: float = _env_float("PDF_NEEDS_REVIEW_CONFIDENCE", 0.45)
 
-    # Blob
-    blob_container: str = _env("PDF_BLOB_CONTAINER", "pdf-documents")
+    # Blob — defaults to empty so the container is resolved from ContainerConfig at runtime.
+    blob_container: str = _env("PDF_BLOB_CONTAINER", "")
 
 
 @lru_cache(maxsize=1)

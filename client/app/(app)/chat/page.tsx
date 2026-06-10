@@ -58,7 +58,7 @@ export default function ChatPage() {
     loadDocuments: pdfLoadDocuments, selectedDocIds: pdfSelectedDocIds,
     selectAllDocuments: pdfSelectAll, toggleDocument: pdfToggleDocument,
     upload: pdfUpload, uploadPdf: pdfUploadPdf, clearUpload: pdfClearUpload,
-  } = usePdfChat({ mode });
+  } = usePdfChat({ mode, containerId: selectedContainerId });
 
   const isPdf = mode === "pdf";
 
@@ -379,18 +379,21 @@ export default function ChatPage() {
           modeSwitcher={<ModeSwitcher mode={mode} onChange={handleModeChange} />}
           scopeControl={
             isPdf ? (
-              <PdfDocumentPicker
-                documents={pdfDocuments}
-                docsLoading={pdfDocsLoading}
-                docsError={pdfDocsError}
-                selectedDocIds={pdfSelectedDocIds}
-                onSelectAll={pdfSelectAll}
-                onToggle={pdfToggleDocument}
-                onRefresh={pdfLoadDocuments}
-                upload={pdfUpload}
-                onUpload={pdfUploadPdf}
-                onClearUpload={pdfClearUpload}
-              />
+              <div className="flex items-center gap-2 min-w-0">
+                <ContainerPicker value={selectedContainerId} onChange={setSelectedContainerId} />
+                <PdfDocumentPicker
+                  documents={pdfDocuments}
+                  docsLoading={pdfDocsLoading}
+                  docsError={pdfDocsError}
+                  selectedDocIds={pdfSelectedDocIds}
+                  onSelectAll={pdfSelectAll}
+                  onToggle={pdfToggleDocument}
+                  onRefresh={pdfLoadDocuments}
+                  upload={pdfUpload}
+                  onUpload={pdfUploadPdf}
+                  onClearUpload={pdfClearUpload}
+                />
+              </div>
             ) : (
               <ContainerPicker value={selectedContainerId} onChange={setSelectedContainerId} />
             )

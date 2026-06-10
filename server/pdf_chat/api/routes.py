@@ -99,6 +99,18 @@ async def _resolve_current_user() -> Any:  # pragma: no cover - infra
     raise HTTPException(status_code=503, detail="Auth backend not wired.")
 
 
+async def _get_db() -> Any:  # pragma: no cover - infra
+    """Override seam for the app's DB session — wired at mount time.
+
+    The host app sets::
+
+        app.dependency_overrides[_get_db] = get_db
+
+    Until wired, this fails CLOSED with 503.
+    """
+    raise HTTPException(status_code=503, detail="DB backend not wired.")
+
+
 async def get_principal(
     request_user: Any = Depends(_resolve_current_user),
 ) -> Principal:  # pragma: no cover - infra
@@ -139,27 +151,38 @@ def _enforce_tenant(principal: Principal, client_tenant_id: str | None) -> str:
 async def upload_pdf(
     file: UploadFile = File(...),
     tenant_id: str | None = Form(default=None),
+    container_id: str = Form(...),
     principal: Principal = Depends(get_principal),
+    db: Any = Depends(_get_db),
 ):
     """Spec §5 Stage 0–6 — accept a PDF, stream to blob, fingerprint, preflight,
     write the upload + page manifests, and fan out one Celery task per page.
 
-    Tenant + user are taken from the JWT principal — a client-supplied
-    ``tenant_id`` form field is only accepted if it MATCHES the token (else 403).
-    The control plane (Team A) decides dedup via SHA-256; if the same bytes were
-    already indexed for this tenant we return the existing ``upload_id`` with
-    ``deduplicated=True`` and queue nothing.
+    ``container_id`` must match an existing ContainerConfig owned by the
+    principal's tenant — PDFs are stored in that container's Azure Blob storage,
+    the same account and container as the Excel/CSV pipeline.
     """
     from pdf_chat.ingestion.fingerprint import compute_sha256
 
     trusted_tenant = _enforce_tenant(principal, tenant_id)
 
-    file_bytes = await file.read()  # NOTE: production path streams to blob; control plane reads byte-ranges per page.
+    # Resolve the Azure container credentials from ContainerConfig (same as Excel).
+    try:
+        from app.models.container import ContainerConfig  # type: ignore
+    except Exception as exc:  # pragma: no cover - app not wired
+        raise HTTPException(status_code=503, detail="Container model unavailable.") from exc
+
+    config = await db.get(ContainerConfig, container_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Container not found.")
+    if config.organization_id and config.organization_id != trusted_tenant:
+        raise HTTPException(status_code=403, detail="Container does not belong to your tenant.")
+
+    file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file.")
     sha256 = compute_sha256(file_bytes)
 
-    # Late imports — control plane / ingestion may not be importable in isolation.
     try:
         from pdf_chat.control_plane.upload_service import handle_upload  # type: ignore
     except Exception as exc:  # pragma: no cover - infra not present
@@ -175,6 +198,8 @@ async def upload_pdf(
         sha256=sha256,
         tenant_id=trusted_tenant,
         user_id=principal.user_id,
+        connection_string=config.connection_string,
+        container_name=config.container_name,
     )
     return UploadResponse(
         upload_id=result["upload_id"],
