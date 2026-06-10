@@ -14,7 +14,7 @@ Resolution order (first hit wins):
 
 Pure module — safe to import with zero infra. The DB lookup is injected, never
 imported at module load, so importing this never touches a database.
-"""
+"""  
 from __future__ import annotations
 
 import os
