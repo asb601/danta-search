@@ -331,6 +331,134 @@ key columns.
 """
 
 
+# ── SAP ECC dataset domain knowledge (static, injected at prompt tail) ────────
+# Ivy Data Company SAP ECC corpus (~1,000 tables, Client 100).
+# Covers FI, CO, AA, TR, MM, WM, SD, HCM modules.
+_SAP_DOMAIN_KNOWLEDGE = """
+--- SAP ECC DATASET REFERENCE ---
+Dataset: Ivy Data Company SAP ECC (~1,000 tables, Client MANDT=100).
+Default filters: always add MANDT = '100'. Company codes: 1000=US, 2000=EU, 3000=APAC.
+Controlling area: KOKRS = 1000. Plan version: RVERS/VERSN = 0 (actual).
+
+SHARED JOIN KEYS (referential integrity across modules):
+  BUKRS   Company Code        → FI, CO, AA, HCM, MM, SD, TR
+  MATNR   Material Number     → MM, SD, CO, FI, WM
+  KUNNR   Customer Number     → FI, SD, CO
+  LIFNR   Vendor Number       → FI, MM, AA, SD
+  PERNR   Personnel Number    → HCM, SD
+  KOSTL   Cost Center         → CO, FI, AA, HCM, MM, SD
+  PRCTR   Profit Center       → CO, FI, SD
+  KOKRS   Controlling Area    → CO
+  WERKS   Plant               → MM, SD, AA, CO, FI, HCM, WM
+  LGORT   Storage Location    → MM, SD, WM
+  VKORG   Sales Organization  → SD, FI
+  VTWEG   Distribution Channel→ SD, FI
+  SPART   Division            → SD, FI
+  EKORG   Purchasing Org      → MM
+  ANLN1   Main Asset Number   → AA
+  EBELN   PO Number           → MM
+  VBELN   SD Document Number  → SD
+  BELNR   FI Document Number  → FI, CO, MM, SD
+  GJAHR   Fiscal Year         → FI, CO, AA, MM
+  SAKNR   G/L Account         → FI
+  AUFNR   Internal Order      → CO, MM
+  LGNUM   Warehouse Number    → WM
+  WAERS   Currency            → all modules
+
+FINANCE / FICO (Modules: FI · CO · AA · TR)
+  FI — Financial Accounting:
+    Key tables: BKPF (doc header), BSEG (line items), BSIS/BSAS (open/cleared items),
+                SKA1 (G/L master), KNA1 (customer master), LFA1 (vendor master),
+                FAGLFLEXT (new G/L totals), FAGLFLEXA (new G/L line items)
+    Key fields: BELNR doc number · BUDAT posting date · BLDAT doc date · GJAHR year
+                MONAT period · BLART doc type · SHKZG debit/credit · DMBTR local amt
+                WRBTR doc currency amt · HKONT G/L account · MWSKZ tax code
+    Filters: BSTAT=' ' for open items; SHKZG='S' debit / 'H' credit
+  CO — Controlling:
+    Key tables: CSKS (cost center master), CSKA (cost elements), COSS/COSP (order totals),
+                COEP (CO line items), CE1xxxx (COPA — replace xxxx with operating concern)
+    Key fields: KOSTL cost center · KSTAR cost element · AUFNR order · PRCTR profit center
+                PERIO period · WRTTP value type (04=actual, 01=plan) · BEKNZ debit/credit
+                OBJNR object number · VERSN version
+  AA — Asset Accounting:
+    Key tables: ANLA (asset master), ANLZ (time-dep data), ANLC (depreciation values), ANEK (doc header)
+    Key fields: ANLN1 asset · ANLN2 sub-asset · ANLKL asset class · AFABE dep area
+                NAFAZ ordinary depreciation · KANSW cumulative acquisition · AKTIV capitalization date
+    KPI: Net Book Value = KANSW (acquisition) − KNAFA (accumulated depreciation)
+  TR — Treasury:
+    Key tables: VTBFHA (financial transactions), VTBBEWE (flows/cash flows)
+    Key fields: RFHA deal number · PRODUCT_TYPE instrument type · PARTNER counterparty
+                DEAL_DATE trade date · DFAEL due date · VALUT value date · BZBETR nominal amt
+
+LOGISTICS / MM+WM (Modules: MM · WM)
+  MM — Materials Management:
+    Key tables: MARA (material master), MARC (plant data), MARD (storage loc stock),
+                MBEW (valuation), MCHB (batch stock), EKKO (PO header), EKPO (PO lines),
+                EBAN (purchase requisition), MSEG (material doc lines), MKPF (material doc header)
+    Key fields: MATNR material · MTART type (ROH=raw,FERT=finished,HAWA=trading)
+                BWART movement type (101=GR,261=issue,301=transfer) · MENGE qty
+                NETPR net price · PEINH price unit · MEINS base UoM · LABST unrestricted stock
+                BEDAT PO date · LIFNR vendor · BSART PO type (NB=standard,UB=stock transport)
+                MAKTX material description · MATKL material group · STPRS standard price
+                VERPR moving avg price · VPRSV price control (S=standard,V=moving avg)
+  WM — Warehouse Management:
+    Key tables: LTBK (transfer order header), LTAP (transfer order items), LQUA (quants)
+    Key fields: LGNUM warehouse · LGTYP storage type · TANUM TO number · BWLVS WM movement type
+                VLTYP/VLPLA source type/bin · NLTYP/NLPLA dest type/bin
+
+SALES / SD (Module: SD)
+  Key tables: VBAK (order header), VBAP (order lines), VBUK/VBUP (status),
+              LIKP (delivery header), LIPS (delivery lines),
+              VBRK (billing header), VBRP (billing lines), VBFA (document flow)
+  Key fields: VBELN document · AUART order type · VKORG sales org · VTWEG channel
+              KUNNR/KUNAG sold-to · MATNR material · POSNR item · KWMENG confirmed qty
+              NETWR net value · WAERK currency · FKART billing type · FKDAT billing date
+              GBSTK overall status · LFSTK delivery status · FKSTK billing status
+  SD KPIs:
+    Late delivery  = LIKP actual GI date (WADAT_IST) > LIKP planned GI date (WADAT)
+    Open orders    = VBAK where GBSTK not 'C' (closed)
+    Revenue        = sum VBRP.NETWR where FKSTO <> 'X' (not cancelled)
+
+HUMAN CAPITAL / HCM (Module: HCM)
+  Key tables: PA0001 (org assignment), PA0002 (personal data), PA0008 (basic pay),
+              PA0014 (recurring payments/deductions), PA0007 (planned working time),
+              T549Q (payroll periods), PCL1/PCL2 (payroll result clusters)
+  Key fields: PERNR employee · BEGDA/ENDDA validity dates · BUKRS company code
+              WERKS plant/location · KOSTL cost center · ORGEH org unit · PLANS position
+              ANSAL annual salary · LGART wage type · TRFGR pay scale group · TRFST level
+              PERSG employee group · PERSK employee subgroup · EMPCT employment %
+              ABWTG absence days · AWART absence/attendance type
+  Filters: active employees = ENDDA >= today AND BEGDA <= today on PA0001
+  HCM KPIs:
+    Headcount      = COUNT(DISTINCT PERNR) on active PA0001 records
+    Absence rate   = SUM(ABWTG) / headcount by ORGEH (org unit)
+    Total pay      = SUM of BETRG on PA0008 + PA0014 joined on PERNR
+
+CROSS-MODULE JOIN PATTERNS (confirm with extract_relations first):
+  PO → GR → Invoice (Procure-to-Pay): EKKO/EKPO → MSEG (EBELN) → BSEG (BELNR)
+  SD Order → Delivery → Billing:       VBAK → LIKP → VBRK via VBFA (document flow on VBELN)
+  CO → FI reconciliation:              COEP.BELNR = BKPF.BELNR (same accounting document)
+  Asset → FI:                          ANEK.BELNR = BKPF.BELNR
+  HCM payroll → CO cost:               PA cost postings via KOSTL (cost center)
+  Material valuation → FI:             MBEW.MATNR+BWKEY joins to BSEG via movement docs
+
+FIELD NAME TRANSLATION (user says → SAP field):
+  "company"/"entity"        → BUKRS    "vendor"/"supplier"    → LIFNR
+  "customer"/"sold-to"      → KUNNR    "material"/"product"   → MATNR
+  "employee"/"person"       → PERNR    "cost center"          → KOSTL
+  "profit center"           → PRCTR    "plant"                → WERKS
+  "PO number"               → EBELN    "sales order"          → VBELN (VBAK)
+  "invoice" (AP)            → BELNR    "billing doc"          → VBELN (VBRK)
+  "posting date"            → BUDAT    "document date"        → BLDAT
+  "fiscal year"             → GJAHR    "period"               → MONAT/PERIO
+  "debit"                   → SHKZG='S'"credit"               → SHKZG='H'
+  "actual cost"             → WRTTP='04'"plan cost"           → WRTTP='01'
+  "unrestricted stock"      → LABST    "standard price"       → STPRS
+  "moving avg price"        → VERPR    "annual salary"        → ANSAL
+  "absence days"            → ABWTG    "wage type"            → LGART
+"""
+
+
 def _column_names_for_prompt(entry: dict | None) -> list[str]:
     if not entry:
         return []
@@ -624,6 +752,7 @@ def build_system_prompt(
         )
 
     system_prompt += _OEBS_DOMAIN_KNOWLEDGE
+    system_prompt += _SAP_DOMAIN_KNOWLEDGE
 
     chat_logger.info("system_prompt_size",
                      chars=len(system_prompt),
