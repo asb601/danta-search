@@ -212,6 +212,125 @@ _JOIN_LICENSE_ENFORCED = (
 )
 
 
+# ── OEBS dataset domain knowledge (static, injected at prompt tail) ───────────
+# This block is appended to every system prompt when the dataset is the Ivy Data
+# Company Oracle E-Business Suite (OEBS) corpus (~1,000 tables across Finance,
+# Supply Chain, HR, and Sales Operations).  It gives the agent a deterministic
+# table-routing map so it never has to guess which module owns a given concept.
+_OEBS_DOMAIN_KNOWLEDGE = """
+--- OEBS DATASET REFERENCE ---
+Dataset: Ivy Data Company Oracle E-Business Suite (~1,000 tables).
+Default operating unit filter: ORG_ID = 204 (apply to every query unless the
+user explicitly requests all organizations).
+Shared linking keys across the entire dataset:
+  CUSTOMER_ID   → Sales (OE), Receivables (AR), Customer Profiles (HZ)
+  VENDOR_ID     → Purchasing (PO), Payables (AP)
+  ITEM_NUMBER   → Inventory (MTL), BOM, Costing (CST), Order Lines (OE)
+  PERSON_ID     → HR People (PER), Assignments (PER), Payroll (PAY), Benefits (BEN)
+
+FINANCE (GL · AP · AR · FA · CE · XLA · IBY · ZX · FND)
+  GL_BALANCES               period net debits/credits, YTD balances, account type
+  GL_JE_HEADERS / _LINES    journal entries; join headers→lines on JE_HEADER_ID
+  GL_CODE_COMBINATIONS      chart of accounts; SEGMENT2 = cost center
+  GL_DAILY_RATES            currency conversion rates by date
+  AP_INVOICES_ALL           supplier invoices: amount, due date, payment status, tax
+  AP_HOLDS_ALL              hold reasons; join to AP_INVOICES_ALL
+  AP_CHECKS_ALL             payment checks by bank account
+  AR_TRANSACTIONS_ALL       customer invoices, open balances, amount due remaining
+  AR_CASH_RECEIPTS_ALL      cash received from customers, trend by month
+  FA_ADDITIONS_B            asset master: cost, location, depreciation method, in-service date
+  FA_DEPRN_SUMMARY          accumulated depreciation by asset category
+  CE_BANK_ACCOUNTS / _STATEMENTS  bank balances and statement lines; flag uncleared
+  XLA_EVENTS / XLA_AE_HEADERS    accounting events and entry headers
+  IBY_PAYMENTS_ALL          payment records by method and amount
+  ZX_LINES                  tax lines: recoverable vs non-recoverable, jurisdiction
+  FND_LOOKUP_VALUES         lookup codes and descriptions (e.g. DOCUMENT_TYPE)
+  Finance KPIs:
+    Net Book Value    = FA_ADDITIONS_B.cost − FA_DEPRN_SUMMARY.deprn_reserve
+    Overdue AP        = AP_INVOICES_ALL where due_date < today AND amount_remaining > 0
+    Effective tax rate= ZX_LINES.tax_amount / AP_INVOICES_ALL.taxable_amount, by jurisdiction
+    AR↔GL reconcile   = match AR_CASH_RECEIPTS_ALL to GL_JE_LINES where GL source = 'Receivables'
+    FA↔GL reconcile   = match FA_DEPRN_SUMMARY to GL_JE_LINES by period
+
+SUPPLY CHAIN (PO · RCV · MTL · BOM · WIP · CST · MRP · MSC · EAM)
+  PO_HEADERS_ALL            PO headers: vendor, status, total amount
+  PO_DISTRIBUTIONS_ALL      PO line distributions by department (attribute_category)
+  RCV_TRANSACTIONS          receipt/inspection transactions; types: RECEIVE, INSPECT, REJECT, DELIVER
+  MTL_MATERIAL_TRANSACTIONS material movements: issues, receipts, transfers; cost and qty by subinventory
+  MTL_ONHAND_QUANTITIES_DETAIL  current on-hand stock by item and subinventory
+  MTL_SYSTEM_ITEMS_B        item master: descriptions and attributes
+  BOM_BILL_OF_MATERIALS / BOM_COMPONENTS_B  assembly headers and component quantities
+  WIP_DISCRETE_JOBS         work orders: start qty, scrapped qty, job class, scheduled completion
+  CST_ITEM_COSTS            unit cost by item and cost type (material + resource + overhead)
+  MRP_RECOMMENDATIONS       planning exceptions including SHORTAGE type
+  MSC_SUPPLIES / MSC_DEMANDS planned supply and demand quantities by item
+  EAM_WORK_ORDERS           maintenance work orders; filter EMERGENCY type and open status
+  Supply Chain KPIs:
+    Scrap rate        = WIP scrapped_qty / WIP start_qty, per job class
+    Under-shipment    = OE_ORDER_LINES_ALL.ordered_qty − WSH_DELIVERY_DETAILS.shipped_qty (where negative)
+    Inventory gap     = MTL on-hand qty − MRP planned demand, per ITEM_NUMBER
+    PO shortfall      = PO ordered qty − RCV received qty, join on PO_HEADER_ID
+
+HUMAN RESOURCES (PER · PAY · BEN · OTA · IRC)
+  PER_ALL_PEOPLE_F          employee master: name, grade, annual salary, location, employee type
+  PER_ALL_ASSIGNMENTS_F     assignment history: grade, salary by date range
+  PER_ABSENCE_ATTENDANCES   absence records; group by department
+  PAY_RUN_RESULTS           payroll run results; join to PAY_ELEMENT_TYPES_F
+  PAY_ELEMENT_TYPES_F       element names (earnings, deductions, net pay)
+  PAY_RUN_RESULT_VALUES     individual element values per run
+  PAY_COSTS                 payroll cost by month and cost center
+  BEN_PRTT_ENRT_RSLT_F      employee benefit plan enrollments
+  BEN_PRTT_PREM_F           benefit premium amounts by plan and month
+  OTA_EVENTS / OTA_BOOKINGS training event catalog and employee bookings
+  IRC_APPLICANTS / IRC_OFFERS / IRC_JOB_POSTINGS  recruitment pipeline
+  HR KPIs:
+    Active employees  = PER_ALL_PEOPLE_F where employee_type is active AND effective_end_date > today (or null)
+    VP or above       = PER grade field containing VP, SVP, EVP, or C-level title
+    Total compensation= PER annual salary + PAY net pay + BEN premiums, joined on PERSON_ID
+    Headcount         = COUNT(DISTINCT PERSON_ID) for active assignments
+    Absence rate      = absence count / headcount, by department
+
+SALES OPERATIONS (OE · WSH · HZ · PA · CS · ASO · AS · QP · OKC · JTF)
+  OE_ORDER_HEADERS_ALL      sales order headers: customer, status (BOOKED/CLOSED), order date
+  OE_ORDER_LINES_ALL        order lines: item, ordered qty, unit price, line value
+  WSH_DELIVERY_DETAILS      shipments: shipped qty, carrier, freight cost, actual vs scheduled ship date
+  HZ_PARTIES                customer master: name, total invoiced amount
+  HZ_CUSTOMER_PROFILES      credit rating and credit limit per customer
+  PA_PROJECTS_ALL           project master: budget, actual cost, variance
+  CS_SERVICE_REQUESTS       service incidents: priority (P1=Critical), status, CSAT score
+  ASO_QUOTE_HEADERS_ALL     quote headers by status and total value
+  AS_OPPORTUNITIES_ALL      pipeline: amount, win probability, sales stage, WON/LOST
+  QP_LIST_LINES             price list lines: active status, discount percentage
+  OKC_K_HEADERS_ALL_B       service contract headers: start date, end date, status
+  JTF_TASKS_ALL_B           task records: owner, status (open/closed)
+  Sales KPIs:
+    Late shipment      = WSH actual_ship_date > WSH scheduled_ship_date
+    Weighted pipeline  = AS opportunity_amount × win_probability_pct
+    Over-budget project= PA actual_cost > PA budget_amount; variance = actual − budget
+    Expiring contracts = OKC end_date within next 6 months from today
+    High-risk customer = HZ credit_rating below BBB AND credit_limit > 1,000,000
+
+CROSS-DOMAIN JOINS (use extract_relations first; fall back to these keys only when confirmed)
+  PO→AP  (Procure-to-Pay)          VENDOR_ID
+  OE→AR  (Order-to-Cash)           CUSTOMER_ID
+  OE→WSH (Order Fulfillment)       ORDER_LINE_ID
+  AR→GL  (Receivables recon)       GL source = 'Receivables'
+  FA→GL  (Depreciation recon)      period match
+  PA→AP  (Project Spend)           PROJECT_ID
+  PER+PAY+BEN (Total Compensation) PERSON_ID
+  MTL+MRP (Inventory vs Demand)    ITEM_NUMBER
+  RCV+PO  (Receipt Shortfall)      PO_HEADER_ID
+  CS+MTL  (Defect Analysis)        ITEM_NUMBER
+  HZ→OE→AR (360 Customer View)     CUSTOMER_ID (chain)
+  AP+ZX  (Tax Analysis)            INVOICE_ID
+
+DISCOVERY RULE: if the user asks "which table contains X" or "where is Y data",
+consult the catalog (search_catalog tool) first — the _DATASET_CATALOG.csv is
+the authoritative index of all ~1,000 tables, their domains, row counts, and
+key columns.
+"""
+
+
 def _column_names_for_prompt(entry: dict | None) -> list[str]:
     if not entry:
         return []
@@ -503,6 +622,8 @@ def build_system_prompt(
             f"{_ctx}\n"
             "---\n"
         )
+
+    system_prompt += _OEBS_DOMAIN_KNOWLEDGE
 
     chat_logger.info("system_prompt_size",
                      chars=len(system_prompt),
