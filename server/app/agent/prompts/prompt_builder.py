@@ -330,7 +330,6 @@ the authoritative index of all ~1,000 tables, their domains, row counts, and
 key columns.
 """
 
-
 # ── SAP ECC dataset domain knowledge (static, injected at prompt tail) ────────
 # Ivy Data Company SAP ECC corpus (~1,000 tables, Client 100).
 # Covers FI, CO, AA, TR, MM, WM, SD, HCM modules.
@@ -624,6 +623,7 @@ def build_system_prompt(
     workflow_topology_note: str = "",
     file_identities: FileIdentityMap | None = None,
     as_of_date: date | None = None,
+    erp_domain: str | None = None,
 ) -> str:
     """Assemble the full system prompt for the agent.
 
@@ -751,8 +751,11 @@ def build_system_prompt(
             "---\n"
         )
 
-    system_prompt += _OEBS_DOMAIN_KNOWLEDGE
-    system_prompt += _SAP_DOMAIN_KNOWLEDGE
+    _domain_upper = (erp_domain or "").upper()
+    if not _domain_upper or "ORACLE" in _domain_upper or "OEBS" in _domain_upper:
+        system_prompt += _OEBS_DOMAIN_KNOWLEDGE
+    if not _domain_upper or "SAP" in _domain_upper:
+        system_prompt += _SAP_DOMAIN_KNOWLEDGE
 
     chat_logger.info("system_prompt_size",
                      chars=len(system_prompt),

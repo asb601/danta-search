@@ -23,6 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.catalog_cache import invalidate_catalog_cache, load_catalog  # re-export
+from app.models.folder import Folder
 from app.agent.catalog_hydration import hydrate_files, merge_hydrated
 from app.agent.graph.graph_builder import build_graph
 from app.agent.llm import get_llm_mini
@@ -453,6 +454,14 @@ async def _build_agent_context(
     resolved_container_id = container_id or (
         full_catalog[0].get("container_id") if full_catalog else None
     )
+
+    # Resolve the ERP domain from the selected folder so the system prompt
+    # injects only the relevant knowledge block (OEBS vs SAP).
+    erp_domain: str | None = None
+    if folder_id:
+        _folder = await db.get(Folder, folder_id)
+        if _folder:
+            erp_domain = _folder.domain_tag
 
     # ── STEP 2b + 2.4 (PARALLEL): Schema registry + Business intent plan ─────
     # These two are independent: one is an async DB query, the other is an LLM
@@ -1356,6 +1365,7 @@ async def _build_agent_context(
                 ])),
                 file_identities=file_identity_map,
                 as_of_date=_as_of,
+                erp_domain=erp_domain,
             ),
         ),
     )

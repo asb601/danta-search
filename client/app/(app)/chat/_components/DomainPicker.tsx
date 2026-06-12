@@ -68,7 +68,7 @@ export function DomainPicker({ containerId, value, onChange }: DomainPickerProps
       </button>
 
       {open && (
-        <div className="absolute z-30 mt-1.5 left-0 w-56 rounded-xl border border-[#e5e5e5] bg-white shadow-[0_4px_20px_rgba(0,0,0,0.1)] overflow-hidden">
+        <div className="absolute z-30 bottom-full mb-1.5 left-0 w-56 rounded-xl border border-[#e5e5e5] bg-white shadow-[0_4px_20px_rgba(0,0,0,0.1)] overflow-hidden">
           <button
             type="button"
             onClick={() => { onChange(null); setOpen(false); }}
