@@ -63,3 +63,4 @@ server/testing/*.parquet
 VM_SETUP.md
 server/testing/Claude.dmg
 *.dmg
+server/scripts/
