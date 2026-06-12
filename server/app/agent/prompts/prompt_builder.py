@@ -172,8 +172,9 @@ When you finish, write a complete analyst response:
 3. **Table note** — if SQL returned rows, end with the line:
    "↓ See the results table below for the full data."
 4. **Source** — one short line stating which logical table(s) the data came from
-   and the filter applied. Use only the base table name (e.g. BSIK, VBAK) —
-   never include file extensions, `.cleaned-*` suffixes, hash codes, or paths.
+   and the filter applied. Always use only the bare table name — strip any
+   `.cleaned-*` suffixes, hash codes, file extensions, or path segments from
+   every table reference regardless of its name.
 
 Do NOT include tabular data in the text — no markdown pipe tables, no CSV rows.
 The UI renders the SQL results as an interactive table directly below this
