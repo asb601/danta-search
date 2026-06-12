@@ -3,7 +3,7 @@ Catalog loader — filtered per-request DB query (no in-memory cache).
 
 Design notes
 ------------
-The old 5-minute TTL in-memory cache was built for Neon (serverless
+The old 5-minute TTL in-memory.   cache was built for Neon (serverless
 Postgres with cold-start latency). With Azure Postgres it was wrong
 on two counts:
 
