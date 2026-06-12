@@ -16,7 +16,7 @@ WHAT THE PLANNER GAINS:
   The planner can then call search_catalog for intermediate tables, or call
   extract_relations to find candidate paths before concluding files can't be joined.
 
-DB QUERY STRATEGY:
+DB QUER Y STRATEGY:
   ONE additional query per request.
   Scope: all approved edges where at least ONE endpoint is in the shortlist.
   This gives: direct joins (both in shortlist) + bridge paths (one side external).
