@@ -52,8 +52,8 @@ async def chat_message_stream(
     query = body.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
-    if len(query) > 2000:
-        raise HTTPException(status_code=400, detail="Query too long (max 2000 chars).")
+    if len(query) > 8000:
+        raise HTTPException(status_code=400, detail="Query too long (max 8000 chars).")
 
     _ = f"chat-{uuid.uuid4().hex[:12]}"
 
