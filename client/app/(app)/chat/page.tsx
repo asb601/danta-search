@@ -10,6 +10,7 @@ import { AssistantMessage } from "./_components/AssistantMessage";
 import { PdfMessage } from "./_components/PdfMessage";
 import { ConversationSidebar } from "./_components/ConversationSidebar";
 import { ContainerPicker } from "./_components/ContainerPicker";
+import { DomainPicker } from "./_components/DomainPicker";
 import { ModeSwitcher } from "./_components/ModeSwitcher";
 import { PdfDocumentPicker } from "./_components/PdfDocumentPicker";
 import { Composer } from "./_components/Composer";
@@ -47,6 +48,7 @@ export default function ChatPage() {
     loadingConv, searchQuery, setSearchQuery,
     loadConversation, startNewChat, deleteConversation, renameConversation,
     selectedContainerId, setSelectedContainerId,
+    selectedFolderId, setSelectedFolderId,
   } = useChat();
 
   // ── The PDF hook owns its own ephemeral state (never touches conversations). ──
@@ -392,7 +394,14 @@ export default function ChatPage() {
                 onClearUpload={pdfClearUpload}
               />
             ) : (
-              <ContainerPicker value={selectedContainerId} onChange={setSelectedContainerId} />
+              <div className="flex items-center gap-2">
+                <ContainerPicker value={selectedContainerId} onChange={setSelectedContainerId} />
+                <DomainPicker
+                  containerId={selectedContainerId}
+                  value={selectedFolderId}
+                  onChange={setSelectedFolderId}
+                />
+              </div>
             )
           }
           subHint={

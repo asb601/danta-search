@@ -17,6 +17,40 @@ from app.schemas.folder import FolderContents, FolderCreate, FolderOut, FolderUp
 router = APIRouter(prefix="/folders", tags=["folders"])
 
 
+@router.get("", response_model=list[FolderOut])
+async def list_domain_folders(
+    container_id: str | None = Query(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return domain folders for a container (domain_tag IS NOT NULL, top-level only).
+
+    Used by the frontend DomainPicker to scope chat retrieval to a single ERP domain.
+    """
+    stmt = (
+        select(Folder)
+        .where(Folder.parent_id.is_(None))
+        .where(Folder.domain_tag.isnot(None))
+        .order_by(Folder.name)
+    )
+    if container_id:
+        stmt = stmt.where(Folder.container_id == container_id)
+
+    is_admin = bool(user.is_admin)
+    if not is_admin:
+        full_access = await platform_admin_has_container_grant(user, container_id, db) if container_id else False
+        if not full_access:
+            domains = getattr(user, "allowed_domains", None)
+            if domains:
+                stmt = stmt.where(Folder.domain_tag.in_(domains))
+            else:
+                return []
+
+    result = await db.execute(stmt)
+    folders = list(result.scalars().all())
+    return [FolderOut.model_validate(f) for f in folders]
+
+
 @router.get("/{folder_id}/contents")
 async def get_folder_contents(
     folder_id: str,

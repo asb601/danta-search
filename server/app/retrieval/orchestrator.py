@@ -205,6 +205,7 @@ async def retrieve_with_scores(
     top_k: int = 20,
     container_id: str | None = None,
     anchor_file_ids: list[str] | None = None,
+    folder_id: str | None = None,
 ) -> list[tuple[FileMetadata, float]]:
     """
     Full 9-stage retrieval pipeline.
@@ -299,6 +300,7 @@ async def retrieve_with_scores(
             limit=_MAX_BM25_CANDIDATES,
             allowed_domains=allowed_domains,
             container_id=container_id,
+            folder_id=folder_id,
         )
     except Exception as exc:
         chat_logger.warning("retrieval_bm25_error", error=str(exc)[:200])
@@ -311,6 +313,7 @@ async def retrieve_with_scores(
             limit=_MAX_FUZZY_CANDIDATES,
             allowed_domains=allowed_domains,
             container_id=container_id,
+            folder_id=folder_id,
         )
     except Exception as exc:
         chat_logger.warning("retrieval_fuzzy_error", error=str(exc)[:200])
@@ -323,6 +326,7 @@ async def retrieve_with_scores(
             limit=_MAX_VECTOR_CANDIDATES,
             allowed_domains=allowed_domains,
             container_id=container_id,
+            folder_id=folder_id,
         )
     except Exception as exc:
         chat_logger.warning("retrieval_vector_error", error=str(exc)[:200])
@@ -416,6 +420,7 @@ async def retrieve(
     db: AsyncSession,
     top_k: int = 20,
     container_id: str | None = None,
+    folder_id: str | None = None,
 ) -> list[FileMetadata]:
     """
     Full 9-stage retrieval pipeline — returns FileMetadata rows only.
@@ -423,5 +428,5 @@ async def retrieve(
     Convenience wrapper over retrieve_with_scores() that strips the scores.
     Use retrieve_with_scores() when you need scores for the AI Pipeline tab.
     """
-    results = await retrieve_with_scores(query, user_id, is_admin, db, top_k=top_k, container_id=container_id)
+    results = await retrieve_with_scores(query, user_id, is_admin, db, top_k=top_k, container_id=container_id, folder_id=folder_id)
     return [meta for meta, _ in results]

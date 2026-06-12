@@ -23,6 +23,8 @@ class ChatMessageRequest(BaseModel):
     # Mirrors the behaviour of GitHub Copilot's model picker — the user
     # explicitly chooses which container to chat with.
     container_id: str | None = None
+    # When set, retrieval is restricted to files in this folder (domain picker).
+    folder_id: str | None = None
 
 
 class IngestRequest(BaseModel):

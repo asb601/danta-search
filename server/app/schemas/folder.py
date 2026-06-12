@@ -18,6 +18,7 @@ class FolderOut(BaseModel):
     name: str
     parent_id: str | None
     owner_id: str
+    container_id: str | None = None
     created_at: datetime
     updated_at: datetime
     domain_tag: str | None = None

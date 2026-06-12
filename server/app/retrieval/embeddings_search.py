@@ -73,6 +73,7 @@ async def vector_search(
     threshold: float = _DEFAULT_THRESHOLD,
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
+    folder_id: str | None = None,
 ) -> list[tuple[FileMetadata, float]]:
     """
     Run HNSW cosine-similarity search against file_metadata.description_embedding.
@@ -104,6 +105,7 @@ async def vector_search(
         date_to=date_to,
         allowed_domains=allowed_domains,
         container_id=container_id,
+        folder_id=folder_id,
     )
 
     q = (

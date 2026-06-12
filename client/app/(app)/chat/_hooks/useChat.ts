@@ -34,6 +34,9 @@ export function useChat() {
   // ── Container scope (null = all containers) ────────────────────────────────
   const [selectedContainerId, setSelectedContainerId] = useState<string | null>(null);
 
+  // ── Domain/folder scope (null = all domains within the container) ──────────
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+
   // ── Fetch conversation list ────────────────────────────────────────────────
   const fetchConversations = useCallback(async (search = "") => {
     try {
@@ -168,6 +171,7 @@ export function useChat() {
           query: trimmed,           // the user's question
           conversation_id: activeConvId, // null = start a new conversation
           container_id: selectedContainerId, // null = search all containers
+          folder_id: selectedFolderId, // null = search all domain folders
         }),
         signal: controller.signal,
       });
@@ -385,5 +389,8 @@ export function useChat() {
     // container scope
     selectedContainerId,
     setSelectedContainerId,
+    // domain/folder scope
+    selectedFolderId,
+    setSelectedFolderId,
   };
 }

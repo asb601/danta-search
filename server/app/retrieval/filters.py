@@ -212,6 +212,7 @@ def build_base_query(
     allowed_domains: list[str] | None = None,
     container_id: str | None = None,
     organization_id: str | None = None,
+    folder_id: str | None = None,
 ) -> "Select":
     """
     Return a SELECT on FileMetadata that:
@@ -221,9 +222,10 @@ def build_base_query(
       4. Applies domain filter (stage 4) if allowed_domains given
       5. Applies container filter (chat picker) if container_id given
       6. Applies organization filter (Org-RBAC v2) if organization_id given
+      7. Applies folder filter (domain picker) if folder_id given
 
     Callers add their own WHERE / ORDER BY / LIMIT on top. The organization_id
-    param is additive — callers passing only container_id are unaffected.
+    and folder_id params are additive — callers omitting them are unaffected.
     """
     q = (
         select(FileMetadata)
@@ -245,5 +247,8 @@ def build_base_query(
     org_filter = org_clause(organization_id)
     if org_filter is not None:
         q = q.where(org_filter)
+
+    if folder_id:
+        q = q.where(File.folder_id == folder_id)
 
     return q

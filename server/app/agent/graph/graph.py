@@ -406,6 +406,7 @@ async def _build_agent_context(
     prior_files: list[str] | None = None,
     request_trace_id: str | None = None,
     org_id: str | None = None,
+    folder_id: str | None = None,
 ) -> dict | None:
     """
     Shared setup for both streaming and non-streaming entry points.
@@ -571,6 +572,7 @@ async def _build_agent_context(
                 query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K,
                 container_id=container_id,
                 anchor_file_ids=resolver_seed_file_ids or None,
+                folder_id=folder_id,
             )
         except Exception as exc:
             retrieval_error = str(exc)[:200]
@@ -1559,6 +1561,7 @@ async def run_agent_query(
     actor_email: str = "",
     actor_role: str = "",
     org_id: str | None = None,
+    folder_id: str | None = None,
 ) -> dict:
     """
     Main entry point for the agentic query pipeline.
@@ -1576,7 +1579,7 @@ async def run_agent_query(
     )
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id, org_id=org_id)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id, org_id=org_id, folder_id=folder_id)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
         return {
@@ -1724,6 +1727,7 @@ async def run_agent_query_stream(
     actor_email: str = "",
     actor_role: str = "",
     org_id: str | None = None,
+    folder_id: str | None = None,
 ) -> AsyncIterator[dict]:
     """
     Streaming variant of run_agent_query.
@@ -1744,7 +1748,7 @@ async def run_agent_query_stream(
     )
 
     try:
-        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id, org_id=org_id)
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains, container_id, prior_files, request_trace_id=_req_trace_id, org_id=org_id, folder_id=folder_id)
     except Exception as exc:
         chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
         yield {
