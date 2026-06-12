@@ -327,7 +327,6 @@ def classify_join_approval(
     ubiquity: float,
     has_companion: bool,
     policy,
-    promotion_enabled: bool,
     left_column: str | None = None,
     right_column: str | None = None,
 ) -> tuple[str, str | None]:
@@ -371,13 +370,13 @@ def classify_join_approval(
     # cardinality floor is unchanged while the clone guard sees both raw sides.
     min_cardinality = min(cardinality_left, cardinality_right)
 
-    # SAME-KEY IDENTITY PROMOTION (flag-gated, the relational fix). Evaluated
-    # BEFORE the risky-single-column gate so a same-name value-validated key
-    # (e.g. reference_key:customer on CUSTOMER_ID==CUSTOMER_ID) is promoted
-    # regardless of role and without the mis-calibrated confidence floor — but
-    # only when the value/identity evidence is unambiguous. Cross-name edges
-    # (same_business_key is False) fall straight through to the legacy gates.
-    if promotion_enabled and same_business_key:
+    # SAME-KEY IDENTITY PROMOTION. Evaluated BEFORE the risky-single-column gate
+    # so a same-name value-validated key (e.g. reference_key:customer on
+    # CUSTOMER_ID==CUSTOMER_ID) is promoted regardless of role and without the
+    # mis-calibrated confidence floor — but only when the value/identity evidence
+    # is unambiguous. Cross-name edges (same_business_key is False) fall straight
+    # through to the legacy gates.
+    if same_business_key:
         # Audit/system column: broadly present across the container's files.
         # Checked first because an audit column can share a master's cardinality
         # AND its name on both sides — only ubiquity separates them.
@@ -405,26 +404,22 @@ def classify_join_approval(
         return "approved", None
 
     # 1) A risky single-column reference role is never a safe join on its own
-    #    (cross-name or weak edges only reach here — same-name strong keys were
-    #    already promoted above).
+    #    (cross-name edges only reach here — same-name strong keys were already
+    #    promoted above).
     if is_risky_single_column_join_role(role):
         if has_companion:
             return "candidate", "single-column reference key needs composite join approval before use"
         return "candidate", f"{role} alone is not a safe business join key"
 
-    # When promotion is OFF, the decision tree is byte-identical to the legacy
-    # _approval_status: m2m is always a candidate, otherwise confidence+overlap.
-    # The audit/cardinality/overlap gates below are part of the flag-gated path.
-    if promotion_enabled:
-        # Cross-name edges still get the audit/cardinality/overlap rejection
-        # reasons so the risk_reason is informative; they are NEVER promoted
-        # (the same-key guard above is the only promotion path).
-        if ubiquity > policy.ubiquity_ceiling:
-            return "candidate", "ubiquitous/audit column, not a business key"
-        if min_cardinality < policy.min_join_cardinality:
-            return "candidate", "cardinality too low to be a key"
-        if value_overlap < policy.min_join_overlap:
-            return "candidate", "insufficient value overlap"
+    # Cross-name edges get the audit/cardinality/overlap rejection reasons so the
+    # risk_reason is informative; they are NEVER promoted (the same-key guard
+    # above is the only promotion path).
+    if ubiquity > policy.ubiquity_ceiling:
+        return "candidate", "ubiquitous/audit column, not a business key"
+    if min_cardinality < policy.min_join_cardinality:
+        return "candidate", "cardinality too low to be a key"
+    if value_overlap < policy.min_join_overlap:
+        return "candidate", "insufficient value overlap"
 
     # 2) Existing behavior: many_to_many is unsafe unless promoted above; an
     #    edge with a detected PK side is approved when confidence + overlap pass.
@@ -452,7 +447,6 @@ def _approval_status(
     confidence = rel.confidence_score or 0.0
     overlap = rel.value_overlap_pct or 0.0
     role = rel.semantic_role
-    promotion_enabled = bool(get_settings().RELATION_PROMOTION_ENABLED)
 
     return classify_join_approval(
         role=role,
@@ -464,7 +458,6 @@ def _approval_status(
         ubiquity=ubiquity,
         has_companion=bool(companion_components),
         policy=policy,
-        promotion_enabled=promotion_enabled,
         left_column=from_column,
         right_column=to_column,
     )
@@ -660,11 +653,9 @@ async def apply_master_election(container_id: str, db: AsyncSession) -> dict:
     3. Promote single-column joins whose PK side is a canonical master's primary
        key (and that clear the value-overlap floor) to `approved`.
 
-    Idempotent. No-op unless SME_MODE_ENABLED and SME_MASTER_ELECTION_ENABLED.
+    Idempotent. Runs unconditionally at container finalize and manual rebuild.
     """
     settings = get_settings()
-    if not (settings.SME_MODE_ENABLED and settings.SME_MASTER_ELECTION_ENABLED):
-        return {"skipped": "flag_off"}
 
     entities = (await db.execute(
         select(SemanticEntity).where(

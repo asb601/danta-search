@@ -7,8 +7,8 @@ class _BoolsFromDefaultsOnly(PydanticBaseSettingsSource):
     """Wrap an env-based settings source so it NEVER supplies bool-typed fields.
 
     Boolean feature flags therefore come from config.py defaults ONLY — a stray
-    OS env var or a SERVER_ENV/.env entry can no longer silently flip a flag
-    (the RESOLVE_CONTRACT_ENABLED footgun). Non-bool settings (DATABASE_URL,
+    OS env var or a SERVER_ENV/.env entry can no longer silently flip a flag.
+    Non-bool settings (DATABASE_URL,
     AZURE_*, REDIS_URL, …) still load from env exactly as before. To change a
     boolean you edit its default in config.py — config is the single source of
     truth for flags.
@@ -159,16 +159,12 @@ class Settings(BaseSettings):
     ORG_DB_QUERY_TIMEOUT_SECONDS: int = 15
     ORG_DB_MAX_ROWS: int = 1000
 
-    # ── SME mode (Reviewer-board build) ─────────────────────────────────────
-    # Promotes the already-built-but-observe-only "analyst brain" from telemetry
-    # to control. Master switch + per-capability sub-flags. ALL default False:
-    # with these defaults runtime behavior is byte-identical to today. A
-    # capability is active only when SME_MODE_ENABLED AND its own flag are True.
+    # ── SME capability flags ─────────────────────────────────────────────────
+    # Canonical-master election and value-proven join promotion are UNCONDITIONAL
+    # (the logic is the architecture — see services/semantic_master_election.py
+    # and classify_join_approval). The remaining flags gate only the still-soaking
+    # capabilities below; each is independent (no master switch).
     #
-    #   SME_MASTER_ELECTION_ENABLED  — knowledge layer: elect ONE canonical master
-    #     table per entity, auto-promote single-column master-key joins, and
-    #     demote ubiquitous/audit columns from join candidacy (all data-driven,
-    #     recomputed from existing metadata via semantic_rebuild — no re-ingest).
     #   SME_QUARANTINE_ENABLED       — trust gate: hard-exclude error-/low-trust
     #     knowledge from retrieval + SQL context (today it is only soft-attenuated).
     #   SME_RETRIEVAL_FIRST_ENABLED  — narrow first: run retrieval BEFORE entity
@@ -178,8 +174,6 @@ class Settings(BaseSettings):
     #     the approved relationship graph at execution time (no fabricated joins).
     #   SME_CONFIDENCE_ROUTER_ENABLED— route on the deterministic confidence score:
     #     high → answer, medium → answer + caveat, low → honest refusal.
-    SME_MODE_ENABLED: bool = False
-    SME_MASTER_ELECTION_ENABLED: bool = False
     SME_QUARANTINE_ENABLED: bool = False
     SME_RETRIEVAL_FIRST_ENABLED: bool = False
     SME_JOIN_ENFORCE_ENABLED: bool = False
@@ -196,17 +190,6 @@ class Settings(BaseSettings):
     SME_AUDIT_ABS_COVERAGE: float = 0.6
     SME_AUDIT_MIN_FILES: int = 8
 
-    # RELATION_PROMOTION_ENABLED — relational fix: at semantic-layer build time,
-    # promote value-validated master keys (semantic entity_key + strong cross-table
-    # value overlap + real cardinality + LOW container ubiquity + confidence floor)
-    # to APPROVED joins EVEN WHEN no PK was detected (so the edge is many_to_many).
-    # Without this, no-PK datasets force EVERY edge to many_to_many and the blanket
-    # m2m rejection leaves approved_joins permanently empty → joins collapse to
-    # independent_analyses. Default False so the tree is byte-identical when off;
-    # all separators are data-driven (no column-name lists). See SemanticPolicy
-    # ubiquity_ceiling / min_join_overlap / min_join_cardinality.
-    RELATION_PROMOTION_ENABLED: bool = False
-
     # RESOLVER_PIN_VALUE_GUARD_ENABLED — value-corroboration GATE on the entity
     # resolver's HARD pin. Today a candidate is hard-pinned at confidence >=
     # resolver_pin_threshold on NAME/ROLE-LABEL token overlap with ZERO value
@@ -222,24 +205,17 @@ class Settings(BaseSettings):
     # so the tree is byte-identical when off; fail-open (any error → legacy pin).
     RESOLVER_PIN_VALUE_GUARD_ENABLED: bool = False
 
-    # RESOLVE_CONTRACT_ENABLED — v2 RESOLVE contract (app/services/resolve/): gate
-    # for the pure, deterministic per-question analytical CONTRACT + fallback
-    # condition (source/grain/measure/filter/join slots → confidence → drop-to-
-    # agent-fallback decision). DISTINCT from the GATE-B governed-join contract/
-    # package. Defaulted ON in config (not .env — prod env differs); when the
-    # binder cannot produce a verified contract it deterministically drops to the
-    # agent path, so enabling it is safe by construction.
-    RESOLVE_CONTRACT_ENABLED: bool = True
-
-    # BRAIN_RESOLVE_ENABLED — v2 RESOLVE brain (app/services/resolve/brain.py): gate
-    # for the query-time, evidence-grounded contract proposer. The brain reads only
-    # per-file evidence for a narrow retrieved slice and emits a typed contract that
-    # is value-verified before SQL is rendered; on abstain/unverifiable it returns
-    # None and the caller falls through to the agent. Defaulted OFF — nothing changes
-    # on any live path until this is enabled. BRAIN_RESOLVE_SHADOW runs the brain
-    # alongside the live path for observation without taking over the answer.
-    BRAIN_RESOLVE_ENABLED: bool = True
-    BRAIN_RESOLVE_SHADOW: bool = False
+    # BRAIN_POLARITY_GATE_ENABLED — twin/AP-vs-AR identity guard on the navigator
+    # pick. Reads the ingested classifier discriminator
+    # (erp_classifications.domain_polarity ∈ {customer|vendor|neutral}) for the
+    # candidate slice, derives the question's polarity corpus-relatively (embedding
+    # alignment, no keyword list), then: hard-pre-filters cross-side candidates the
+    # question contradicts, value-cross-checks the pick (wrong side → abstain), and
+    # asks the user (route="brain_clarify") on a genuine opposite-side tie instead of
+    # guessing by row count. Default ON — strictly safer (correct-or-abstain). When
+    # False the path is byte-identical to today: no extra read, no pre-filter, no
+    # cross-check, no clarify — the row-count tiebreak is intact.
+    BRAIN_POLARITY_GATE_ENABLED: bool = True
 
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"

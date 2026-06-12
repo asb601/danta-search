@@ -35,6 +35,15 @@ from typing import Any
 
 from pdf_chat.config import get_pdf_settings
 from pdf_chat.retrieval.rrf import rrf
+# Index names come from the single-source-of-truth schema registry (the same
+# module that CREATES the indexes on the write side), so the read side can never
+# drift from the created index identity.
+from pdf_chat.ingestion.neo4j_schema import (
+    CHUNK_VECTOR_INDEX as _VECTOR_INDEX,
+    COMMUNITY_REPORT_VECTOR_INDEX as _COMMUNITY_REPORT_INDEX,
+    DOC_CARD_VECTOR_INDEX as _DOC_CARD_INDEX,
+    SECTION_CARD_VECTOR_INDEX as _SECTION_CARD_INDEX,
+)
 
 try:
     from neo4j import GraphDatabase  # type: ignore
@@ -44,14 +53,6 @@ except ImportError:  # pragma: no cover - exercised only without infra
     GraphDatabase = None  # type: ignore
     _HAS_NEO4J = False
 
-
-_VECTOR_INDEX = "chunk_vector_index"
-# Multi-representation index names (Phase-2 schema item 7). The card spaces are
-# written by the CardBuilder/KG writer; the community-report space holds cited
-# Leiden reports. Passed as ``$index_name`` so a single cypher serves every leg.
-_SECTION_CARD_INDEX = "section_card_vector_index"
-_DOC_CARD_INDEX = "doc_card_vector_index"
-_COMMUNITY_REPORT_INDEX = "community_report_vector_index"
 
 # tenant_id is bound as a parameter and asserted in WHERE on every query.
 # The optional `$doc_ids IS NULL OR node.doc_id IN $doc_ids` clause scopes

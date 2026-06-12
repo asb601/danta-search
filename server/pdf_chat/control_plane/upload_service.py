@@ -1,13 +1,78 @@
-"""upload_service — wires IngestDeps and calls the ingest orchestrator.
+"""upload_service — shared wiring for the PDF ingestion control plane.
 
-Imported late (inside the upload route body) so the module is importable
-without infra. The caller resolves Azure credentials from the app's
-ContainerConfig (same storage account and container as the Excel pipeline),
-then passes them here. No PDF-specific storage account is introduced.
+Two upload entry points converge here:
+
+  * ``/api/pdf/upload``         → :func:`handle_upload` (raw bytes in the request;
+                                  this module uploads them to the tenant container
+                                  under a ``pdfs/`` prefix), and
+  * the file-manager bridge     → :mod:`pdf_chat.control_plane.file_manager_bridge`
+                                  (bytes already in the tenant container; it reuses
+                                  :func:`build_ingest_deps` with a no-op writer).
+
+Both reuse :func:`build_ingest_deps` and :func:`enqueue_page` so the orchestrator
+contract (hash → preflight → manifest → page fan-out) is defined ONCE. Imported
+late (inside route bodies) so the module stays importable with zero infra.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable
+
+from ..config import get_pdf_settings
+
+
+def enqueue_page(task_id: str, tenant_id: str) -> Awaitable[None]:
+    """Dispatch ONE per-page extraction task onto the dedicated PDF queue.
+
+    This is the real implementation of the orchestrator's ``enqueue_fn`` seam
+    (previously a stub). The queue name comes from config (``PDF_INGEST_QUEUE``)
+    so routing is never hardcoded; the isolated PDF worker (Option B) consumes it
+    with ``-Q <that queue>``. ``apply_async(queue=...)`` is authoritative — it
+    overrides any task-default/route so a page can NEVER leak onto the CSV queue.
+
+    Returns an already-resolved awaitable so the async orchestrator can ``await``
+    it uniformly (Celery publish itself is synchronous and fast).
+    """
+    from pdf_chat.ingestion.tasks import process_page_task
+
+    async def _publish() -> None:
+        process_page_task.apply_async(
+            args=[task_id],
+            kwargs={"tenant_id": tenant_id},
+            queue=get_pdf_settings().ingest_queue,
+        )
+
+    return _publish()
+
+
+def build_ingest_deps(
+    session: Any,
+    *,
+    sha256: str,
+    blob_writer: Callable[..., Awaitable[str]],
+):
+    """Assemble :class:`IngestDeps` over a live session + a chosen blob writer.
+
+    ``blob_writer`` is the ONLY thing that differs between the two entry points:
+    ``/api/pdf/upload`` uploads the bytes; the bridge returns the existing blob
+    uri without re-uploading. Everything else (hash, preflight, repos, enqueue,
+    commit) is shared here so the ingest contract lives in one place.
+    """
+    from pdf_chat.control_plane.orchestrator import IngestDeps
+    from pdf_chat.control_plane.repositories import PageManifestRepo, UploadManifestRepo
+    from pdf_chat.ingestion.preflight import run_preflight
+
+    async def _commit() -> None:
+        await session.commit()
+
+    return IngestDeps(
+        upload_repo=UploadManifestRepo(session),
+        page_repo=PageManifestRepo(session),
+        hash_fn=lambda _b: sha256,
+        preflight_fn=run_preflight,
+        blob_writer=blob_writer,
+        enqueue_fn=enqueue_page,
+        commit=_commit,
+    )
 
 
 async def handle_upload(
@@ -18,43 +83,24 @@ async def handle_upload(
     sha256: str,
     tenant_id: str,
     user_id: str,
+    container_id: str,
     connection_string: str,
     container_name: str,
 ) -> dict[str, Any]:
-    """Orchestrate a PDF upload into the tenant's shared Azure container.
+    """Ingest a PDF whose bytes are in the request (native ``/api/pdf/upload``).
 
-    Uses the same ``connection_string`` and ``container_name`` from
-    ``ContainerConfig`` that the Excel/CSV pipeline uses — PDFs land under
-    ``pdfs/<tenant_id>/<sha256>/<filename>`` within that container.
+    Uploads the bytes to the tenant's shared Azure container under
+    ``pdfs/<tenant>/<sha256>/<filename>`` (namespaced away from Excel/Parquet
+    blobs), writes the manifest tagged with ``container_id`` (so the page worker
+    can resolve the per-tenant connection string), and fans out the page tasks.
     """
     from app.core.database import async_session  # type: ignore
-    from pdf_chat.control_plane.orchestrator import IngestDeps, ingest_document
-    from pdf_chat.control_plane.repositories import PageManifestRepo, UploadManifestRepo
-    from pdf_chat.ingestion.preflight import run_preflight
+    from pdf_chat.control_plane.orchestrator import ingest_document
 
-    blob_writer = _build_blob_writer(connection_string, container_name)
+    blob_writer = _uploading_blob_writer(connection_string, container_name)
 
-    async def _enqueue(task_id: str, _tenant_id: str) -> None:
-        # TODO: wire to Celery task for page-level extraction fan-out
-        pass
-
-    async with async_session() as db:
-        upload_repo = UploadManifestRepo(db)
-        page_repo = PageManifestRepo(db)
-
-        async def _commit() -> None:
-            await db.commit()
-
-        deps = IngestDeps(
-            upload_repo=upload_repo,
-            page_repo=page_repo,
-            hash_fn=lambda b: sha256,
-            preflight_fn=run_preflight,
-            blob_writer=blob_writer,
-            enqueue_fn=_enqueue,
-            commit=_commit,
-        )
-
+    async with async_session() as session:
+        deps = build_ingest_deps(session, sha256=sha256, blob_writer=blob_writer)
         result = await ingest_document(
             file_bytes,
             tenant_id,
@@ -63,6 +109,8 @@ async def handle_upload(
             deps=deps,
             filename=filename,
             content_type=content_type,
+            container_id=container_id,
+            source_file_id=None,  # native upload has no originating File row
         )
 
     return {
@@ -72,11 +120,11 @@ async def handle_upload(
     }
 
 
-def _build_blob_writer(connection_string: str, container_name: str):
-    """Async callable that uploads PDF bytes and returns the blob URI.
+def _uploading_blob_writer(connection_string: str, container_name: str):
+    """Async writer that uploads PDF bytes to the tenant container, returns the uri.
 
-    Stores under ``pdfs/<tenant_id>/<sha256>/<filename>`` so PDF blobs are
-    namespaced away from Excel/Parquet blobs within the shared container.
+    Stored under ``pdfs/<tenant_id>/<sha256>/<filename>`` so PDF blobs are
+    namespaced away from the Excel/Parquet blobs in the SAME container.
     """
 
     async def blob_writer(

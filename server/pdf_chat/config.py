@@ -74,10 +74,43 @@ class PdfSettings:
     # Blob — defaults to empty so the container is resolved from ContainerConfig at runtime.
     blob_container: str = _env("PDF_BLOB_CONTAINER", "")
 
+    # Ingestion isolation (Option B): the PDF document + page tasks run on their
+    # OWN Celery queue, separate from the CSV worker's queue, so a burst of PDF
+    # pages never starves CSV ingestion. The dedicated worker is started with
+    # ``-Q <this value>``. Env-overridable — never hardcoded at the call sites.
+    ingest_queue: str = _env("PDF_INGEST_QUEUE", "pdf_ingest")
+
+    # Which uploaded extensions are routed to the PDF pipeline (data-driven, so
+    # adding a format is a config change, not a code change). Comma-separated,
+    # case-insensitive, leading dots optional.
+    ingest_extensions: str = _env("PDF_INGEST_EXTENSIONS", "pdf")
+
 
 @lru_cache(maxsize=1)
 def get_pdf_settings() -> PdfSettings:
     return PdfSettings()
+
+
+def pdf_ingest_extensions() -> frozenset[str]:
+    """Normalised set of extensions routed to the PDF pipeline (no leading dot)."""
+    raw = get_pdf_settings().ingest_extensions or ""
+    return frozenset(
+        part.strip().lstrip(".").lower()
+        for part in raw.split(",")
+        if part.strip()
+    )
+
+
+def is_pdf_ingest_file(filename: str | None) -> bool:
+    """True when ``filename``'s extension is handled by the PDF pipeline.
+
+    Mirrors ``app.services.ingestion_config.is_auto_ingest_file`` but for the PDF
+    lane — the file-manager bridge uses it to decide routing. Pure + data-driven.
+    """
+    if not filename or "." not in filename:
+        return False
+    ext = filename.rsplit(".", 1)[-1].strip().lower()
+    return bool(ext) and ext in pdf_ingest_extensions()
 
 
 def azure_openai_credentials() -> tuple[str, str, str]:

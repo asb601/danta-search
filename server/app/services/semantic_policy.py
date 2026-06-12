@@ -94,6 +94,24 @@ class SemanticPolicy:
     planner_vague_single_file_penalty: float = 0.10
 
     min_overlap_fingerprint_count: int = 2
+    # ── Canonical-master election (container finalize) ───────────────────────
+    # Abstain-biased: a master is written ONLY when decisive. All inputs are
+    # data-derived per group (good_for text coverage, group-relative name
+    # affixes, schema-fingerprint/polarity rivals) — no name lists.
+    # master_goodfor_floor: min fraction of a member's good_for entries (+ its
+    #   ai_description) that mention the concept for the member to be eligible.
+    # master_margin: min score lead of the single bare candidate over the best
+    #   other eligible member (skipped for single-member groups).
+    # master_affix_coverage: a name token present in >= this fraction of the
+    #   group's member names is a group affix (e.g. 'ap', 'all') and is ignored
+    #   for bareness.
+    # master_twin_margin: if an eligible member with the OPPOSITE reliable
+    #   polarity scores within this distance of the winner, the group abstains
+    #   (AP-vs-AR twin tie is resolved at query time, never by election).
+    master_goodfor_floor: float = 0.5
+    master_margin: float = 0.10
+    master_affix_coverage: float = 0.6
+    master_twin_margin: float = 0.15
     # Max fan-out a verified 1:N join may exhibit. fanout_estimate is 1 /
     # unique_rate[pk_side]; a true PK is ~1.0 (one row per key), so a small margin
     # above 1.0 still admits real keys with minor sample duplication while
@@ -109,8 +127,8 @@ class SemanticPolicy:
     # GCHAT_SEMANTIC_RESOLVE_CONTRACT_TAU.
     unverified_twin_penalty: float = 0.5
     resolve_contract_tau: float = 0.75
-    # RESOLVE-brain knobs (v2 query lane, app/services/resolve/brain.py). Injected
-    # so no tuned constant lives baked in brain.py. brain_search_top_k: how many
+    # RESOLVE-brain knobs (v2 query lane). Injected so no tuned constant lives
+    # baked into the brain pick. brain_search_top_k: how many
     # candidates the brain's slice search retrieves. brain_search_min_score: score
     # floor below which a candidate is dropped from the slice. brain_max_slice: the
     # narrow twin-aware slice size the brain reasons over (replaces the baked

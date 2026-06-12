@@ -54,7 +54,6 @@ def test_customer_id_same_name_reference_role_low_confidence_is_approved():
         ubiquity=0.27,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="CUSTOMER_ID",
         right_column="CUSTOMER_ID",
     )
@@ -74,7 +73,6 @@ def test_vendor_id_same_name_is_approved():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="VENDOR_ID",
         right_column="VENDOR_ID",
     )
@@ -94,7 +92,6 @@ def test_same_name_guard_normalizes_case_and_whitespace():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column=" customer_id ",
         right_column="CUSTOMER_ID",
     )
@@ -119,7 +116,6 @@ def test_bank_account_id_vs_vendor_id_cross_name_is_candidate():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="BANK_ACCOUNT_ID",
         right_column="VENDOR_ID",
     )
@@ -139,7 +135,6 @@ def test_plan_id_vs_cost_type_id_cross_name_is_candidate():
         ubiquity=0.10,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="PLAN_ID",
         right_column="COST_TYPE_ID",
     )
@@ -160,7 +155,6 @@ def test_created_by_same_name_but_ubiquitous_is_candidate():
         ubiquity=1.0,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="CREATED_BY",
         right_column="CREATED_BY",
     )
@@ -181,7 +175,6 @@ def test_org_id_same_name_but_low_cardinality_is_candidate():
         ubiquity=0.10,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="ORG_ID",
         right_column="ORG_ID",
     )
@@ -202,7 +195,6 @@ def test_same_name_low_overlap_is_candidate():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="CUSTOMER_ID",
         right_column="CUSTOMER_ID",
     )
@@ -224,7 +216,6 @@ def test_cross_name_falls_through_to_risky_single_column_gate():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="INVOICE_DOC_ID",
         right_column="RECEIPT_DOC_ID",
     )
@@ -245,57 +236,11 @@ def test_missing_column_names_cannot_promote():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column=None,
         right_column=None,
     )
     assert status == "candidate"
     assert reason is not None
-
-
-# ─────────────────────────── flag OFF = legacy behavior ─────────────────────────
-
-def test_flag_off_same_name_master_falls_back_to_old_m2m_behavior():
-    # With promotion OFF the tree is byte-identical to legacy: a many_to_many
-    # entity key is a candidate, regardless of same-name + clean values.
-    status, reason = classify_join_approval(
-        role=ENTITY_KEY,
-        relationship_type="many_to_many",
-        value_overlap=0.94,
-        confidence=0.80,
-        cardinality_left=190,
-        cardinality_right=190,
-        ubiquity=0.13,
-        has_companion=False,
-        policy=P,
-        promotion_enabled=False,
-        left_column="VENDOR_ID",
-        right_column="VENDOR_ID",
-    )
-    assert status == "candidate"
-    assert reason is not None
-    assert "many-to-many" in reason
-
-
-def test_flag_off_one_to_many_still_approved():
-    # Flag OFF must not regress the existing happy path: a clean one_to_many
-    # (PK detected) with strong confidence/overlap is still approved.
-    status, reason = classify_join_approval(
-        role=ENTITY_KEY,
-        relationship_type="one_to_many",
-        value_overlap=1.0,
-        confidence=0.85,
-        cardinality_left=500,
-        cardinality_right=500,
-        ubiquity=0.13,
-        has_companion=False,
-        policy=P,
-        promotion_enabled=False,
-        left_column="VENDOR_ID",
-        right_column="VENDOR_ID",
-    )
-    assert status == "approved"
-    assert reason is None
 
 
 def test_ubiquity_ceiling_exists_on_policy():
@@ -329,7 +274,6 @@ def test_po_header_id_clone_same_name_is_candidate():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="PO_HEADER_ID",
         right_column="PO_HEADER_ID",
     )
@@ -351,7 +295,6 @@ def test_customer_id_differing_cardinality_is_not_clone_and_approves():
         ubiquity=0.27,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="CUSTOMER_ID",
         right_column="CUSTOMER_ID",
     )
@@ -373,7 +316,6 @@ def test_vendor_id_target_edge_high_overlap_differing_cardinality_approves():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="VENDOR_ID",
         right_column="VENDOR_ID",
     )
@@ -393,7 +335,6 @@ def test_vendor_id_same_name_differing_cardinality_approves():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="VENDOR_ID",
         right_column="VENDOR_ID",
     )
@@ -413,7 +354,6 @@ def test_high_overlap_below_floor_but_equal_cardinality_is_not_clone():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="VENDOR_ID",
         right_column="VENDOR_ID",
     )
@@ -434,7 +374,6 @@ def test_equal_cardinality_but_overlap_below_floor_is_not_clone():
         ubiquity=0.13,
         has_companion=False,
         policy=P,
-        promotion_enabled=True,
         left_column="VENDOR_ID",
         right_column="VENDOR_ID",
     )
@@ -448,23 +387,3 @@ def test_clone_overlap_floor_exists_on_policy():
     assert 0.99 < P.clone_overlap_floor <= 1.0
 
 
-def test_flag_off_clone_falls_back_to_legacy_no_clone_check():
-    # With promotion OFF, the clone guard must NOT engage — a clone same-name
-    # many_to_many edge is held by the legacy m2m rule (byte-identical legacy).
-    status, reason = classify_join_approval(
-        role=ENTITY_KEY,
-        relationship_type="many_to_many",
-        value_overlap=1.000,
-        confidence=0.85,
-        cardinality_left=50,
-        cardinality_right=50,
-        ubiquity=0.13,
-        has_companion=False,
-        policy=P,
-        promotion_enabled=False,
-        left_column="PO_HEADER_ID",
-        right_column="PO_HEADER_ID",
-    )
-    assert status == "candidate"
-    assert reason is not None
-    assert "many-to-many" in reason

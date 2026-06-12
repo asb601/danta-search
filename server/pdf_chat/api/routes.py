@@ -198,6 +198,7 @@ async def upload_pdf(
         sha256=sha256,
         tenant_id=trusted_tenant,
         user_id=principal.user_id,
+        container_id=container_id,
         connection_string=config.connection_string,
         container_name=config.container_name,
     )

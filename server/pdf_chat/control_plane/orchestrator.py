@@ -129,6 +129,8 @@ async def ingest_document(
     deps: IngestDeps,
     filename: str = "document.pdf",
     content_type: str | None = None,
+    container_id: str | None = None,
+    source_file_id: str | None = None,
 ) -> IngestResult:
     """Run the upload → preflight → manifest → page fan-out pipeline.
 
@@ -183,6 +185,8 @@ async def ingest_document(
                 preflight_json=preflight_json,
                 status=DocStatus.FAILED.value,
                 error_message=reason,
+                container_id=container_id,
+                source_file_id=source_file_id,
             )
             upload_id = _upload_id_of(row)
         if deps.commit is not None:
@@ -207,6 +211,7 @@ async def ingest_document(
         await deps.upload_repo.set_status(
             upload_id, DocStatus.UPLOADED.value, error_message=None,
             preflight_json=preflight_json, page_count=page_count, blob_uri=blob_uri,
+            container_id=container_id, source_file_id=source_file_id,
         )
     else:
         row = await deps.upload_repo.create_upload(
@@ -220,6 +225,8 @@ async def ingest_document(
             acl_snapshot=acl or {},
             preflight_json=preflight_json,
             status=DocStatus.UPLOADED.value,
+            container_id=container_id,
+            source_file_id=source_file_id,
         )
         upload_id = _upload_id_of(row)
 

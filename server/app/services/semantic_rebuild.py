@@ -175,14 +175,14 @@ async def apply_trust_states(container_id: str, db: AsyncSession) -> dict[str, A
     container since the audit is container-scoped). No LLM, no parquet, no
     re-embedding — purely a deterministic re-derivation over stored metadata.
 
-    Flag-gated: a no-op returning {"applied": False} unless SME_MODE_ENABLED and
-    SME_QUARANTINE_ENABLED are both on, so default-off behaviour is unchanged.
+    Flag-gated: a no-op returning {"applied": False} unless SME_QUARANTINE_ENABLED
+    is on, so default-off behaviour is unchanged.
     The result maps every distinct trust state to its file count for the rebuild
     summary; the per-state keys are whatever ``derive_trust_state`` returns —
     nothing about the state vocabulary is hardcoded here.
     """
     settings = get_settings()
-    if not (settings.SME_MODE_ENABLED and settings.SME_QUARANTINE_ENABLED):
+    if not settings.SME_QUARANTINE_ENABLED:
         return {"applied": False}
 
     from app.services.ingestion_audit import run_ingestion_audit
@@ -354,24 +354,23 @@ async def rebuild_container_semantics(
                     counters["file_failures"].append({"file_id": file_id, "stage": "semantic_enrichment", "error": str(exc)[:300]})
                 ingest_logger.warning("semantic_rebuild_file_failed", file_id=file_id, stage="semantic_enrichment", error=str(exc)[:300])
 
-    # SME canonical-master election (container-level). No-op unless the flags
-    # are on. Runs over the freshly-built semantic layer; recomputable on demand
-    # over existing metadata (no re-ingest). ISOLATED: an election failure must
-    # never abort the trust backfill / evaluation that follow (reviewer HIGH).
-    if settings.SME_MODE_ENABLED and settings.SME_MASTER_ELECTION_ENABLED:
-        try:
-            from app.services.semantic_layer_builder import apply_master_election
+    # SME canonical-master election (container-level). Runs unconditionally over
+    # the freshly-built semantic layer; recomputable on demand over existing
+    # metadata (no re-ingest). ISOLATED: an election failure must never abort
+    # the trust backfill / evaluation that follow (reviewer HIGH).
+    try:
+        from app.services.semantic_layer_builder import apply_master_election
 
-            async with async_session() as db:
-                counters["master_election"] = await apply_master_election(container_id, db)
-        except Exception as exc:
-            counters["master_election"] = {"error": str(exc)[:300]}
-            ingest_logger.warning("sme_master_election_failed", container_id=container_id, error=str(exc)[:300])
+        async with async_session() as db:
+            counters["master_election"] = await apply_master_election(container_id, db)
+    except Exception as exc:
+        counters["master_election"] = {"error": str(exc)[:300]}
+        ingest_logger.warning("sme_master_election_failed", container_id=container_id, error=str(exc)[:300])
 
     # SME trust-state backfill (container-level). No-op unless the flags are on.
     # Recomputes per-file trust_state from already-persisted confidence + audit
     # signals over the freshly-rebuilt semantic layer — no re-ingest, no LLM.
-    if settings.SME_MODE_ENABLED and settings.SME_QUARANTINE_ENABLED:
+    if settings.SME_QUARANTINE_ENABLED:
         try:
             async with async_session() as db:
                 counters["trust_states"] = await apply_trust_states(container_id, db)

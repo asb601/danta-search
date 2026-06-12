@@ -68,6 +68,8 @@ _counters: dict[str, int | float] = {
     "ingestion_audit_error_count": 0,   # ingestion audit found error-level findings
     # Planner telemetry
     "planner_fallback_count":      0,   # deterministic planner declined → LangGraph agent path taken
+    # Navigator telemetry
+    "navigator_abstain_count":     0,   # navigator abstained (any reason) → agent fall-through
 }
 
 
@@ -86,6 +88,20 @@ def inc_planner_fallback(amount: int = 1) -> None:
     own graph.py, so the increment site is wired by the lead).
     """
     inc("planner_fallback_count", amount)
+
+
+def inc_navigator_abstain(reason: str, amount: int = 1) -> None:
+    """Record that the navigator abstained (returned None → agent fall-through).
+
+    Increments the total ``navigator_abstain_count`` AND a per-reason counter
+    (``navigator_abstain.<reason>``) so a SYSTEMIC wiring regression (e.g. every
+    step abstaining on the SAME verify reason) is distinguishable in /api/metrics
+    from a healthy spread of honest "no plan fits" abstains. The reason is a
+    data-driven label, not a hardcoded enum — new reason strings self-register.
+    """
+    inc("navigator_abstain_count", amount)
+    if reason:
+        inc(f"navigator_abstain.{reason}", amount)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

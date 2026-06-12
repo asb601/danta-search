@@ -121,3 +121,20 @@ celery_app = _make_celery()
 # worker ...` registers every named task. Without this, the API can publish
 # gchat.ingest_pipeline while the worker has no strategy for that task name.
 import app.worker.ingest_tasks  # noqa: E402,F401
+
+# PDF pipeline tasks share THIS Celery app (they use @shared_task, which binds to
+# the active app on import). Registering them here means the isolated PDF worker
+# (`-Q pdf_ingest`) can actually run them, and the API can publish them. Importing
+# worker_bootstrap also connects its `worker_process_init` signal so the PDF
+# worker installs the per-tenant blob reader / escalation budget store on start.
+# Guarded so a PDF import hiccup can never break the whole Celery app / API boot.
+try:  # noqa: E402
+    import pdf_chat.ingestion.tasks  # noqa: F401
+    import pdf_chat.control_plane.file_manager_bridge  # noqa: F401
+    import pdf_chat.ingestion.worker_bootstrap  # noqa: F401  (connects worker_process_init)
+except Exception as _pdf_exc:  # pragma: no cover - import-time safety net
+    import logging as _logging
+
+    _logging.getLogger(__name__).warning(
+        "pdf_chat task registration skipped: %s", _pdf_exc
+    )

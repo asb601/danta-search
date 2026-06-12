@@ -482,8 +482,7 @@ def build_system_prompt(
         from app.core.config import get_settings as _gs  # noqa: PLC0415
         _s = _gs()
         if (
-            getattr(_s, "SME_MODE_ENABLED", False)
-            and getattr(_s, "SME_JOIN_ENFORCE_ENABLED", False)
+            getattr(_s, "SME_JOIN_ENFORCE_ENABLED", False)
             and _JOIN_LICENSE_ORIGINAL in system_prompt
         ):
             system_prompt = system_prompt.replace(

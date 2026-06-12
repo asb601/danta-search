@@ -310,8 +310,7 @@ def build_sql_tools(
                 try:
                     _settings = get_settings()
                     if (
-                        getattr(_settings, "SME_MODE_ENABLED", False)
-                        and getattr(_settings, "SME_JOIN_ENFORCE_ENABLED", False)
+                        getattr(_settings, "SME_JOIN_ENFORCE_ENABLED", False)
                     ):
                         _approved = getattr(sql_ctx, "approved_joins", None) or []
                         _join_report = check_joins_approved(

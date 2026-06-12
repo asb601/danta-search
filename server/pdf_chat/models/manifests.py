@@ -35,6 +35,15 @@ class UploadManifest(Base):
 
     upload_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     blob_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    # The data container the document blob lives in. The page worker resolves the
+    # per-tenant Azure connection string from ``ContainerConfig`` by this id (the
+    # same per-org credential the CSV pipeline uses) — without it the worker has
+    # no way to read the blob. Nullable for backward-compat with pre-migration rows.
+    container_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    # When the document entered via the file-manager bridge, this is the originating
+    # ``files.id`` so reconciliation can mirror the doc status back onto the File
+    # row (the file-manager "indexed" badge). NULL for native /api/pdf/upload.
+    source_file_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     content_length: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     mime_type: Mapped[str | None] = mapped_column(String(64), nullable=True)

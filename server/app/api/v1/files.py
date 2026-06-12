@@ -390,10 +390,29 @@ async def confirm_upload(
         await db.rollback()
         upload_logger.warning("confirm_upload_audit_failed", file_id=body.file_id, error=str(exc)[:300])
 
-    # Auto-ingest CSV/TXT files — dispatched to a Celery worker process.
-    # Returns immediately; the worker runs preprocess + DuckDB + AI + parquet
-    # in isolation from this event loop.
-    if auto_ingest:
+    # Route by file type. PDFs go to the dedicated PDF pipeline (its own isolated
+    # Celery queue) — the CSV pipeline cannot process them, which is exactly why
+    # they used to land "not_ingested". Everything else auto-ingests as before.
+    # Imports are LATE so files.py stays importable without the pdf_chat module.
+    from pdf_chat.config import is_pdf_ingest_file as _is_pdf_ingest_file
+
+    if _is_pdf_ingest_file(body.filename):
+        from pdf_chat.config import get_pdf_settings as _pdf_settings
+        from pdf_chat.control_plane.file_manager_bridge import (
+            run_pdf_document_ingest as _pdf_bridge_task,
+        )
+
+        db_file.ingest_status = IngestStatus.PENDING.value
+        await db.commit()
+        # Explicit queue → the isolated PDF worker (Option B) consumes it; CSV
+        # workers on their own queue are never disturbed.
+        _pdf_bridge_task.apply_async(
+            args=[body.file_id], queue=_pdf_settings().ingest_queue
+        )
+    elif auto_ingest:
+        # Auto-ingest CSV/TXT/XLSX — dispatched to a Celery worker process.
+        # Returns immediately; the worker runs preprocess + DuckDB + AI + parquet
+        # in isolation from this event loop.
         run_ingest_pipeline.delay(body.file_id)
 
     return _file_to_out(db_file)

@@ -518,7 +518,7 @@ async def _build_agent_context(
     try:
         from app.core.config import get_settings as _gs_master  # noqa: PLC0415
         _s_master = _gs_master()
-        if _s_master.SME_MODE_ENABLED and _s_master.SME_RETRIEVAL_FIRST_ENABLED:
+        if _s_master.SME_RETRIEVAL_FIRST_ENABLED:
             _master_blobs = await _pin_canonical_masters(
                 list(entity_resolution.keys()), full_catalog, resolved_container_id, db
             )
@@ -1112,7 +1112,7 @@ async def _build_agent_context(
     try:
         from app.core.config import get_settings as _gs_fb  # noqa: PLC0415
         _s_fb = _gs_fb()
-        if _s_fb.SME_MODE_ENABLED and _s_fb.SME_CONFIDENCE_ROUTER_ENABLED and confidence.level != "high":
+        if _s_fb.SME_CONFIDENCE_ROUTER_ENABLED and confidence.level != "high":
             metrics.inc_planner_fallback()
     except Exception:
         pass
@@ -1397,7 +1397,7 @@ async def _build_agent_context(
     try:
         from app.core.config import get_settings as _gs_gov  # noqa: PLC0415
         _s_gov = _gs_gov()
-        if _s_gov.SME_MODE_ENABLED and _s_gov.SME_CONFIDENCE_ROUTER_ENABLED:
+        if _s_gov.SME_CONFIDENCE_ROUTER_ENABLED:
             _meta_by_id = {m.file_id: m for m in _meta_list}
             _governance = _build_governance_payload(
                 confidence, _feasibility, sql_ctx, catalog, _meta_by_id
@@ -1424,6 +1424,14 @@ async def _build_agent_context(
         "allowed_file_ids": allowed_file_ids,
         "allowed_blob_paths": allowed_blob_paths,
         "intent_plan": intent_plan,
+        # Real request auth carried forward so the navigator's retriever enforces
+        # domain/permission scope INSIDE the ONE hybrid engine (not just via the
+        # executor's allowlist), and the data's as-of anchor so the planner resolves
+        # relative periods deterministically (mini never computes dates).
+        "user_id": user_id,
+        "is_admin": is_admin,
+        "allowed_domains": allowed_domains,
+        "as_of": _as_of,
         "entity_resolution": entity_resolution,
         "graph_health": graph_health,
         "confidence": confidence,
@@ -1557,100 +1565,6 @@ def _apply_governance_mode(answer: str, governance: dict | None) -> str:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-async def _resolve_contract_payload(query, db, container_id, ctx, initial_state, req_id):
-    """RESOLVE-contract fast path, shared by both query entry points.
-
-    Deterministic question → governed-metric → BOUND contract → canonical SQL →
-    execute (through the SAME logical→physical resolution + engine router the
-    agent's run_sql uses). Returns a run_agent_query-shaped payload dict when it
-    binds and executes; returns None when it does not bind OR on ANY error, so the
-    caller falls through to the agent loop. NEVER raises. Gated by
-    RESOLVE_CONTRACT_ENABLED; with the flag off it returns None immediately.
-    """
-    try:
-        from app.core.config import get_settings  # noqa: PLC0415
-        _flag = get_settings().RESOLVE_CONTRACT_ENABLED
-        # The streaming/admin UI path can arrive with container_id=None (a
-        # platform admin with no org → resolve_chat_scope returns no primary
-        # container, yet retrieval still scopes to the admin's files). Bind
-        # against the container the request actually retrieved over — the SAME
-        # resolved_container_id the rest of the context already trusts.
-        effective_container_id = container_id or ctx.get("resolved_container_id")
-        # Unconditional diagnostic: shows in every trace whether the gate even
-        # opened, so a non-firing seam is never silent again (flag off vs no
-        # bind vs no container). from_ctx=True means the ctx fallback supplied it.
-        chat_logger.info(
-            "resolve_contract_entry",
-            flag=bool(_flag),
-            has_container=bool(effective_container_id),
-            from_ctx=bool(not container_id and ctx.get("resolved_container_id")),
-        )
-        if not (_flag and effective_container_id):
-            return None
-        from app.services.resolve.binder import bind_contract_from_db  # noqa: PLC0415
-        from app.services.resolve.emitter import emit_sql  # noqa: PLC0415
-        contract, _reason = await bind_contract_from_db(db, effective_container_id, query)
-        if contract is None:
-            chat_logger.info("resolve_contract_nobind", reason=_reason)
-            return None
-        from app.agent.tools.sql import _execute as _resolve_execute  # noqa: PLC0415
-        from app.services.logical_sql import canonicalize_logical_sql  # noqa: PLC0415
-        canon = canonicalize_logical_sql(
-            emit_sql(contract),
-            ctx["file_identity_map"],
-            allowed_file_ids=ctx["allowed_file_ids"],
-        )
-        rows, total = await asyncio.to_thread(
-            _resolve_execute,
-            canon.executable_sql,
-            initial_state["connection_string"],
-            ctx["container_name"],
-            20,
-        )
-        rows = rows or []
-        total = total if total is not None else len(rows)
-        # Business-readable prose. The words are DERIVED from the contract, not
-        # hardcoded: the grain key (CUSTOMER_ID → "customers") and the metric name
-        # (open_receivables → "open receivables"). Only the sentence is built here;
-        # data / route / row_count / source are unchanged and shown by the UI.
-        _noun = str(contract.grain).replace("_ID", "").replace("_", " ").strip().lower()
-        _noun = f"{_noun}s" if _noun else "record"
-        _label = str(contract.entity).replace("_", " ").strip().lower()
-        _thr = ((contract.facts or {}).get("having") or {}).get("value")
-        _thr_txt = f" over {_thr:,}" if isinstance(_thr, (int, float)) else ""
-        if rows:
-            _shown = f" (showing the top {len(rows)})" if total > len(rows) else ""
-            answer = f"{total:,} {_noun} have {_label}{_thr_txt}{_shown}."
-        else:
-            answer = f"No {_noun} have {_label}{_thr_txt}."
-        with _stores_lock:
-            _request_stores.pop(req_id, None)
-        trace = ctx["trace"]
-        trace.set_execution_outcome(rows=len(rows), total=total, duration_ms=0.0)
-        trace.emit()
-        chat_logger.info(
-            "resolve_contract_answer",
-            metric=contract.entity,
-            source=contract.source_table,
-            row_count=len(rows),
-            total_rows=total,
-        )
-        return {
-            "answer": answer,
-            "data": rows,
-            "chart": None,
-            "route": "resolve_contract",
-            "row_count": total,
-            "files_used": [contract.source_table],
-            "tool_calls": 0,
-            "retrieved_files": ctx["catalog_len"],
-            "total_files": ctx["total_files"],
-        }
-    except Exception as exc:  # noqa: BLE001 — never raise; caller falls through to agent
-        chat_logger.warning("resolve_contract_seam_error", error=str(exc)[:200])
-        return None
-
-
 async def run_agent_query(
     query: str,
     db: AsyncSession,
@@ -1706,28 +1620,19 @@ async def run_agent_query(
                      container=ctx["container_name"],
                      has_parquet=ctx["parquet_blob_path"] is not None)
 
-    # Brain-resolve seam: flag-gated (BRAIN_RESOLVE_ENABLED, default False), so
-    # with the flag off this block never runs and the path is byte-identical.
-    # getattr() keeps it safe even before the flag is added in config. SHADOW mode
-    # (BRAIN_RESOLVE_SHADOW) computes the answer, logs it, and falls through.
-    from app.core.config import get_settings as _gs_brain  # noqa: PLC0415
-    if getattr(_gs_brain(), "BRAIN_RESOLVE_ENABLED", False):
-        try:
-            from app.services.resolve.coordinator import brain_answer  # noqa: PLC0415
-            _brain = await brain_answer(query, db, container_id, ctx, initial_state, req_id)
-        except Exception:  # noqa: BLE001 — never let the seam break the main path
-            _brain = None
-        if _brain is not None and not getattr(_gs_brain(), "BRAIN_RESOLVE_SHADOW", False):
-            return _brain
-        if _brain is not None:
-            chat_logger.info("brain_resolve_shadow", route=_brain.get("route"),
-                             row_count=_brain.get("row_count"))
-
-    # RESOLVE-contract fast path: a bound deterministic answer, or None → fall
-    # through to the agent loop below. Shared with run_agent_query_stream.
-    _resolved = await _resolve_contract_payload(query, db, container_id, ctx, initial_state, req_id)
-    if _resolved is not None:
-        return _resolved
+    # ── NAVIGATOR (the merged query runtime) — the ONE live resolve path ─────
+    # PLAN→LOOKUP→PROPOSE→VERIFY→RENDER→EXECUTE→PROMOTE→COMPOSE→SYNTHESIZE. It
+    # answers (route="navigator"), asks to clarify (route="navigator_clarify"), or
+    # ABSTAINS (None) → fall through to the existing LangGraph agent loop below
+    # UNCHANGED. This single call REPLACES both legacy resolve seams (the brain
+    # seam and the RESOLVE-contract call) so there are never two live resolve
+    # paths. NEVER raises. The navigator owns its own request-store cleanup on a
+    # success/clarify; on an abstain it leaves the store for the agent.
+    from app.services.navigator import run_navigator  # noqa: PLC0415 — lazy: breaks the agent↔navigator import cycle
+    nav = await run_navigator(query, db, container_id, ctx, initial_state, req_id)
+    if nav is not None:
+        return nav            # navigator answered or asked to clarify
+    # else: fall through to the existing LangGraph agent loop (unchanged)
 
     try:
         final_state = await graph.ainvoke(initial_state)
@@ -1911,33 +1816,20 @@ async def run_agent_query_stream(
     store = ctx["store"]
     trace: OrchestrationTrace = ctx["trace"]
 
-    # Brain-resolve seam: flag-gated (BRAIN_RESOLVE_ENABLED, default False), so
-    # with the flag off this block never runs and the stream is byte-identical.
-    # getattr() keeps it safe even before the flag is added in config. SHADOW mode
-    # (BRAIN_RESOLVE_SHADOW) computes the answer, logs it, and falls through.
-    from app.core.config import get_settings as _gs_brain  # noqa: PLC0415
-    if getattr(_gs_brain(), "BRAIN_RESOLVE_ENABLED", False):
-        try:
-            from app.services.resolve.coordinator import brain_answer  # noqa: PLC0415
-            _brain = await brain_answer(query, db, container_id, ctx, initial_state, req_id)
-        except Exception:  # noqa: BLE001 — never let the seam break the main path
-            _brain = None
-        if _brain is not None and not getattr(_gs_brain(), "BRAIN_RESOLVE_SHADOW", False):
-            yield {"type": "token", "content": _brain["answer"]}
-            yield {"type": "done", "payload": _brain}
-            return
-        if _brain is not None:
-            chat_logger.info("brain_resolve_shadow", route=_brain.get("route"),
-                             row_count=_brain.get("row_count"))
-
-    # RESOLVE-contract fast path: on a bound deterministic answer, stream it (a
-    # token + a "done" payload) and stop; otherwise fall through to the agent loop.
-    # Same shared helper as run_agent_query.
-    _resolved = await _resolve_contract_payload(query, db, container_id, ctx, initial_state, req_id)
-    if _resolved is not None:
-        yield {"type": "token", "content": _resolved["answer"]}
-        yield {"type": "done", "payload": _resolved}
+    # ── NAVIGATOR (the merged query runtime) — the ONE live resolve path ─────
+    # Same single call as the non-streaming path: it answers (route="navigator"),
+    # asks to clarify (route="navigator_clarify"), or ABSTAINS (None) → fall
+    # through to the existing agent loop below UNCHANGED. This REPLACES both legacy
+    # resolve seams (the brain seam + the RESOLVE-contract call) so there are never
+    # two live resolve paths. On an answer/clarify, stream a token + a "done"
+    # payload and stop. NEVER raises; owns its own store cleanup on success/clarify.
+    from app.services.navigator import run_navigator  # noqa: PLC0415 — lazy: breaks the agent↔navigator import cycle
+    nav = await run_navigator(query, db, container_id, ctx, initial_state, req_id)
+    if nav is not None:
+        yield {"type": "token", "content": nav["answer"]}
+        yield {"type": "done", "payload": nav}
         return
+    # else: fall through to the existing LangGraph agent loop (unchanged)
 
     # ── GATE A short-circuit ─────────────────────────────────────────────────
     # When the BA feasibility gate (enforced mode) proves the question cannot be

@@ -29,6 +29,7 @@ __all__ = [
     "UploadManifestRepo",
     "PageManifestRepo",
     "set_default_blob_reader",
+    "set_default_container_blob_reader",
 ]
 
 
@@ -70,6 +71,27 @@ def set_default_blob_reader(reader: "Callable[[str], bytes] | None") -> None:
     """
     global _DEFAULT_BLOB_READER
     _DEFAULT_BLOB_READER = reader
+
+
+# ── Per-CONTAINER blob reader (installed by the worker bootstrap) ─────────────
+#
+# Unlike ``_DEFAULT_BLOB_READER`` (one global Azure connection string), this
+# reader resolves the PER-TENANT connection string from ``ContainerConfig`` by
+# ``container_id`` — the same per-org credential the CSV pipeline uses. This is
+# what makes the page worker able to read a document that lives in a tenant's own
+# storage container (the common production case, where there is NO single global
+# connection string). Signature: ``(blob_uri, container_id) -> bytes`` (sync or
+# async). ``None`` until the worker bootstrap installs it; ``_download`` then
+# falls back to the global reader / local path.
+_DEFAULT_CONTAINER_BLOB_READER: "Callable[[str, str], Any] | None" = None
+
+
+def set_default_container_blob_reader(
+    reader: "Callable[[str, str], Any] | None",
+) -> None:
+    """Install the process-wide per-container blob reader (``(uri, cid) -> bytes``)."""
+    global _DEFAULT_CONTAINER_BLOB_READER
+    _DEFAULT_CONTAINER_BLOB_READER = reader
 
 
 class UploadManifestRepo:
@@ -259,6 +281,10 @@ class PageManifestRepo:
         lookup to the owning tenant (no cross-tenant page read).
         """
         row = await _maybe_await(self._fetch_row(task_id, tenant_id=tenant_id))
+        # Stash the doc's container so the real ``_download`` can resolve the
+        # per-tenant connection string. Set as an attribute (not a call arg) so
+        # the 1-arg ``_download`` fakes the unit tests inject keep working.
+        self._doc_container_id = getattr(row, "container_id", None)
         blob = await _maybe_await(self._download(row.blob_uri))
         rendered = await _maybe_await(
             self._render_page(blob, page_num=row.page_num)
@@ -300,6 +326,7 @@ class PageManifestRepo:
                 PageManifest.upload_id,
                 UploadManifest.blob_uri,
                 UploadManifest.acl_snapshot,
+                UploadManifest.container_id,
             )
             .join(
                 UploadManifest,
@@ -320,22 +347,30 @@ class PageManifestRepo:
             )
         return row
 
-    async def _download(self, blob_uri: str) -> bytes:
+    async def _download(self, blob_uri: str, *, container_id: str | None = None) -> bytes:
         """Download the document blob bytes for ``blob_uri``.
 
         Mirrors the established blob-access path WITHOUT inventing a new auth path:
-          * a local-disk / ``file://`` path is read directly (test + dev), and
-          * an ``az://``/``https://``/``blob://`` uri is fetched via the injected
-            blob reader (per-repo override → process-wide default installed by the
-            worker bootstrap, which closes over a real Azure ``BlobServiceClient``
-            built from the per-org connection string — the same client shape used
-            by ``app/services/parquet_service.py``).
+          * a local-disk / ``file://`` path is read directly (test + dev),
+          * when ``container_id`` is known AND a per-container reader is installed,
+            the bytes are fetched with the PER-TENANT connection string resolved
+            from ``ContainerConfig`` (the production case — documents live in each
+            tenant's own storage container, with no single global credential), and
+          * otherwise an ``az://``/``https://``/``blob://`` uri falls back to the
+            injected per-repo reader → process-wide global reader (one shared
+            Azure connection string), matching ``parquet_service.py``'s client shape.
 
         The container + blob are parsed from the uri (data-driven; never
         hardcoded), matching ``datafusion_client``'s ``az://container/blob`` shape.
         """
         if self._is_local_path(blob_uri):
             return self._read_local(blob_uri)
+        # Prefer the per-tenant reader when we know which container the doc is in.
+        # The container id arrives either as an explicit kwarg (direct callers) or
+        # via the attribute ``load_page_inputs`` stashed from the joined manifest.
+        cid = container_id or getattr(self, "_doc_container_id", None)
+        if cid and _DEFAULT_CONTAINER_BLOB_READER is not None:
+            return await _maybe_await(_DEFAULT_CONTAINER_BLOB_READER(blob_uri, cid))
         reader = self._blob_reader or _DEFAULT_BLOB_READER
         if reader is None:
             from pdf_chat.ingestion.tasks import PermanentError

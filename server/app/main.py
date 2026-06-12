@@ -231,6 +231,7 @@ async def lifespan(app: FastAPI):
     from pdf_chat.migrations.tunables_upgrade import (
         run_migration as _pdf_tunables_migration,
         install_db_lookup as _pdf_install_db_lookup,
+        refresh_overrides as _pdf_refresh_overrides,
     )
     from pdf_chat.migrations.bridge_upgrade import run_migration as _pdf_bridge_migration
     from pdf_chat.migrations.comprehension_upgrade import (
@@ -243,6 +244,7 @@ async def lifespan(app: FastAPI):
     try:
         await _pdf_tunables_migration(engine)
         _pdf_install_db_lookup(async_session)
+        await _pdf_refresh_overrides(async_session)  # warm the override snapshot
     except Exception as exc:
         chat_logger.warning("pdf_tunables_migration_failed", error=str(exc)[:300])
     try:

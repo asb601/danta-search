@@ -227,7 +227,7 @@ if _HAS_CELERY:  # pragma: no cover - requires infra
         bind=True,
         max_retries=_settings.max_retries,
         default_retry_delay=_settings.retry_base_delay,
-        queue="ingestion",
+        queue=_settings.ingest_queue,
         acks_late=True,
     )
     def process_page_task(self, task_id: str, *, tenant_id: str):
@@ -285,7 +285,50 @@ if _HAS_CELERY:  # pragma: no cover - requires infra
                     await session.commit()
                 return result
 
-        return asyncio.run(_run())
+        result = asyncio.run(_run())
+        # Once this page committed its terminal status, reconcile the DOCUMENT if
+        # every page has now settled (uses its own session so the commit above is
+        # visible). Best-effort: a missed finalize is recovered by the next page.
+        try:
+            from pdf_chat.control_plane.finalizer import finalize_if_complete
+
+            upload_id = task_id.split(":page:")[0]
+            asyncio.run(finalize_if_complete(upload_id))
+        except Exception:  # pragma: no cover - never fail the page on reconcile
+            pass
+        return result
+
+    @shared_task(  # type: ignore[misc]
+        bind=True,
+        max_retries=_settings.max_retries,
+        default_retry_delay=_settings.retry_base_delay,
+        queue=_settings.ingest_queue,
+        acks_late=True,
+    )
+    def build_document_graph_task(
+        self, upload_id: str, *, tenant_id: str, container_id: str | None = None
+    ):
+        """Phase-2 + Phase-5 finalization for ONE settled document.
+
+        Enqueued by ``control_plane.finalizer`` the first time a document reaches a
+        terminal indexed status. Both phases are idempotent, so a retry (transient
+        Neo4j/LLM failure) safely re-runs them. Errors retry with the same
+        exponential backoff as page extraction; once retries are exhausted the
+        document is already retrievable as vector-only chunks, so the graph build
+        failing is degraded — never fatal to chat.
+        """
+        import asyncio
+
+        from pdf_chat.control_plane.graph_build import build_document_graph
+
+        try:
+            return asyncio.run(
+                build_document_graph(upload_id, tenant_id, container_id)
+            )
+        except Exception as exc:  # transient infra → retry with backoff
+            raise self.retry(
+                exc=exc, countdown=retry_countdown(self.request.retries)
+            )
 
 else:
 
@@ -295,4 +338,14 @@ else:
             "Celery is required to run process_page_task as a task but is not "
             "installed. Use _run_page_extraction directly for in-process or test "
             "execution."
+        )
+
+    def build_document_graph_task(  # type: ignore[misc]
+        upload_id: str, *, tenant_id: str, container_id: str | None = None
+    ):
+        """Stub when Celery is absent — call ``build_document_graph`` directly."""
+        raise RuntimeError(
+            "Celery is required to run build_document_graph_task as a task but is "
+            "not installed. Use control_plane.graph_build.build_document_graph "
+            "directly for in-process or test execution."
         )

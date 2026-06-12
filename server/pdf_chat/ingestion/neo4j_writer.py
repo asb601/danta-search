@@ -72,13 +72,12 @@ class Neo4jWriter:
     # ---- Cypher (helpers — pure strings, reusable + reviewable) -----------
     @staticmethod
     def _vector_index_cypher(dim: int) -> str:
-        return (
-            "CREATE VECTOR INDEX chunk_vector_index IF NOT EXISTS "
-            "FOR (c:Chunk) ON (c.embedding) "
-            "OPTIONS { indexConfig: { "
-            "`vector.dimensions`: $dim, "
-            "`vector.similarity_function`: 'cosine' } }"
-        )
+        # Delegates to the single-source-of-truth schema registry so the chunk
+        # index name/shape is declared once (shared with the searcher) — never a
+        # hardcoded literal that can drift from the read side.
+        from .neo4j_schema import CHUNK_VECTOR_INDEX, vector_index_cypher
+
+        return vector_index_cypher(CHUNK_VECTOR_INDEX, "Chunk", "embedding")
 
     @staticmethod
     def _write_chunk_cypher() -> str:
@@ -116,6 +115,79 @@ class Neo4jWriter:
         driver = self._require_driver()
         with driver.session(database=self.database) as session:
             session.run(self._vector_index_cypher(dim), dim=dim)
+
+    def ensure_vector_indexes(self, dim: int) -> list[str]:
+        """Create ALL vector indexes the searcher reads (chunk + Phase-2 cards +
+        community reports), idempotently, for ``dim`` dims.
+
+        This is the runtime creation the retrieval legs depend on — without it the
+        searcher's ``db.index.vector.queryNodes`` calls fail on a fresh database.
+        Delegates to the shared :mod:`neo4j_schema` registry so the set of indexes
+        is defined once. Returns the index names ensured.
+        """
+        from .neo4j_schema import ensure_vector_indexes
+
+        return ensure_vector_indexes(
+            self._require_driver(), dim=dim, database=self.database
+        )
+
+    @staticmethod
+    def _read_chunks_cypher() -> str:
+        # Tenant-scoped (Hard rule #3) read of every chunk written for one
+        # document, ordered by reading_order so the sectionizer groups pages in
+        # document order. Returns the exact props written by ``write_chunks`` so a
+        # faithful ``Chunk`` can be rebuilt for Phase-2 KG construction.
+        return (
+            "MATCH (c:Chunk {doc_id: $doc_id, tenant_id: $tenant_id}) "
+            "RETURN c.chunk_id AS chunk_id, c.doc_id AS doc_id, "
+            "       c.page_num AS page_num, c.element_type AS element_type, "
+            "       c.text AS text, c.reading_order AS reading_order, "
+            "       c.tenant_id AS tenant_id, c.acl AS acl, "
+            "       c.embedding AS embedding, c.confidence AS confidence, "
+            "       c.low_confidence AS low_confidence "
+            "ORDER BY c.reading_order"
+        )
+
+    def read_chunks_for_doc(self, doc_id: str, tenant_id: str) -> list[Chunk]:
+        """Read back the chunks written for ``doc_id`` as :class:`Chunk` objects.
+
+        Used by Phase-2 KG construction once a document settles: the page workers
+        already persisted every chunk (text + embedding + reading_order) to Neo4j,
+        so the graph builder re-reads them here rather than re-extracting. ``acl``
+        is stored as a JSON string and re-parsed; ``element_type`` is coerced back
+        to the enum.
+        """
+        import json
+
+        from .ton_schema import ElementType
+
+        driver = self._require_driver()
+        out: list[Chunk] = []
+        with driver.session(database=self.database) as session:
+            for r in session.run(
+                self._read_chunks_cypher(), doc_id=doc_id, tenant_id=tenant_id
+            ):
+                acl_raw = r.get("acl")
+                try:
+                    acl = json.loads(acl_raw) if isinstance(acl_raw, str) else (acl_raw or {})
+                except (TypeError, ValueError):
+                    acl = {}
+                out.append(
+                    Chunk(
+                        chunk_id=r["chunk_id"],
+                        doc_id=r["doc_id"],
+                        page_num=int(r["page_num"]),
+                        element_type=ElementType(r["element_type"]),
+                        text=r.get("text") or "",
+                        reading_order=int(r["reading_order"]),
+                        tenant_id=r["tenant_id"],
+                        acl=acl,
+                        embedding=list(r.get("embedding") or []) or None,
+                        confidence=float(r.get("confidence") or 1.0),
+                        low_confidence=bool(r.get("low_confidence")),
+                    )
+                )
+        return out
 
     def write_chunks(self, chunks: list[Chunk]) -> int:
         """Write chunks and their Document→Page→Chunk relationships.

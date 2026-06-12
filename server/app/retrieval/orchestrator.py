@@ -128,7 +128,7 @@ def _filter_quarantined(
 ) -> list[tuple[FileMetadata, float]]:
     """Drop QUARANTINED files from a fused result list, flag-gated and safe.
 
-    No-op (returns the input unchanged) when the SME quarantine flag is off,
+    No-op (returns the input unchanged) when SME_QUARANTINE_ENABLED is off,
     when Dev-A's trust_state contract is not yet importable, or on any error —
     so default-off behaviour is byte-identical to today.
     """
@@ -136,7 +136,7 @@ def _filter_quarantined(
         from app.core.config import get_settings
 
         settings = get_settings()
-        if not (settings.SME_MODE_ENABLED and settings.SME_QUARANTINE_ENABLED):
+        if not settings.SME_QUARANTINE_ENABLED:
             return fused
 
         # Integration dependency: Dev-A owns trust_state.py + the trust_state

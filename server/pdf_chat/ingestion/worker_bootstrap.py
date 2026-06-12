@@ -25,11 +25,73 @@ import os
 from typing import Callable
 
 from ..config import get_pdf_settings
-from ..control_plane.repositories import set_default_blob_reader
+from ..control_plane.repositories import (
+    set_default_blob_reader,
+    set_default_container_blob_reader,
+)
 from ..model_router import RedisBudgetStore, set_default_budget_store
 from .tasks import _build_redis_client
 
-__all__ = ["worker_bootstrap", "install_budget_store", "install_blob_reader"]
+__all__ = [
+    "worker_bootstrap",
+    "install_budget_store",
+    "install_blob_reader",
+    "install_container_blob_reader",
+    "install_tunable_overrides",
+    "install_neo4j_schema",
+]
+
+
+def install_neo4j_schema() -> bool:
+    """Create the Neo4j vector indexes the retrieval searcher reads. Returns True
+    if creation was attempted against a real driver.
+
+    The searcher queries four HNSW vector indexes (chunk + Phase-2 section/doc
+    cards + community reports) via ``db.index.vector.queryNodes`` — on a fresh
+    database those calls FAIL until the indexes exist. Creating them here, once per
+    worker process at startup (before any page write), guarantees they exist by the
+    time any chunk/graph node is written, with the embedding dimension sourced from
+    config (never hardcoded). Idempotent (``IF NOT EXISTS``); best-effort — when
+    Neo4j is unavailable the writer raises and we degrade rather than crash the
+    worker (the same fail-safe posture as the other installers here).
+    """
+    try:
+        from ..config import get_pdf_settings
+        from .neo4j_writer import Neo4jWriter
+
+        s = get_pdf_settings()
+        writer = Neo4jWriter(
+            s.neo4j_uri, s.neo4j_user, s.neo4j_password, database=s.neo4j_database
+        )
+        try:
+            writer.ensure_vector_indexes(s.embedding_dim)
+        finally:
+            writer.close()
+        return True
+    except Exception:  # pragma: no cover - best-effort; retrieval degrades if absent
+        return False
+
+
+def install_tunable_overrides() -> bool:
+    """Wire the per-container tunable DB-override lookup + warm its snapshot.
+
+    The graph-build task (Phase-2/Phase-5) resolves per-container knobs via
+    ``tunables.get_tunable``; without this the worker would only ever see env /
+    named defaults. ``worker_process_init`` is a sync context with no running
+    event loop, so the initial snapshot load runs via ``asyncio.run``. Best-effort
+    — a missing app DB layer leaves env/default resolution intact.
+    """
+    try:
+        import asyncio
+
+        from app.core.database import async_session  # type: ignore
+        from ..migrations.tunables_upgrade import install_db_lookup, refresh_overrides
+
+        install_db_lookup(async_session)
+        asyncio.run(refresh_overrides(async_session))
+        return True
+    except Exception:  # pragma: no cover - best-effort; env/default still resolves
+        return False
 
 
 def install_budget_store() -> bool:
@@ -108,6 +170,74 @@ def install_blob_reader() -> bool:
     return reader is not None
 
 
+# ── Per-tenant blob reader: resolve the connection string from ContainerConfig ─
+#
+# Cache connection strings by container_id IN-PROCESS — they are static per
+# container, so we avoid a DB round trip per page. Keyed by container_id; the
+# value is the (already-decrypted) connection string or None when unknown.
+_CONN_CACHE: "dict[str, str | None]" = {}
+
+
+def _build_container_blob_reader() -> "Callable[[str, str], object] | None":
+    """Build an async per-container blob reader, or None if infra is absent.
+
+    Reuses the SAME access path as ``parquet_service.py``
+    (``BlobServiceClient.from_connection_string`` → ``get_blob_client`` →
+    ``download_blob().readall()``) but resolves the per-tenant connection string
+    from ``ContainerConfig`` by ``container_id`` (decrypted on ORM load). Returns
+    None when the app models / DB / azure SDK are not importable, so the page
+    worker degrades to the global reader / local path rather than crashing.
+    """
+    try:  # guarded — only wire when both the app DB layer and azure SDK exist
+        from azure.storage.blob import BlobServiceClient  # type: ignore  # noqa: F401
+        from app.core.database import async_session  # type: ignore  # noqa: F401
+        from app.models.container import ContainerConfig  # type: ignore  # noqa: F401
+    except Exception:  # pragma: no cover - exercised only without infra
+        return None
+
+    default_container = get_pdf_settings().blob_container
+
+    async def _resolve_conn(container_id: str) -> "str | None":
+        if container_id in _CONN_CACHE:
+            return _CONN_CACHE[container_id]
+        from app.core.database import async_session  # type: ignore
+        from app.models.container import ContainerConfig  # type: ignore
+
+        async with async_session() as session:
+            cfg = await session.get(ContainerConfig, container_id)
+            conn = getattr(cfg, "connection_string", None) if cfg else None
+        _CONN_CACHE[container_id] = conn
+        return conn
+
+    async def _read(blob_uri: str, container_id: str) -> bytes:
+        from azure.storage.blob import BlobServiceClient  # type: ignore
+
+        conn = await _resolve_conn(container_id)
+        if not conn:
+            from ..ingestion.tasks import PermanentError  # type: ignore
+
+            raise PermanentError(
+                f"no connection string for container_id={container_id!r} "
+                f"(blob_uri={blob_uri!r})"
+            )
+        container, blob = _parse_blob_uri(blob_uri, default_container)
+        client = BlobServiceClient.from_connection_string(conn)
+        bc = client.get_blob_client(container=container, blob=blob)
+        return bc.download_blob().readall()
+
+    return _read
+
+
+def install_container_blob_reader() -> bool:
+    """Install the per-tenant (ContainerConfig-resolved) blob reader.
+
+    Returns True if a real reader was wired (app DB + azure SDK present).
+    """
+    reader = _build_container_blob_reader()
+    set_default_container_blob_reader(reader)
+    return reader is not None
+
+
 def worker_bootstrap(**_kwargs) -> None:
     """Install all process-global ingestion dependencies (idempotent).
 
@@ -116,6 +246,9 @@ def worker_bootstrap(**_kwargs) -> None:
     """
     install_budget_store()
     install_blob_reader()
+    install_container_blob_reader()
+    install_tunable_overrides()
+    install_neo4j_schema()
 
 
 try:  # pragma: no cover - requires Celery infra

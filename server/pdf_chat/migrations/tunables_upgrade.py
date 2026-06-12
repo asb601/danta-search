@@ -38,25 +38,89 @@ async def run_migration(engine: AsyncEngine) -> None:
 upgrade = run_migration
 
 
+# ── Per-container override snapshot ────────────────────────────────────────────
+# ``tunables.get_tunable`` resolves the DB override on a SYNC path that is itself
+# reached from inside running event loops (request handlers) AND from sync Celery
+# workers — so the lookup may neither ``await`` nor ``asyncio.run``. There is also
+# no sync Postgres driver wired (asyncpg only). We therefore keep an in-memory
+# snapshot of the (low-cardinality, operator-set) overrides, refreshed
+# asynchronously, and the sync lookup is a pure dict read that never touches the
+# DB. Overrides take effect within ``_OVERRIDE_TTL_SECONDS`` of an operator edit.
+_overrides: "dict[str, dict[str, str]]" = {}
+_loaded_at: float = 0.0
+_OVERRIDE_TTL_SECONDS = 60.0
+_session_factory: "async_sessionmaker | None" = None
+
+
+async def refresh_overrides(session_factory: "async_sessionmaker | None" = None) -> None:
+    """Reload the override snapshot from ``pdf_graphrag_tunables`` (best-effort).
+
+    Rebuilds ``container_id -> {key: value}``. Safe to call repeatedly; a failed
+    read (table absent on a fresh DB, transient error) leaves the prior snapshot
+    intact so resolution still degrades to env/default.
+    """
+    import time
+
+    from sqlalchemy import select
+
+    global _loaded_at
+    factory = session_factory or _session_factory
+    if factory is None:
+        return
+    try:
+        async with factory() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        PdfGraphRagTunable.container_id,
+                        PdfGraphRagTunable.key,
+                        PdfGraphRagTunable.value,
+                    )
+                )
+            ).all()
+        snapshot: dict[str, dict[str, str]] = {}
+        for container_id, key, value in rows:
+            snapshot.setdefault(str(container_id), {})[str(key)] = value
+        _overrides.clear()
+        _overrides.update(snapshot)
+        _loaded_at = time.monotonic()
+    except Exception:  # pragma: no cover - best-effort; prior snapshot wins
+        return
+
+
+def _maybe_async_refresh() -> None:
+    """Schedule a non-blocking snapshot refresh when the TTL has expired.
+
+    Only fires when a running event loop is available (API process); the sync
+    lookup never blocks. Celery workers refresh at ``worker_process_init``.
+    """
+    import asyncio
+    import time
+
+    if _session_factory is None or (time.monotonic() - _loaded_at) < _OVERRIDE_TTL_SECONDS:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no loop (sync context) → snapshot is refreshed elsewhere
+    loop.create_task(refresh_overrides())
+
+
 def install_db_lookup(session_factory: "async_sessionmaker") -> None:
     """Wire a per-container DB override lookup into ``tunables.get_tunable``.
 
-    The lookup is SYNC (``tunables`` calls it inside a sync resolution path), so
-    we build a synchronous wrapper that opens a short-lived sync read. To keep
-    the pure-import contract of ``tunables`` intact we only install the hook here,
-    at bootstrap — never at module import.
-
-    ``session_factory`` is the app's ``async_sessionmaker``. Because the resolver
-    seam is sync, production should pass a sync-capable lookup; this default
-    implementation degrades to ``None`` (env/default wins) if no sync path is
-    available, so it is always safe.
+    Installs a pure-sync lookup that reads the in-memory override snapshot (see
+    above) and opportunistically schedules an async refresh when stale. The caller
+    should ``await refresh_overrides(session_factory)`` once after this to warm the
+    snapshot at boot. Kept out of module import to preserve ``tunables``' pure
+    import contract.
     """
+    global _session_factory
+    _session_factory = session_factory
 
     def _lookup(container_id: str, key: str) -> "str | None":
-        # The async session cannot be awaited from the sync resolver; the
-        # production bootstrap supplies a sync engine reader. Until then this
-        # returns None so resolution falls through to env/default (never fatal).
-        return None
+        _maybe_async_refresh()
+        return _overrides.get(container_id, {}).get(key)
 
     tunables.set_db_lookup(_lookup)
 

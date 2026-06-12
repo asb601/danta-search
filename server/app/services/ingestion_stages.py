@@ -1069,18 +1069,16 @@ async def complete_ingestion_stage(payload: Payload) -> Payload:
                 )
 
                 # ── SME Phase-1 trust/quarantine: wire the audit → trust_state ──
-                # Flag-gated (SME_MODE_ENABLED AND SME_QUARANTINE_ENABLED). When
-                # off this whole block is skipped, so the runtime is byte-identical
-                # to today (trust_state stays at its 'trusted' server default).
+                # Flag-gated (SME_QUARANTINE_ENABLED). When off this whole block
+                # is skipped, so the runtime is byte-identical to today
+                # (trust_state stays at its 'trusted' server default).
                 # Non-fatal and isolated: a trust failure never undoes the
                 # confidence write above and never fails ingestion.
                 try:
                     from app.core.config import get_settings as _get_settings  # noqa: PLC0415
 
                     _s = _get_settings()
-                    if bool(getattr(_s, "SME_MODE_ENABLED", False)) and bool(
-                        getattr(_s, "SME_QUARANTINE_ENABLED", False)
-                    ):
+                    if bool(getattr(_s, "SME_QUARANTINE_ENABLED", False)):
                         from app.services.ingestion_audit import run_ingestion_audit  # noqa: PLC0415
                         from app.services.trust_state import derive_trust_state, findings_for_file  # noqa: PLC0415
 
