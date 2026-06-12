@@ -80,7 +80,7 @@ class RephraseResult:
     reason: str
 
 
-REPHRASE_PROMPT = """You are an elite enterprise ERP and data-warehouse analyst.
+REPHRASE_PROMPT = """You are an elite enterprise ERP and data-warehouse analyst.{domain_block}
 
 Rewrite the user's question as ONE precise, compact data-retrieval directive that \
 a downstream query engine will execute. Using your ERP schema knowledge, name the \
@@ -113,9 +113,11 @@ async def rephrase_query(
 
     ``conversation_context`` lets the model resolve a dangling reference (a
     pronoun, "the same period") so the rewritten request stands alone.
-    ``domain`` is the active domain tag / selected domain filter from the request;
-    when set, it is appended to the rewrite as ``-- <domain>`` (in code, not by the
-    LLM). ``log_context`` is merged into the structured ``query_rephrased`` event.
+    ``domain`` is the active domain tag / selected domain filter from the request.
+    When set it is (1) injected into the prompt so the model targets that system's
+    tables, and (2) appended to the rewrite as ``-- <domain>`` (in code). The domain
+    value comes from the request, never inferred by the LLM. ``log_context`` is
+    merged into the structured ``query_rephrased`` event.
     """
     settings = get_settings()
     extra = log_context or {}
@@ -136,6 +138,18 @@ async def rephrase_query(
             or settings.AZURE_OPENAI_DEPLOYMENT_MINI
         )
 
+        # Inject the active domain (from the selected domain filter) so the model
+        # targets THAT system's tables — e.g. SAP ECC tables for a SAP dataset
+        # rather than defaulting to Oracle tables on Oracle-sounding phrasing.
+        domain_block = ""
+        if domain and str(domain).strip():
+            d = str(domain).strip()
+            domain_block = (
+                f"\n\nThe target source system / dataset is: {d}. Name ONLY tables "
+                f"and columns that belong to {d}; never use tables from any other "
+                f"ERP system, even if the question's wording resembles one."
+            )
+
         context_block = ""
         if conversation_context.strip():
             context_block = (
@@ -144,7 +158,9 @@ async def rephrase_query(
                 + conversation_context.strip()[:2000]
             )
 
-        prompt = REPHRASE_PROMPT.format(query=original, context_block=context_block)
+        prompt = REPHRASE_PROMPT.format(
+            query=original, context_block=context_block, domain_block=domain_block
+        )
         messages = [{"role": "user", "content": prompt}]
 
         try:

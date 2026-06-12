@@ -109,6 +109,37 @@ def test_runaway_rephrase_falls_back_to_original():
     assert r.reason == "too_long"
 
 
+def _capturing_client(returns: str, sink: list):
+    """Like _fake_client, but records the kwargs passed to create() into `sink`."""
+    msg = SimpleNamespace(content=returns)
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    class _Completions:
+        def create(self, **kwargs):
+            sink.append(kwargs)
+            return resp
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=_Completions())), "dep"
+
+
+def test_domain_is_injected_into_prompt():
+    sink: list = []
+    with patch.object(query_rephraser, "get_settings", lambda: _settings()), \
+         patch.object(query_rephraser, "get_client", lambda: _capturing_client("From X return a", sink)):
+        _run(rephrase_query("open receivables", domain="SAPDATA EBS"))
+    prompt = sink[0]["messages"][0]["content"]
+    assert "SAPDATA EBS" in prompt  # the model is told which system to target
+
+
+def test_domain_absent_is_not_in_prompt():
+    sink: list = []
+    with patch.object(query_rephraser, "get_settings", lambda: _settings()), \
+         patch.object(query_rephraser, "get_client", lambda: _capturing_client("From X return a", sink)):
+        _run(rephrase_query("open receivables", domain=None))
+    prompt = sink[0]["messages"][0]["content"]
+    assert "target source system" not in prompt.lower()
+
+
 def test_domain_is_appended_in_code():
     # The domain comes from the caller (selected domain filter), not the LLM.
     rewrite = "From AP_HOLDS_ALL ..., return invoice_num, filtering release_date IS NULL"

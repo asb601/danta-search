@@ -136,6 +136,17 @@ async def chat_message_stream(
     )
     agent_query = rephrased.text
 
+    # AI-pipeline log: the rephrased prompt AND the domain it was rewritten under.
+    _pipeline_log.info(
+        "query_rephrased",
+        domain=selected_domain,
+        original_query=query[:500],
+        rephrased_prompt=agent_query[:1500],
+        changed=rephrased.changed,
+        reason=rephrased.reason,
+        conversation_id=conv_id,
+    )
+
     # ── Backpressure: reject when LLM slots are exhausted ───────────────────
     # Returns 503 immediately instead of silently queuing for 60s then timing out.
     if _LLM_SEMAPHORE.locked() and _LLM_SEMAPHORE._value == 0:

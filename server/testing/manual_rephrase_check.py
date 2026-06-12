@@ -36,13 +36,13 @@ from app.services.query_rephraser import rephrase_query  # noqa: E402
 
 # Messy / terse ERP-flavoured prompts to exercise the rewrite. Edit freely.
 SAMPLE_PROMPTS = [
-    "List assets using MACRS depreciation placed in service after 2020. -- OEBS  ",
+    "Which customers have open receivables past their baseline date? -- SAP  ",
 ]
 
 # Domain appended to every rewrite (in the real app this comes from the selected
 # folder's domain_tag / domain filter, NOT from the question text). Set to None
 # to test without a domain. Edit to match how your folders are tagged.
-DOMAIN = "OEBS"
+DOMAIN = "SAP"
 
 
 def _print_result(query: str, result) -> None:

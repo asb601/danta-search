@@ -28,6 +28,8 @@ from app.services.query_rephraser import rephrase_query
 
 router = APIRouter()
 
+_pipeline_log = structlog.get_logger("ai_pipeline")
+
 
 @router.post("/message")
 async def chat_message(
@@ -141,6 +143,17 @@ async def chat_message(
         log_context={"user_id": str(user.id), "container_id": effective_container_id},
     )
     agent_query = rephrased.text
+
+    # AI-pipeline log: the rephrased prompt AND the domain it was rewritten under.
+    _pipeline_log.info(
+        "query_rephrased",
+        domain=selected_domain,
+        original_query=query[:500],
+        rephrased_prompt=agent_query[:1500],
+        changed=rephrased.changed,
+        reason=rephrased.reason,
+        conversation_id=conv.id,
+    )
 
     try:
         result = await run_agent_query(
