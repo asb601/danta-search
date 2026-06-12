@@ -11,6 +11,7 @@ Celery tasks so each stage has its own retry/failure boundary:
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Awaitable, Callable, TypeVar
 
 import structlog
@@ -212,7 +213,12 @@ def run_ingest_pipeline(self, file_id: str) -> Payload:
     if prepared.get("status") != PayloadStatus.QUEUED.value:
         return prepared
 
-    ordered_tasks = [_TASK_BY_STAGE[spec.stage] for spec in INGEST_STAGE_SPECS]
+    _fast = os.getenv("INGEST_FAST_MODE", "").lower() in ("1", "true", "yes")
+    _fast_skip = {
+        StageName.ONTOLOGY, StageName.ERP_CLASSIFICATION,
+        StageName.RELATIONSHIPS, StageName.SEMANTIC_LAYER, StageName.SEMANTIC_ENRICHMENT,
+    } if _fast else set()
+    ordered_tasks = [_TASK_BY_STAGE[spec.stage] for spec in INGEST_STAGE_SPECS if spec.stage not in _fast_skip]
     initial_payload: Payload = {
         "file_id": file_id,
         "actor_user_id": prepared.get("actor_user_id"),
