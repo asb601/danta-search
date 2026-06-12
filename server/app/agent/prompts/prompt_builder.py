@@ -8,6 +8,7 @@ import re
 from datetime import date, timedelta
 
 from app.agent.state import MAX_TOOL_CALLS
+from app.agent.prompts.sap_reference import build_sap_glossary
 from app.core.logger import chat_logger
 from app.services.file_identity import FileIdentityMap, logical_name_from_path
 
@@ -784,6 +785,17 @@ def build_system_prompt(
         system_prompt += _OEBS_DOMAIN_KNOWLEDGE
     if not _domain_upper or "SAP" in _domain_upper:
         system_prompt += _SAP_DOMAIN_KNOWLEDGE
+        # Field-level disambiguation (always) + business glossary gated to the
+        # modules present in this query's shortlist. Lets the agent translate the
+        # user's business words into the SAP field/table that actually owns them
+        # (e.g. "value type" → WRTTP → COSP, not VRGAR/KEPH). Module-gated so a
+        # single-domain query does not carry all 557 fields.
+        _shortlist_tables: list[str] = []
+        for e in catalog:
+            blob = e.get("blob_path") or ""
+            identity = file_identities.identity_for_blob(blob) if file_identities else None
+            _shortlist_tables.append(identity.sql_name if identity else blob)
+        system_prompt += build_sap_glossary(_shortlist_tables)
 
     chat_logger.info("system_prompt_size",
                      chars=len(system_prompt),

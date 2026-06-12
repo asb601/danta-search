@@ -50,7 +50,7 @@ class GlobalFilter(BaseModel):
 
 
 class DashboardGenerateRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=4000)
+    prompt: str = Field(..., min_length=1, max_length=8000)
     container_id: str | None = None
     max_widgets: int = Field(default=6, ge=1, le=8)
     append: bool = False
