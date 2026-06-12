@@ -425,7 +425,24 @@ async def _build_agent_context(
         conversation_context_preview=(conversation_context[:300] if conversation_context else ""),
     )
 
-    cached = await load_catalog(db, allowed_domains=None if is_admin else allowed_domains, container_id=container_id)
+    # Resolve the selected folder's domain_tag BEFORE loading the catalog so
+    # we can scope the catalog itself — not just retrieval — to the right domain.
+    # This mirrors the role-based allowed_domains mechanism: admin users normally
+    # see all files, but an explicit domain selection must override that bypass.
+    erp_domain: str | None = None
+    _picker_domains: list[str] | None = None
+    if folder_id:
+        _folder = await db.get(Folder, folder_id)
+        if _folder and _folder.domain_tag:
+            erp_domain = _folder.domain_tag
+            _picker_domains = [_folder.domain_tag]
+
+    # When a domain is explicitly selected via the picker, scope the catalog to
+    # that domain (overrides the admin all-files bypass). Without selection,
+    # fall back to normal RBAC: None for admins, allowed_domains for others.
+    _catalog_domains = _picker_domains or (None if is_admin else allowed_domains)
+
+    cached = await load_catalog(db, allowed_domains=_catalog_domains, container_id=container_id)
     if not cached:
         metrics.inc("catalog_miss_count")
         pipeline_logger.warning("catalog_empty", query=query, reason="no files ingested yet")
@@ -454,14 +471,6 @@ async def _build_agent_context(
     resolved_container_id = container_id or (
         full_catalog[0].get("container_id") if full_catalog else None
     )
-
-    # Resolve the ERP domain from the selected folder so the system prompt
-    # injects only the relevant knowledge block (OEBS vs SAP).
-    erp_domain: str | None = None
-    if folder_id:
-        _folder = await db.get(Folder, folder_id)
-        if _folder:
-            erp_domain = _folder.domain_tag
 
     # ── STEP 2b + 2.4 (PARALLEL): Schema registry + Business intent plan ─────
     # These two are independent: one is an async DB query, the other is an LLM
