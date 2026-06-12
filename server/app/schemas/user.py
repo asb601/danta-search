@@ -13,5 +13,5 @@ class UserOut(BaseModel):
     file_count: int = 0
     allowed_domains: list[str] | None = None
     organization_id: str | None = None
-
+    
     model_config = {"from_attributes": True}

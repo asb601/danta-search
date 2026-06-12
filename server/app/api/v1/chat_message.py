@@ -20,9 +20,11 @@ from app.api.v1.chat_common import (
 from app.core.logger import chat_logger
 from app.dependencies import get_db, get_current_user
 from app.models.conversation import Conversation, Message
+from app.models.folder import Folder
 from app.models.user import User
 from app.services.context_service import build_conversation_context, count_tokens, get_recent_files_used
 from app.services.audit_log import record_audit_event_safe
+from app.services.query_rephraser import rephrase_query
 
 router = APIRouter()
 
@@ -121,9 +123,28 @@ async def chat_message(
     except Exception:
         await db.rollback()
 
+    # ── Query rephrasing (parity with the streaming endpoint) ───────────────
+    # Rewrites the prompt into a precise analytical request before the agent;
+    # the rewritten text replaces the original for the agent only. Domain comes
+    # from the selected folder filter (structured metadata, not the LLM). Falls
+    # back to the original on any error/empty/runaway, and is a no-op when
+    # QUERY_REPHRASE_ENABLED is false. The ORIGINAL query stays in history/audit.
+    selected_domain: str | None = None
+    if body.folder_id:
+        _folder = await db.get(Folder, body.folder_id)
+        selected_domain = getattr(_folder, "domain_tag", None) if _folder else None
+
+    rephrased = await rephrase_query(
+        query,
+        conversation_context=conversation_context,
+        domain=selected_domain,
+        log_context={"user_id": str(user.id), "container_id": effective_container_id},
+    )
+    agent_query = rephrased.text
+
     try:
         result = await run_agent_query(
-            query, db,
+            agent_query, db,
             conversation_context=conversation_context,
             user_id=user.id,
             actor_email=getattr(user, "email", ""),

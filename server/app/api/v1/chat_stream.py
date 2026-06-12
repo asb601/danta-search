@@ -21,9 +21,11 @@ from app.api.v1.chat_common import (
 from app.core.database import async_session
 from app.dependencies import get_db, get_current_user
 from app.models.conversation import Conversation, Message
+from app.models.folder import Folder
 from app.models.user import User
 from app.services.context_service import build_conversation_context, count_tokens, get_recent_files_used
 from app.services.audit_log import record_audit_event_safe
+from app.services.query_rephraser import rephrase_query
 import structlog as _structlog
 
 _pipeline_log = _structlog.get_logger("ai_pipeline")
@@ -111,6 +113,29 @@ async def chat_message_stream(
     )
     user_is_admin = bool(getattr(user, "is_admin", False))
 
+    # ── Query rephrasing: ERP-precise rewrite before it enters the agent ────
+    # Rewrites the prompt into a precise analytical request; the cleaned text fully
+    # replaces the original downstream. The agent still verifies every table/column
+    # before use. Falls back to the original on any error/empty/runaway output, and
+    # is a no-op when QUERY_REPHRASE_ENABLED is false. The ORIGINAL query is still
+    # what we stored as the user message.
+    #
+    # The domain comes from the selected domain filter (the folder picker's
+    # domain_tag) — structured metadata, NOT inferred by the LLM — and is appended
+    # to the rewrite deterministically.
+    selected_domain: str | None = None
+    if body.folder_id:
+        _folder = await db.get(Folder, body.folder_id)
+        selected_domain = getattr(_folder, "domain_tag", None) if _folder else None
+
+    rephrased = await rephrase_query(
+        query,
+        conversation_context=conversation_context,
+        domain=selected_domain,
+        log_context={"user_id": str(user.id), "container_id": effective_container_id},
+    )
+    agent_query = rephrased.text
+
     # ── Backpressure: reject when LLM slots are exhausted ───────────────────
     # Returns 503 immediately instead of silently queuing for 60s then timing out.
     if _LLM_SEMAPHORE.locked() and _LLM_SEMAPHORE._value == 0:
@@ -147,7 +172,7 @@ async def chat_message_stream(
 
             async with asyncio.timeout(180), _LLM_SEMAPHORE:
                 async for evt in run_agent_query_stream(
-                    query, db,
+                    agent_query, db,
                     conversation_context=conversation_context,
                     user_id=user.id,
                     actor_email=getattr(user, "email", ""),

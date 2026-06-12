@@ -27,7 +27,7 @@ from app.core.config import get_settings
 # False -> gpt-4o-mini (AZURE_OPENAI_DEPLOYMENT_MINI)
 # NOTE: this is a test-only override. It does NOT change the global DISABLE_GPT4O
 # cost rule — production chat calls still route to gpt-4o-mini.
-USE_GPT4O = True
+USE_GPT4O = False
 
 # The gpt-4o deployment NAME as it exists in your Azure resource. On docwave-098
 # only "gpt-4o-mini" is deployed, so plain "gpt-4o" returns DeploymentNotFound.

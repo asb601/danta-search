@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     AZURE_OPENAI_DEPLOYMENT: str = ""
     # Mini deployment — gpt-4o-mini, used on follow-up turns 2+
     AZURE_OPENAI_DEPLOYMENT_MINI: str = ""
+    # Dedicated deployment for the query rephraser (services/query_rephraser.py).
+    # Same Azure endpoint + key as everything else — only the deployment differs
+    # (e.g. a gpt-5.4-mini deployment used ONLY for rephrasing). When empty, the
+    # rephraser falls back to AZURE_OPENAI_DEPLOYMENT_MINI.
+    QUERY_REPHRASE_DEPLOYMENT: str = ""
     # Embedding model deployment
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = ""
 
@@ -44,6 +49,19 @@ class Settings(BaseSettings):
     # never used. Embeddings (text-embedding-3-small) are unaffected.
     # Set DISABLE_GPT4O=false in .env to restore gpt-4o.
     DISABLE_GPT4O: bool = True
+
+    # QUERY_REPHRASE_ENABLED — when True, every CHAT query is passed through an
+    #   ERP-analyst rephraser (services/query_rephraser.py) before entering the
+    #   agent: one gpt-4o-mini call rewrites the question into a precise Oracle
+    #   OEBS / SAP ECC analytical request (naming likely tables/join keys/filter
+    #   columns), then that text fully replaces the original downstream. The
+    #   rephraser has NO schema access and never verifies columns itself — the
+    #   schema-aware agent still VERIFIES every table/column before use, so this
+    #   only improves the request, it does not bypass any safety gate. Falls back
+    #   to the original on any error/empty/runaway output. Default ON; set
+    #   QUERY_REPHRASE_ENABLED=false to disable instantly. Dashboards are NOT
+    #   affected (they call the agent with machine-clean intents).
+    QUERY_REPHRASE_ENABLED: bool = True
 
     # .env aliases (AZURE_OPENAI_API_BASE / AZURE_OPENAI_API_KEY)
     AZURE_OPENAI_API_BASE: str = ""
