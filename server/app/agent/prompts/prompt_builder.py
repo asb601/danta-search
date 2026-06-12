@@ -172,7 +172,8 @@ When you finish, write a complete analyst response:
 3. **Table note** — if SQL returned rows, end with the line:
    "↓ See the results table below for the full data."
 4. **Source** — one short line stating which logical table(s) the data came from
-   and the filter applied.
+   and the filter applied. Use only the base table name (e.g. BSIK, VBAK) —
+   never include file extensions, `.cleaned-*` suffixes, hash codes, or paths.
 
 Do NOT include tabular data in the text — no markdown pipe tables, no CSV rows.
 The UI renders the SQL results as an interactive table directly below this
@@ -366,13 +367,34 @@ SHARED JOIN KEYS (referential integrity across modules):
 
 FINANCE / FICO (Modules: FI · CO · AA · TR)
   FI — Financial Accounting:
-    Key tables: BKPF (doc header), BSEG (line items), BSIS/BSAS (open/cleared items),
+    Key tables: BKPF (doc header), BSEG (line items),
+                BSIS/BSAS (G/L open/cleared items), BSIK/BSAK (vendor AP open/cleared items),
                 SKA1 (G/L master), KNA1 (customer master), LFA1 (vendor master),
                 FAGLFLEXT (new G/L totals), FAGLFLEXA (new G/L line items)
     Key fields: BELNR doc number · BUDAT posting date · BLDAT doc date · GJAHR year
                 MONAT period · BLART doc type · SHKZG debit/credit · DMBTR local amt
                 WRBTR doc currency amt · HKONT G/L account · MWSKZ tax code
     Filters: BSTAT=' ' for open items; SHKZG='S' debit / 'H' credit
+
+  ACCOUNTS PAYABLE (AP) — open vendor payables:
+    BSIK = OPEN vendor line items (unpaid invoices, amounts we owe suppliers right now).
+           Use for: total open payables, AP aging, outstanding vendor balances.
+           Key AP fields: DMBTR (local currency owed) · WRBTR (doc currency) · LIFNR (vendor)
+                          BUKRS (company code) · ZFBDT (due/net date) · BLDAT (invoice date)
+                          BLART (RE=vendor invoice, KR=credit memo) · ZTERM (payment terms)
+    BSAK = CLEARED vendor line items (already paid invoices — AP payment history).
+           Key fields: same as BSIK + AUGDT (clearing/payment date) · AUGBL (clearing doc)
+    LFA1 = Vendor master (vendor name, address, country — join to BSIK/BSAK on LIFNR)
+    LFB1 = Vendor company code data (payment terms, reconciliation account — join on LIFNR+BUKRS)
+    REGUH = AP payment proposal header (proposed outgoing payments per run — NOT open items)
+    REGUP = AP payment proposal line items (individual invoice lines per proposal — NOT open items)
+    PAYR  = Payment medium / check register (checks/wires already ISSUED — NOT open payables).
+            RZAWE in PAYR is PAYMENT METHOD (U=US check, C=ACH, T=wire, S=SEPA) — NOT open/closed status.
+            RWBTR in PAYR is the already-issued payment amount, NOT an outstanding balance.
+    AP KPIs:
+      Open payables total = SUM(DMBTR) FROM BSIK WHERE BUKRS = ... (no cleared-by filter needed — rows exist only while open)
+      AP aging = date_diff('day', ZFBDT, CURRENT_DATE) bucketed into 0-30 / 31-60 / 61-90 / 90+ days
+      Overdue items = BSIK WHERE ZFBDT < reference_date
   CO — Controlling:
     Key tables: CSKS (cost center master), CSKA (cost elements), COSS/COSP (order totals),
                 COEP (CO line items), CE1xxxx (COPA — replace xxxx with operating concern)
@@ -455,6 +477,11 @@ FIELD NAME TRANSLATION (user says → SAP field):
   "unrestricted stock"      → LABST    "standard price"       → STPRS
   "moving avg price"        → VERPR    "annual salary"        → ANSAL
   "absence days"            → ABWTG    "wage type"            → LGART
+  "open payables"/"AP"/"accounts payable"/"owe vendors" → BSIK (open vendor items)
+  "paid payables"/"cleared AP"/"vendor payment history" → BSAK (cleared vendor items)
+  "check register"/"payment run"/"payment medium"       → PAYR (already-issued payments, NOT open items)
+  "due date"/"net due"      → ZFBDT    "payment terms"        → ZTERM
+  "vendor name"             → LFA1.NAME1 (join LFA1 on LIFNR)
 """
 
 
