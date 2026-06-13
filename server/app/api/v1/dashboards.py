@@ -22,6 +22,7 @@ from app.core.database import async_session
 from app.core.logger import chat_logger
 from app.dependencies import get_current_user, get_db
 from app.models.dashboard import Dashboard, DashboardFolder
+from app.models.folder import Folder
 from app.models.user import User
 from app.schemas.dashboard import (
     DashboardCreate,
@@ -353,21 +354,36 @@ async def generate_dashboard(
         user, body.container_id or d.container_id, db
     )
 
+    # Domain picker (mirrors chat): an explicit folder selection resolves to a
+    # single domain_tag that scopes BOTH the dashboard catalog and every widget's
+    # retrieval — and OVERRIDES the admin all-domains bypass, exactly like chat's
+    # _build_agent_context. Without a selection, fall back to normal RBAC.
+    picker_domains: list[str] | None = None
+    if body.folder_id:
+        _folder = await db.get(Folder, body.folder_id)
+        if _folder and _folder.domain_tag:
+            picker_domains = [_folder.domain_tag]
+    catalog_domains = picker_domains or allowed_domains
+
     scope = {
         "user_id": user.id,
         "is_admin": bool(getattr(user, "is_admin", False)),
         "allowed_domains": allowed_domains,
         "container_id": effective_container_id,
+        "folder_id": body.folder_id,
         "actor_email": getattr(user, "email", "") or "",
         "actor_role": getattr(user, "role", "") or "",
     }
 
-    chat_logger.info("dashboard_generate_start", dashboard_id=d.id, prompt=prompt[:200])
+    chat_logger.info(
+        "dashboard_generate_start", dashboard_id=d.id, prompt=prompt[:200],
+        folder_id=body.folder_id, domain_scope=picker_domains,
+    )
 
     # 1. Ground decomposition in the scoped data catalog.
     try:
         catalog = await data_catalog.build_catalog(
-            effective_container_id, db, allowed_domains=allowed_domains
+            effective_container_id, db, allowed_domains=catalog_domains
         )
     except Exception as exc:
         chat_logger.warning("dashboard_catalog_error", error=str(exc)[:200])

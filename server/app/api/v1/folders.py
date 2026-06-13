@@ -1,7 +1,7 @@
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -272,6 +272,20 @@ async def delete_folder(
     folder = result.scalar_one_or_none()
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
+
+    # Deleting a folder cascades through every file in it and their
+    # file_relationships rows — which reference files via BOTH file_a_id and
+    # file_b_id. Two large folder deletes in the SAME container running
+    # concurrently lock those shared rows in opposite order and DEADLOCK
+    # (asyncpg DeadlockDetectedError -> 500). Serialize folder deletes per
+    # container with a transaction-scoped advisory lock so a second delete waits
+    # for the first to finish instead of deadlocking. The lock auto-releases on
+    # commit/rollback.
+    if folder.container_id:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+            {"k": f"folder_delete:{folder.container_id}"},
+        )
 
     await db.delete(folder)
     await db.commit()

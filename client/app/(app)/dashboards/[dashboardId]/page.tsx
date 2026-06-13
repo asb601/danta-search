@@ -12,6 +12,7 @@ import { DashboardRenderer } from "@/components/analytics-catalog/DashboardRende
 import { SummaryView } from "@/components/analytics-catalog/SummaryView";
 import { SlicerBar } from "@/components/analytics-catalog/SlicerBar";
 import { ActiveFilter } from "@/components/analytics-catalog/types";
+import { DomainPicker } from "@/app/(app)/chat/_components/DomainPicker";
 import { Button } from "@/components/ui/button";
 import { Badge, BadgeVariant } from "@/components/ui/badge";
 
@@ -30,6 +31,9 @@ export default function DashboardDetailPage({
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<BoardTab>("board");
+  // Domain picker (mirrors chat): scopes generation to one domain folder.
+  // Transient — resets to "All domains" on reload; re-sent on every generate.
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/dashboards/${dashboardId}`);
@@ -61,6 +65,7 @@ export default function DashboardDetailPage({
           prompt: p,
           append: opts?.filters ? false : widgetCount > 0,
           global_filters: opts?.filters ?? [],
+          folder_id: selectedFolderId,
         }),
       });
       if (res.ok) {
@@ -249,6 +254,15 @@ export default function DashboardDetailPage({
               <span>{error}</span>
             </div>
           )}
+
+          {/* Domain scope — restrict generation to a single domain (mirrors chat) */}
+          <div className="mb-2 flex items-center gap-2">
+            <DomainPicker
+              containerId={dashboard.container_id}
+              value={selectedFolderId}
+              onChange={setSelectedFolderId}
+            />
+          </div>
 
           <div className="flex items-end gap-3">
             {/* Input area */}

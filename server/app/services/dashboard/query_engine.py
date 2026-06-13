@@ -349,6 +349,7 @@ async def run_widget(
             is_admin=scope.get("is_admin", False),
             allowed_domains=scope.get("allowed_domains"),
             container_id=scope.get("container_id"),
+            folder_id=scope.get("folder_id"),
             prior_files=None,
             actor_email=scope.get("actor_email", ""),
             actor_role=scope.get("actor_role", ""),

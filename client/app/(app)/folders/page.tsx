@@ -184,20 +184,38 @@ export default function FoldersPage() {
     uploadCtrl?.cancelAll();
   }, [uploadCtrl]);
 
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+
   const handleDelete = useCallback(
     async (id: string) => {
       const item = items?.find((i) => i.id === id);
       if (!item) return;
+      // Guard against re-firing the same delete. A folder delete cascades through
+      // every file inside it and can take a while; without this, a second click
+      // (or a re-render) launches a concurrent delete and the two deadlock in the DB.
+      if (deletingIds.has(id)) return;
+      setDeletingIds((prev) => new Set(prev).add(id));
       const endpoint =
         item.type === "folder" ? "/api/folders/" + id : "/api/files/" + id;
       try {
         await apiFetch(endpoint, { method: "DELETE" });
         await mutate();
       } catch (err) {
+        // Surface the failure instead of silently swallowing it (previously the
+        // folder just reappeared after mutate with no indication anything broke).
         await mutate();
+        alert(
+          `Could not delete "${item.name ?? id}". It may still be processing a large delete — wait a moment and try again, one folder at a time.`
+        );
+      } finally {
+        setDeletingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
       }
     },
-    [items, swrKey, mutate]
+    [items, mutate, deletingIds]
   );
 
   const handleIngest = useCallback(async (id: string) => {

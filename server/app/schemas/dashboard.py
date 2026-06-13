@@ -52,6 +52,10 @@ class GlobalFilter(BaseModel):
 class DashboardGenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
     container_id: str | None = None
+    # Domain picker (mirrors chat): when set, scope generation to this domain
+    # folder — the catalog and every widget's retrieval are restricted to it.
+    # Transient (not persisted on the dashboard); the client re-sends it each run.
+    folder_id: str | None = None
     max_widgets: int = Field(default=6, ge=1, le=8)
     append: bool = False
     global_filters: list[GlobalFilter] = Field(default_factory=list)
