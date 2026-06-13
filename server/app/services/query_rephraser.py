@@ -95,10 +95,14 @@ filter and time window the question implies.
 
 You do NOT have access to this dataset's catalog, so you do NOT know which physical \
 tables or columns actually exist here. Therefore:
-- Describe the data needed in business terms (e.g. "total trial-balance amount, \
-broken down by company code, fiscal year and G/L account, for fiscal year 2025"). \
-Do NOT assert a specific physical table or column name as though it exists — the \
-downstream engine owns the catalog and will locate the real tables itself.
+- Lead with the request in business terms (e.g. "total trial-balance amount, broken \
+down by company code, fiscal year and G/L account, for fiscal year 2025").
+- To HELP the downstream application locate the data, you MAY name the PRIMARY tables \
+that this business domain normally relies on, as candidate hints (e.g. for a trial \
+balance, the general-ledger line-item / balances tables). But do NOT INVENT or \
+fabricate file names, and do NOT assume any table you name actually exists here — \
+they are hints the engine verifies against its real catalog, never literal \
+requirements.
 - If the user pasted SQL or named specific tables/columns, treat those names only as \
 hints to the intent: translate every select/aggregate/filter/group-by clause into \
 the plain business request above, preserving each condition exactly, but do not \

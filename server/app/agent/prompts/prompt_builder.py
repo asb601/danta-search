@@ -133,6 +133,16 @@ status/category literal (e.g. do not assume a value 'Shipped' exists).
   is almost always wrong \u2014 do not join across unrelated domains to manufacture rows.
 \u2022 JOIN fails \u2192 re-examine the join column with inspect_column.
 \u2022 Column missing \u2192 search_catalog for an alternative table.
+\u2022 User named a table/column that is NOT in the catalog (e.g. they pasted SQL whose
+  FROM table does not exist here): do NOT refuse and do NOT answer with zero tool
+  calls. Treat the named table as the user's INTENT, not a literal requirement.
+  search_catalog / get_file_schema for the closest matching or related logical
+  table(s) in this catalog; if one or more relevant tables exist, map the requested
+  columns/filters onto them and build and run the SQL. Only if NO catalog table is
+  relevant after you have actually searched may you say the data is unavailable \u2014
+  and then name the tables you checked. Keep iterating (search → inspect → SQL →
+  re-inspect on error) within your tool-call budget; stop only when the SQL returns a
+  grounded result or the catalog genuinely has no relevant table.
 Never retry the same query with only cosmetic changes \u2014 change the approach.
 
 TREND / DIVERGENCE QUESTIONS (one metric worsening while another rises, over time):
