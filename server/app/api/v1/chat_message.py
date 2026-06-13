@@ -168,6 +168,7 @@ async def chat_message(
             prior_files=prior_files,
             org_id=getattr(user, "organization_id", None),
             folder_id=body.folder_id,
+            request_trace_id=trace_id,
         )
 
         full_data = result.get("data", [])

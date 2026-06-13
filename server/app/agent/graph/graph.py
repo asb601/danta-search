@@ -1581,15 +1581,20 @@ async def run_agent_query(
     actor_role: str = "",
     org_id: str | None = None,
     folder_id: str | None = None,
+    request_trace_id: str | None = None,
 ) -> dict:
     """
     Main entry point for the agentic query pipeline.
     Returns {answer, data, chart, route, row_count, files_used, tool_calls}.
 
     `org_id` (optional): enables per-org AI keys for this request. None => global.
+    `request_trace_id` (optional): caller-supplied trace id. When set, the whole
+    pipeline runs under it instead of minting a new one, so upstream events the
+    caller already logged (e.g. query rephrasing) share ONE trace in the AI-pipeline
+    logs. None => generate a fresh id (standalone callers).
     """
     pipeline_start = time.perf_counter()
-    _req_trace_id = uuid.uuid4().hex
+    _req_trace_id = request_trace_id or uuid.uuid4().hex
     _structlog.contextvars.bind_contextvars(
         trace_id=_req_trace_id,
         actor_user_id=user_id or None,
@@ -1747,9 +1752,14 @@ async def run_agent_query_stream(
     actor_role: str = "",
     org_id: str | None = None,
     folder_id: str | None = None,
+    request_trace_id: str | None = None,
 ) -> AsyncIterator[dict]:
     """
     Streaming variant of run_agent_query.
+
+    `request_trace_id` (optional): caller-supplied trace id. When set, the pipeline
+    runs under it instead of minting a new one, so upstream events the caller already
+    logged (e.g. query rephrasing) share ONE trace in the AI-pipeline logs.
 
     Yields dicts:
       {"type": "thinking", "tool": tool_name}
@@ -1758,7 +1768,7 @@ async def run_agent_query_stream(
       {"type": "done", "payload": {answer, data, chart, ...}}
     """
     pipeline_start = time.perf_counter()
-    _req_trace_id = uuid.uuid4().hex
+    _req_trace_id = request_trace_id or uuid.uuid4().hex
     _structlog.contextvars.bind_contextvars(
         trace_id=_req_trace_id,
         actor_user_id=user_id or None,

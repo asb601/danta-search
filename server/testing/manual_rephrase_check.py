@@ -36,7 +36,7 @@ from app.services.query_rephraser import rephrase_query  # noqa: E402
 
 # Messy / terse ERP-flavoured prompts to exercise the rewrite. Edit freely.
 SAMPLE_PROMPTS = [
-    "Which customers have open receivables past their baseline date? -- SAP  ",
+    "Show journal line items for vendor invoices with document type KR where the invoice amount is greater than 100,000, including the relevant journal line details for each matching item. -- SAPDATA EBS ",
 ]
 
 # Domain appended to every rewrite (in the real app this comes from the selected

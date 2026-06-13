@@ -57,7 +57,13 @@ async def chat_message_stream(
     if len(query) > 8000:
         raise HTTPException(status_code=400, detail="Query too long (max 8000 chars).")
 
-    _ = f"chat-{uuid.uuid4().hex[:12]}"
+    # Bind the trace id BEFORE rephrasing so the rephrase event AND every agent
+    # pipeline step share ONE trace in the AI-pipeline logs (passed into the agent
+    # below as request_trace_id). Without this the rephrase event is logged with a
+    # null trace_id and never appears under this request's pipeline trace.
+    trace_id = f"chat-{uuid.uuid4().hex[:12]}"
+    _structlog.contextvars.clear_contextvars()
+    _structlog.contextvars.bind_contextvars(trace_id=trace_id, pipeline="chat")
 
     if body.conversation_id:
         conv = await db.get(Conversation, body.conversation_id)
@@ -194,6 +200,7 @@ async def chat_message_stream(
                     prior_files=prior_files,
                     org_id=getattr(user, "organization_id", None),
                     folder_id=body.folder_id,
+                    request_trace_id=trace_id,
                 ):
                     evt_type = evt["type"]
 
