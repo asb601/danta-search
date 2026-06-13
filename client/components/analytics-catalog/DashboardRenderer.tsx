@@ -93,7 +93,13 @@ function spanFor(w: DashboardWidget, isHero: boolean): { col: number; row: numbe
   return { col, row };
 }
 
-export function DashboardRenderer({ config }: { config: DashboardConfig | null | undefined }) {
+export function DashboardRenderer({
+  config,
+  onAskQuestion,
+}: {
+  config: DashboardConfig | null | undefined;
+  onAskQuestion?: (question: string) => void;
+}) {
   const widgets = config?.widgets ?? [];
 
   if (!widgets.length) {
@@ -140,7 +146,8 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
 
   return (
     <div className="space-y-3">
-      {config?.warnings && config.warnings.length > 0 && (
+      {((config?.warnings && config.warnings.length > 0) ||
+        (config?.suggested_questions && config.suggested_questions.length > 0)) && (
         <div className="rounded-lg border border-warn-border bg-warn-bg px-3.5 py-2.5">
           <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-warn-fg">
             <svg className="h-3.5 w-3.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -148,11 +155,32 @@ export function DashboardRenderer({ config }: { config: DashboardConfig | null |
             </svg>
             Analyst notes
           </div>
-          <ul className="space-y-0.5 text-xs text-foreground/80">
-            {config.warnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
+          {config?.warnings && config.warnings.length > 0 && (
+            <ul className="space-y-0.5 text-xs text-foreground/80">
+              {config.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          )}
+          {config?.suggested_questions && config.suggested_questions.length > 0 && onAskQuestion && (
+            <div className="mt-2.5">
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-warn-fg/80">
+                Ask to add more
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {config.suggested_questions.map((q, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => onAskQuestion(q)}
+                    className="rounded-full border border-warn-border bg-background/60 px-2.5 py-1 text-[11.5px] text-foreground/80 transition-colors hover:bg-background hover:text-foreground"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

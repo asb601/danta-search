@@ -790,3 +790,68 @@ async def plan_widgets(
     )
     intents = await decompose_prompt(prompt, grounding_text, max_widgets=max_widgets)
     return intents, warnings
+
+
+async def suggest_followup_questions(
+    prompt: str,
+    grounding_text: str,
+    existing_titles: list[str],
+    *,
+    domain: str | None = None,
+    max_n: int = 4,
+) -> list[str]:
+    """Propose a few SHORT follow-up questions the user can ask to ADD more widgets.
+
+    One grounded mini LLM call: given the board topic, the AVAILABLE tables, and the
+    widgets already on the board, suggest up to ``max_n`` natural next questions that
+    are answerable from the SAME catalog and do NOT duplicate an existing widget.
+    These render as clickable chips in the Analyst Notes — each triggers an
+    append-generate. Fail-open: returns [] on any error (never blocks generation).
+    """
+    if not grounding_text or not str(grounding_text).strip():
+        return []
+    max_n = max(1, min(int(max_n or 4), 6))
+    existing = "; ".join(t for t in (existing_titles or []) if t)[:1000]
+    domain_line = f"\nSource system / dataset: {domain}." if domain else ""
+
+    sys = (
+        "You are a senior BI analyst proposing the NEXT questions for a dashboard. "
+        "Given the dashboard topic, the AVAILABLE tables, and the widgets ALREADY on "
+        "the board, propose short, natural follow-up questions the user could ask to "
+        "add MORE useful widgets. Every question MUST be answerable from the available "
+        "tables, must NOT duplicate an existing widget, and must be ONE concrete "
+        "analytical question (a single metric or breakdown). Keep each under 12 words. "
+        "Do NOT name physical tables or columns — phrase in plain business terms."
+    )
+    user = (
+        f'DASHBOARD TOPIC:\n"""{prompt}"""{domain_line}\n\n'
+        f"WIDGETS ALREADY ON THE BOARD:\n{existing or '(none)'}\n\n"
+        f"AVAILABLE TABLES (real columns / coverage):\n{grounding_text[:6000]}\n\n"
+        f'Return JSON: {{"questions": [up to {max_n} short follow-up questions]}}'
+    )
+
+    def _run() -> list[str]:
+        client, _ = get_client()
+        settings = get_settings()
+        resp = client.chat.completions.create(
+            model=settings.AZURE_OPENAI_DEPLOYMENT_MINI,
+            messages=[{"role": "system", "content": sys},
+                      {"role": "user", "content": user}],
+            response_format={"type": "json_object"},
+            temperature=0,
+            max_completion_tokens=400,
+        )
+        parsed = _safe_json(resp.choices[0].message.content or "{}") or {}
+        qs = parsed.get("questions") if isinstance(parsed, dict) else None
+        out: list[str] = []
+        for q in qs or []:
+            s = str(q).strip()
+            if s:
+                out.append(s[:160])
+        return out[:max_n]
+
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception as exc:  # noqa: BLE001 — suggestions are optional, never block
+        chat_logger.warning("dashboard_followups_error", error=str(exc)[:200])
+        return []

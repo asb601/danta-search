@@ -114,6 +114,8 @@ export interface DashboardConfig {
   layout?: string;
   widgets: DashboardWidget[];
   warnings?: string[];
+  // Clickable follow-up questions (Analyst Notes) — each appends more widgets.
+  suggested_questions?: string[];
   // P7 — board-level slicers (conformed dimensions) + the currently-applied filters.
   available_filters?: ConformedFilter[];
   global_filters?: ActiveFilter[];

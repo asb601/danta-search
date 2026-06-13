@@ -258,7 +258,10 @@ export default function DashboardDetailPage({
             {tab === "board" ? (
               <>
                 <SlicerBar config={config} onApply={applyFilters} busy={generating} />
-                <DashboardRenderer config={config} />
+                <DashboardRenderer
+                  config={config}
+                  onAskQuestion={(q) => generate({ promptOverride: q })}
+                />
               </>
             ) : (
               <SummaryView config={config} title={dashboard.title} />
