@@ -354,16 +354,16 @@ async def generate_dashboard(
         user, body.container_id or d.container_id, db
     )
 
-    # Domain picker (mirrors chat): an explicit folder selection resolves to a
-    # single domain_tag that scopes BOTH the dashboard catalog and every widget's
-    # retrieval — and OVERRIDES the admin all-domains bypass, exactly like chat's
-    # _build_agent_context. Without a selection, fall back to normal RBAC.
-    picker_domains: list[str] | None = None
+    # Domain picker (mirrors chat): an explicit folder selection scopes BOTH the
+    # planning catalog and every widget's retrieval to that domain folder via
+    # folder-membership (File.folder_id) — the SAME filter chat's retrieval uses.
+    # NOTE: the catalog's `allowed_domains` arg matches on `business_domain`
+    # (sample-question text), NOT the folder's domain_tag, so it must NOT be used
+    # for the picker — folder_id is the correct, value-proven scope here.
+    _picker_domain: str | None = None
     if body.folder_id:
         _folder = await db.get(Folder, body.folder_id)
-        if _folder and _folder.domain_tag:
-            picker_domains = [_folder.domain_tag]
-    catalog_domains = picker_domains or allowed_domains
+        _picker_domain = getattr(_folder, "domain_tag", None) if _folder else None
 
     scope = {
         "user_id": user.id,
@@ -377,13 +377,15 @@ async def generate_dashboard(
 
     chat_logger.info(
         "dashboard_generate_start", dashboard_id=d.id, prompt=prompt[:200],
-        folder_id=body.folder_id, domain_scope=picker_domains,
+        folder_id=body.folder_id, domain_scope=_picker_domain,
     )
 
-    # 1. Ground decomposition in the scoped data catalog.
+    # 1. Ground decomposition in the scoped data catalog (folder-scoped when a
+    #    domain is picked; RBAC domains still apply for non-admins).
     try:
         catalog = await data_catalog.build_catalog(
-            effective_container_id, db, allowed_domains=catalog_domains
+            effective_container_id, db,
+            allowed_domains=allowed_domains, folder_id=body.folder_id,
         )
     except Exception as exc:
         chat_logger.warning("dashboard_catalog_error", error=str(exc)[:200])

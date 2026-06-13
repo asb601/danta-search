@@ -263,11 +263,16 @@ async def build_catalog(
     *,
     allowed_domains: list[str] | None = None,
     file_ids: list[str] | None = None,
+    folder_id: str | None = None,
     limit: int = 400,
 ) -> list[DataCatalogTable]:
     """
     Build the scoped data catalog view. Single indexed pass over
     File + FileMetadata + FileAnalytics; respects tenancy + domain filtering.
+
+    `folder_id` scopes the catalog to files in one domain folder — the same
+    folder-membership filter retrieval uses (filters.build_base_query). This is
+    how the dashboard domain picker narrows planning to a single domain.
     """
     q = (
         select(File, FileMetadata, FileAnalytics)
@@ -279,6 +284,8 @@ async def build_catalog(
         q = q.where(File.container_id == container_id)
     if file_ids:
         q = q.where(File.id.in_(file_ids))
+    if folder_id:
+        q = q.where(File.folder_id == folder_id)
     q = q.limit(limit)
 
     rows = (await db.execute(q)).all()
