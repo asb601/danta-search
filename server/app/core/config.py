@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     #   affected (they call the agent with machine-clean intents).
     QUERY_REPHRASE_ENABLED: bool = True
 
+    # DASHBOARD_QUERY_REPHRASE_ENABLED — when True, a dashboard's prompt is passed
+    #   through a DASHBOARD-SPECIFIC rephraser (services/query_rephraser.py ::
+    #   rephrase_dashboard_prompt) BEFORE board planning: one LLM call expands the
+    #   board's implicit structure (KPIs + trends + breakdowns + detail tables) into
+    #   an explicit business-language spec so the decomposer plans well-scoped,
+    #   answerable widgets. It names NO tables/columns and the agent still VERIFIES
+    #   every table/column. The ORIGINAL prompt is what gets persisted (history /
+    #   title); only planning uses the rewrite. Falls back to the original on any
+    #   error/empty/runaway. Distinct from QUERY_REPHRASE_ENABLED (chat only).
+    DASHBOARD_QUERY_REPHRASE_ENABLED: bool = True
+
     # .env aliases (AZURE_OPENAI_API_BASE / AZURE_OPENAI_API_KEY)
     AZURE_OPENAI_API_BASE: str = ""
     AZURE_OPENAI_API_KEY: str = ""

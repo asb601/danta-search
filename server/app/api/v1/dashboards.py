@@ -420,12 +420,28 @@ async def generate_dashboard(
         catalog, detailed=True, relationships=relationships
     )
 
+    # 1b. DASHBOARD REPHRASE — expand a vague/short board prompt into an explicit
+    #     spec (KPIs + trends + breakdowns + detail tables) BEFORE planning, so the
+    #     decomposer plans well-scoped widgets. Flag-gated; never raises (falls back
+    #     to the original). The ORIGINAL `prompt` is what we persist below; only the
+    #     planner sees `planning_prompt`.
+    planning_prompt = prompt
+    try:
+        from app.services.query_rephraser import rephrase_dashboard_prompt
+
+        _rp = await rephrase_dashboard_prompt(
+            prompt, domain=_picker_domain, log_context={"dashboard_id": d.id},
+        )
+        planning_prompt = _rp.text or prompt
+    except Exception as exc:  # noqa: BLE001 — rephrase must never block generation
+        chat_logger.warning("dashboard_rephrase_skipped", error=str(exc)[:200])
+
     # 2. BOARD PLANNER — design the dashboard as a metric lattice, dry-run each
     #    widget against catalog metadata (drop/repair the unanswerable ones), and
     #    derive a shared time window — BEFORE any agent call. Never raises; falls
     #    back to single-pass decomposition internally.
     intents, warnings = await board_planner.plan_widgets(
-        prompt, catalog, grounding_text=grounding, max_widgets=body.max_widgets
+        planning_prompt, catalog, grounding_text=grounding, max_widgets=body.max_widgets
     )
 
     if len(intents) >= body.max_widgets:

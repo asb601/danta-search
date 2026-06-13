@@ -53,6 +53,42 @@ def _is_runaway(rephrased: str) -> bool:
     return len(rephrased) > _MAX_REPHRASE_CHARS
 
 
+def _complete_rephrase(prompt_text: str) -> str:
+    """Run ONE rephrase completion and return the raw text.
+
+    Shared by the chat (`rephrase_query`) and dashboard (`rephrase_dashboard_prompt`)
+    rephrasers — both build their own prompt; this owns the deployment resolution
+    (dedicated rephrase deployment, else the standard mini) and the gpt-5-family
+    temperature retry. Synchronous; callers run it via ``asyncio.to_thread``.
+    """
+    settings = get_settings()
+    client, _ = get_client()
+    deployment = (
+        getattr(settings, "QUERY_REPHRASE_DEPLOYMENT", "")
+        or settings.AZURE_OPENAI_DEPLOYMENT_MINI
+    )
+    messages = [{"role": "user", "content": prompt_text}]
+    try:
+        resp = client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            temperature=0,
+            max_completion_tokens=_REPHRASE_MAX_TOKENS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Some newer deployments (gpt-5 family) only allow the default temperature
+        # and 400 on temperature=0 — retry without it.
+        if "temperature" in str(exc).lower():
+            resp = client.chat.completions.create(
+                model=deployment,
+                messages=messages,
+                max_completion_tokens=_REPHRASE_MAX_TOKENS,
+            )
+        else:
+            raise
+    return (resp.choices[0].message.content or "").strip()
+
+
 def _append_domain(text: str, domain: str | None) -> str:
     """Append the active domain marker ``-- <domain>`` to the directive.
 
@@ -148,14 +184,6 @@ async def rephrase_query(
         return RephraseResult(query, False, "empty_input")
 
     def _run() -> str:
-        client, _ = get_client()
-        # Dedicated rephrase deployment (e.g. a gpt-5.4-mini deployment) when set;
-        # otherwise reuse the standard mini deployment. Same endpoint/key client.
-        deployment = (
-            getattr(settings, "QUERY_REPHRASE_DEPLOYMENT", "")
-            or settings.AZURE_OPENAI_DEPLOYMENT_MINI
-        )
-
         # Inject the active domain (from the selected domain filter) so the model
         # targets THAT system's tables — e.g. SAP ECC tables for a SAP dataset
         # rather than defaulting to Oracle tables on Oracle-sounding phrasing.
@@ -179,27 +207,7 @@ async def rephrase_query(
         prompt = REPHRASE_PROMPT.format(
             query=original, context_block=context_block, domain_block=domain_block
         )
-        messages = [{"role": "user", "content": prompt}]
-
-        try:
-            resp = client.chat.completions.create(
-                model=deployment,
-                messages=messages,
-                temperature=0,
-                max_completion_tokens=_REPHRASE_MAX_TOKENS,
-            )
-        except Exception as exc:  # noqa: BLE001
-            # Some newer deployments (gpt-5 family) only allow the default
-            # temperature and 400 on temperature=0 — retry without it.
-            if "temperature" in str(exc).lower():
-                resp = client.chat.completions.create(
-                    model=deployment,
-                    messages=messages,
-                    max_completion_tokens=_REPHRASE_MAX_TOKENS,
-                )
-            else:
-                raise
-        return (resp.choices[0].message.content or "").strip()
+        return _complete_rephrase(prompt)
 
     try:
         rephrased = await asyncio.to_thread(_run)
@@ -233,3 +241,89 @@ async def rephrase_query(
         **extra,
     )
     return RephraseResult(final, changed, reason)
+
+
+# ── Dashboard rephrase ──────────────────────────────────────────────────────
+# A dashboard prompt is a BOARD spec, not one question — so the rewrite goal is
+# different from chat: make the board's IMPLICIT structure explicit (each KPI and
+# its trend, each breakdown/ranking, each detail table) in plain business terms,
+# so the decomposer plans well-scoped, answerable widgets. Like chat it names NO
+# physical tables/columns (no catalog access) and the downstream agent still
+# VERIFIES every table/column. It must PRESERVE every metric/filter the user asked
+# for — only making structure explicit, never dropping or inventing requirements.
+DASHBOARD_REPHRASE_PROMPT = """You are an elite business-intelligence analyst writing a dashboard specification.{domain_block}
+
+Rewrite the user's dashboard request as ONE clear, self-contained dashboard SPEC in plain business language that a downstream planner resolves against its OWN data catalog. Make the implicit structure explicit:
+- Enumerate each KPI / headline metric to compute (and its trend over time, if implied).
+- State each breakdown, ranking (e.g. "top 10 customers by order value"), comparison, and detail table the request implies.
+- For every measure, state the business grain and any filter or time window the request implies.
+
+HARD RULES — the output is fed straight into the planner, so any extra text breaks it:
+- PRESERVE every metric, breakdown, ranking, and filter the user actually asked for. Only make implicit structure explicit — never drop a request and never invent metrics the user did not ask for.
+- You do NOT have this dataset's catalog, so do NOT name physical tables or columns and do NOT invent file names — describe WHAT to compute in business terms and let the planner bind it.
+- Prefer measures expressible against a SINGLE business entity; do NOT assume cross-entity joins exist.
+- Output ONLY the rewritten spec as plain prose. No preamble, no markdown, no headings, no bullets, no notes, no SQL, no data values.
+
+Dashboard request: {prompt}
+Rewrite:"""
+
+
+async def rephrase_dashboard_prompt(
+    prompt: str,
+    *,
+    domain: str | None = None,
+    log_context: dict | None = None,
+) -> RephraseResult:
+    """Expand a dashboard prompt into an explicit board spec (or the original on fallback).
+
+    Dashboard-specific sibling of ``rephrase_query``: instead of one analytical
+    question, it makes a board's implicit structure (KPIs, trends, breakdowns,
+    detail tables) explicit in business terms — WITHOUT naming tables/columns or
+    dropping/adding requirements. Flag-gated by ``DASHBOARD_QUERY_REPHRASE_ENABLED``;
+    never raises (any disabled/empty/error/runaway → the original prompt). The
+    original prompt is what the route persists; only PLANNING uses the rewrite.
+    """
+    settings = get_settings()
+    extra = log_context or {}
+
+    if not getattr(settings, "DASHBOARD_QUERY_REPHRASE_ENABLED", False):
+        return RephraseResult(prompt, False, "disabled")
+
+    original = prompt.strip()
+    if not original:
+        return RephraseResult(prompt, False, "empty_input")
+
+    def _run() -> str:
+        domain_block = ""
+        if domain and str(domain).strip():
+            d = str(domain).strip()
+            domain_block = (
+                f"\n\nThe target source system / dataset is: {d}. Use only metrics "
+                f"and business terminology that belong to {d}."
+            )
+        return _complete_rephrase(
+            DASHBOARD_REPHRASE_PROMPT.format(prompt=original, domain_block=domain_block)
+        )
+
+    try:
+        rephrased = await asyncio.to_thread(_run)
+    except Exception as exc:  # noqa: BLE001 — a rephrase failure must never break generation
+        chat_logger.warning("dashboard_rephrase_error", error=str(exc)[:200], **extra)
+        return RephraseResult(prompt, False, "error")
+
+    if not rephrased:
+        return RephraseResult(prompt, False, "empty")
+    if _is_runaway(rephrased):
+        chat_logger.info(
+            "dashboard_rephrased", original=original[:300], rephrased=rephrased[:300],
+            changed=False, reason="too_long", **extra,
+        )
+        return RephraseResult(prompt, False, "too_long")
+
+    changed = rephrased != original
+    reason = "rephrased" if changed else "unchanged"
+    chat_logger.info(
+        "dashboard_rephrased", original=original[:300], rephrased=rephrased[:500],
+        changed=changed, reason=reason, **extra,
+    )
+    return RephraseResult(rephrased, changed, reason)
