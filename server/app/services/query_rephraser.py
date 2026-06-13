@@ -1,12 +1,17 @@
 """Query Rephrasing Layer — turn a chat prompt into a precise ERP analytical request.
 
 Sits at the chat entry point, BEFORE run_agent_query_stream(). One LLM call
-rewrites the user's question into ONE compact, machine-style retrieval directive
-using Oracle OEBS / SAP ECC domain expertise — naming the source tables, the join
-keys/columns, the output columns (with readable aliases, coded foreign keys
-resolved via lookup tables), and the precise filter conditions. The output is fed
-straight into the query pipeline, so it is directive-only: no preamble, caveats,
-explanation, or markdown (any extra prose would corrupt the downstream request).
+rewrites the user's question into ONE clear, self-contained analytical request in
+plain BUSINESS language — the entities, the measures to compute, the grouping, and
+the precise filters/time windows the question implies. It deliberately does NOT name
+physical tables or columns: the rephraser has no catalog access and cannot know
+which tables actually exist in this dataset, so naming them would only anchor the
+downstream agent on guessed names. Instead it states WHAT is wanted and lets the
+downstream agent (which owns the catalog + column tools) find the real tables. If
+the user pasted SQL, every clause is translated into the business request, each
+condition preserved. The output is fed straight into the query pipeline, so it is
+directive-only: no preamble, caveats, explanation, or markdown (any extra prose
+would corrupt the downstream request).
 
 Bounds (non-negotiable):
   - It REPHRASES, it does not answer. Plain-text in, plain-text out. No tools,
@@ -80,23 +85,32 @@ class RephraseResult:
     reason: str
 
 
-REPHRASE_PROMPT = """You are an elite enterprise ERP and data-warehouse analyst.{domain_block}
+REPHRASE_PROMPT = """You are an expert enterprise data analyst.{domain_block}
 
-Rewrite the user's question as ONE precise, compact data-retrieval directive that \
-a downstream query engine will execute. Using your ERP schema knowledge, name the \
-exact source tables (as many as the question requires), the join keys between them, \
-the output columns with readable aliases (resolving coded foreign keys via the \
-correct lookup tables), and the precise filter conditions the question implies.
+Rewrite the user's question as ONE clear, self-contained analytical request in plain \
+business language that a downstream query engine will resolve against its OWN data \
+catalog. State exactly WHAT is being asked: the business entities involved, the \
+measure(s) or metric(s) to compute, how to group or break them down, and every \
+filter and time window the question implies.
+
+You do NOT have access to this dataset's catalog, so you do NOT know which physical \
+tables or columns actually exist here. Therefore:
+- Describe the data needed in business terms (e.g. "total trial-balance amount, \
+broken down by company code, fiscal year and G/L account, for fiscal year 2025"). \
+Do NOT assert a specific physical table or column name as though it exists — the \
+downstream engine owns the catalog and will locate the real tables itself.
+- If the user pasted SQL or named specific tables/columns, treat those names only as \
+hints to the intent: translate every select/aggregate/filter/group-by clause into \
+the plain business request above, preserving each condition exactly, but do not \
+assume those table or column names exist in this data.
 
 HARD RULES — the output is fed directly into a query pipeline, so ANY extra text \
 breaks it:
-- Output ONLY the rewritten directive. No preamble, no explanation, no notes, no \
+- Output ONLY the rewritten request. No preamble, no explanation, no notes, no \
 caveats, no "verify columns" remarks, no data-quality commentary, no headings, no \
 markdown, no quotes, no bullet points, no trailing notes.
 - Do NOT answer the question or invent data values.
-- Do NOT add or drop any condition the user actually asked for.
-- Use as many tables and joins as the question genuinely requires — do not \
-artificially limit to fewer tables than needed.{context_block}
+- Do NOT add or drop any condition the user actually asked for.{context_block}
 
 Question: {query}
 Rewrite:"""
