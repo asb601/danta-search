@@ -53,7 +53,7 @@ from app.agent.response_helpers import (
     fallback_answer_from_outputs,
     infer_chart,
 )
-from app.agent.state import AgentState
+from app.agent.state import AgentState, MAX_TOOL_CALLS
 from app.agent.tools.catalog import build_catalog_tools
 from app.agent.tools.column import build_column_tool
 from app.agent.tools.definition_lookup import build_definition_lookup_tool, load_schema_registry
@@ -1629,7 +1629,14 @@ async def run_agent_query(
                      has_parquet=ctx["parquet_blob_path"] is not None)
 
     try:
-        final_state = await graph.ainvoke(initial_state)
+        # Each agent iteration is 2 graph super-steps (agent node + tools node), so
+        # the MAX_TOOL_CALLS budget gate needs ~2*MAX_TOOL_CALLS steps to fire and
+        # write the final answer. LangGraph's default recursion_limit is 25, which
+        # trips BEFORE that gate and raises GraphRecursionError. Lift it above the
+        # budget so the graceful "answer now" stop happens instead of a hard crash.
+        final_state = await graph.ainvoke(
+            initial_state, config={"recursion_limit": MAX_TOOL_CALLS * 2 + 10}
+        )
     except Exception as exc:
         chat_logger.exception("agent_error", error=str(exc)[:400])
         trace.set_execution_outcome(rows=0, total=0, duration_ms=0.0, error=str(exc)[:200])
@@ -1887,7 +1894,13 @@ async def run_agent_query_stream(
     pending_chunks: list[str] = []
 
     try:
-        async for event in graph.astream_events(initial_state, version="v2"):
+        # recursion_limit must exceed ~2*MAX_TOOL_CALLS (2 graph steps per agent
+        # iteration) so the MAX_TOOL_CALLS budget gate fires and writes a final
+        # answer; the LangGraph default of 25 trips first and crashes with
+        # GraphRecursionError (seen as agent_stream_error mid-run).
+        async for event in graph.astream_events(
+            initial_state, version="v2", config={"recursion_limit": MAX_TOOL_CALLS * 2 + 10}
+        ):
             kind = event["event"]
 
             if kind == "on_chat_model_stream":

@@ -13,6 +13,8 @@ import { SummaryView } from "@/components/analytics-catalog/SummaryView";
 import { SlicerBar } from "@/components/analytics-catalog/SlicerBar";
 import { ActiveFilter } from "@/components/analytics-catalog/types";
 import { DomainPicker } from "@/app/(app)/chat/_components/DomainPicker";
+import { ContainerPicker } from "@/app/(app)/chat/_components/ContainerPicker";
+import useSWR from "swr";
 import { Button } from "@/components/ui/button";
 import { Badge, BadgeVariant } from "@/components/ui/badge";
 
@@ -31,9 +33,28 @@ export default function DashboardDetailPage({
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<BoardTab>("board");
-  // Domain picker (mirrors chat): scopes generation to one domain folder.
-  // Transient — resets to "All domains" on reload; re-sent on every generate.
+  // Container + domain pickers (mirror chat): the domain picker needs a container
+  // in scope to list its domain folders. Transient — re-sent on every generate.
+  const [selectedContainerId, setSelectedContainerId] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+
+  // Default the container scope so the domain picker can populate without a click:
+  // prefer the dashboard's own container, else the user's sole container.
+  const { data: myContainers } = useSWR<{ id: string; name: string }[]>(
+    "containers-list",
+    async () => {
+      const res = await apiFetch("/api/containers");
+      return res.ok ? res.json() : [];
+    },
+    { revalidateOnFocus: false },
+  );
+  useEffect(() => {
+    if (selectedContainerId) return;
+    const def =
+      dashboard?.container_id ??
+      (myContainers && myContainers.length === 1 ? myContainers[0].id : null);
+    if (def) setSelectedContainerId(def);
+  }, [myContainers, dashboard?.container_id, selectedContainerId]);
 
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/dashboards/${dashboardId}`);
@@ -65,6 +86,7 @@ export default function DashboardDetailPage({
           prompt: p,
           append: opts?.filters ? false : widgetCount > 0,
           global_filters: opts?.filters ?? [],
+          container_id: selectedContainerId,
           folder_id: selectedFolderId,
         }),
       });
@@ -255,10 +277,14 @@ export default function DashboardDetailPage({
             </div>
           )}
 
-          {/* Domain scope — restrict generation to a single domain (mirrors chat) */}
+          {/* Scope — pick a container, then a domain within it (mirrors chat) */}
           <div className="mb-2 flex items-center gap-2">
+            <ContainerPicker
+              value={selectedContainerId}
+              onChange={setSelectedContainerId}
+            />
             <DomainPicker
-              containerId={dashboard.container_id}
+              containerId={selectedContainerId}
               value={selectedFolderId}
               onChange={setSelectedFolderId}
             />
